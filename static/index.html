@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Voice Agent Console — AI-powered voice agent testing interface with Twilio and Groq integration.">
+  <title>Voice Agent Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ============ Header ============ -->
+    <header class="header animate-in">
+      <div class="header__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
+        </svg>
+      </div>
+      <h1 class="header__title">Voice Agent Console <span class="badge badge--live">LIVE</span></h1>
+      <p class="header__subtitle">Streaming Pipeline — Sub-1s Latency (Groq × Twilio)</p>
+    </header>
+
+    <div class="grid">
+
+      <!-- ============ Simulate Call Panel ============ -->
+      <div class="card animate-in" id="simulate-panel">
+        <div class="card__header">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+          </div>
+          <h2 class="card__title">Simulate Call</h2>
+        </div>
+
+        <form id="simulate-form">
+          <div class="form-group">
+            <label class="form-label" for="input-name">Full Name</label>
+            <input class="form-input" type="text" id="input-name" placeholder="John Smith" value="John Smith" autocomplete="name">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-dob">Date of Birth</label>
+            <input class="form-input" type="date" id="input-dob" value="1990-05-15">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-query">Query</label>
+            <textarea class="form-input" id="input-query" rows="3" placeholder="What is my order status?">What is my order status?</textarea>
+          </div>
+
+          <div class="btn-group">
+            <button class="btn btn--primary" type="submit" id="btn-send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+              Send Query
+            </button>
+            <button class="btn btn--secondary" type="button" id="btn-clear">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+              </svg>
+              Clear
+            </button>
+          </div>
+
+          <!-- Microphone section -->
+          <div class="mic-section">
+            <button class="mic-btn" type="button" id="btn-mic" title="Hold to record from microphone">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="22"/>
+              </svg>
+            </button>
+            <div class="mic-label">
+              <strong>Microphone Mode</strong><br>
+              Click to record, click again to stop &amp; process
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <!-- ============ Response Panel ============ -->
+      <div class="card animate-in" id="response-panel">
+        <div class="card__header">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            </svg>
+          </div>
+          <h2 class="card__title">Response</h2>
+          <span class="status-badge status-badge--idle" id="status-badge">
+            <span class="stage__dot"></span>
+            Idle
+          </span>
+        </div>
+
+        <!-- Pipeline Stages -->
+        <div class="stages" id="stages-container">
+          <span class="stage" data-stage="audio_prep">
+            <span class="stage__dot"></span>Audio
+          </span>
+          <span class="stage" data-stage="stt">
+            <span class="stage__dot"></span>STT
+          </span>
+          <span class="stage" data-stage="intent">
+            <span class="stage__dot"></span>Intent
+          </span>
+          <span class="stage" data-stage="db_lookup">
+            <span class="stage__dot"></span>Database
+          </span>
+          <span class="stage" data-stage="llm">
+            <span class="stage__dot"></span>LLM
+          </span>
+          <span class="stage" data-stage="tts">
+            <span class="stage__dot"></span>TTS
+          </span>
+        </div>
+
+        <!-- Result summary -->
+        <div class="result" id="result-section" style="display: none;">
+          <div class="result__row">
+            <span class="result__label">Transcript</span>
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <span class="result__value" id="result-transcript">—</span>
+              <audio controls class="audio-player" id="input-audio-player" style="display: none; height: 32px; width: 100%; max-width: 300px; margin-top: 4px;"></audio>
+            </div>
+          </div>
+          <div class="result__row">
+            <span class="result__label">Intent</span>
+            <span class="result__value result__value--accent" id="result-intent">—</span>
+          </div>
+          <div class="result__row">
+            <span class="result__label">Customer</span>
+            <span class="result__value" id="result-customer">—</span>
+          </div>
+          <div class="result__row">
+            <span class="result__label">Order</span>
+            <span class="result__value" id="result-order">—</span>
+          </div>
+          <div class="result__row">
+            <span class="result__label">Reply</span>
+            <span class="result__value" id="result-reply">—</span>
+          </div>
+        </div>
+
+        <!-- Latency Metrics -->
+        <div class="metrics" id="metrics-container" style="display: none;">
+          <div class="metric">
+            <span class="metric__label">STT Latency</span>
+            <span class="metric__value" id="metric-stt">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">LLM First Token</span>
+            <span class="metric__value" id="metric-llm">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric__label">TTS First Audio</span>
+            <span class="metric__value" id="metric-tts">—</span>
+          </div>
+          <div class="metric metric--total">
+            <span class="metric__label">Total (End-to-End)</span>
+            <span class="metric__value" id="metric-total">—</span>
+          </div>
+        </div>
+
+        <!-- Audio playback (fallback for full audio) -->
+        <div class="audio-section" id="audio-section" style="display: none;">
+          <audio controls class="audio-player" id="audio-player"></audio>
+        </div>
+      </div>
+
+      <!-- ============ Live Log Panel ============ -->
+      <div class="card grid__full animate-in" id="log-panel">
+        <div class="card__header">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="4 17 10 11 4 5"/>
+              <line x1="12" y1="19" x2="20" y2="19"/>
+            </svg>
+          </div>
+          <h2 class="card__title">Pipeline Log</h2>
+        </div>
+        <div class="log" id="log-container">
+          <div class="log__empty">No activity yet. Submit a query or record audio to begin.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ============ Footer ============ -->
+    <footer class="footer">
+      <p class="footer__text">
+        Voice Agent Console &bull; Powered by
+        <a href="https://groq.com" target="_blank" rel="noopener" class="footer__link">Groq</a> &amp;
+        <a href="https://twilio.com" target="_blank" rel="noopener" class="footer__link">Twilio</a>
+      </p>
+    </footer>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
