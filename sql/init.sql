@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS customers (
     full_name       VARCHAR(200) NOT NULL,
     date_of_birth   DATE NOT NULL,
     phone           VARCHAR(20),
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
 );
 
 -- Index for fast identity verification lookups
@@ -27,7 +28,8 @@ CREATE TABLE IF NOT EXISTS orders (
     status              VARCHAR(50) NOT NULL DEFAULT 'Processing',
     estimated_arrival   DATE,
     items_summary       TEXT,
-    created_at          TIMESTAMPTZ DEFAULT NOW()
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at          TIMESTAMPTZ
 );
 
 -- Index for fetching latest orders by customer

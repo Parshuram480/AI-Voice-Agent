@@ -1,26 +1,38 @@
 # Voice Agent 🎙️
 
-An AI-powered voice agent that handles phone calls via **Twilio**, transcribes speech with **Groq Whisper STT**, processes queries through an **LLM (Llama 3.1)** and **PostgreSQL** database, and responds with **Groq TTS** — all with sub-second latency.
+An AI-powered voice agent that handles phone calls via **Twilio**, transcribes speech with **Groq Whisper STT**, routes intent with a deterministic **state machine + session memory**, queries **PostgreSQL** safely, and responds with **Groq TTS** — all with sub-second latency.
 
 ## Architecture
 
 ```
 📞 Caller → Twilio → /voice (TwiML) → WebSocket /audio-stream
+       (or Web UI → WebSocket /ws/mic-stream)
                                              ↓
-                                     Audio Buffer (μ-law → PCM)
+                                     Continuous VAD
+                               (Speech detection & Endpointing)
+                                             ↓
+                                     Audio Buffer (PCM)
                                              ↓
                                      Groq STT (Whisper)
                                              ↓
-                                     Intent Detection
-                                        ↓         ↓
-                                   PostgreSQL    Groq LLM
-                                        ↓         ↓
-                                     Reply Builder
+                           Conversation Service (state machine)
+                         intent router + slot filling + session
+                                             ↓
+                           Verification + Repositories (SQL-safe)
+                                             ↓
+                         Response Builder (deterministic)
+                               (optional LLM rephrase)
                                              ↓
                                      Groq TTS (PlayAI)
                                              ↓
                                      Twilio <Play> → 📞 Caller
+                                     (or Web UI Player)
 ```
+
+**Key Capabilities:**
+- **Continuous Turn-Taking:** The user only starts the microphone once. The system handles continuous listening and automatic turn progression.
+- **Voice Activity Detection (VAD):** Energy-based VAD automatically detects speech start and endpoints based on silence duration.
+- **Barge-in / Interruption:** Users can interrupt the agent while it is speaking, immediately stopping TTS playback and resuming listening.
 
 ## Prerequisites
 
@@ -115,20 +127,37 @@ The console lets you:
 ```
 Voice-Agent/
 ├── app/
-│   ├── __init__.py          # Package init
+│   ├── api/                 # FastAPI route modules
+│   ├── intents/             # Intent router + slot filler
+│   ├── llm/                 # Controlled rephrase helper
+│   ├── logging/             # Structured logging helpers
+│   ├── models/              # Session + response models
+│   ├── observability/       # Latency metrics
+│   ├── repositories/        # SQL-safe repositories
+│   ├── schemas/             # Request schemas
+│   ├── services/            # Conversation + verification + order services
+│   ├── session/             # Session store + manager
+│   ├── state_machine/       # Conversation state machine
 │   ├── main.py              # FastAPI app, routes, WebSocket
 │   ├── config.py            # Settings from .env (python-dotenv)
 │   ├── groq_client.py       # GroqClient: STT, LLM, TTS
 │   ├── database.py          # DatabaseClient: asyncpg + fallback
-│   ├── twilio_handler.py    # TwiML generation, call updates
 │   ├── pipeline.py          # VoicePipeline orchestrator
+│   ├── streaming_pipeline.py# Low-latency streaming pipeline
+│   ├── twilio_handler.py    # TwiML generation, call updates
 │   └── audio_utils.py       # μ-law decode, resample, WAV build
 ├── static/
 │   ├── index.html           # Testing UI
 │   ├── style.css            # Premium dark theme
 │   └── app.js               # UI logic + mic recording
+├── Docs/
+│   ├── architecture.md      # Architecture explanation
+│   ├── diagrams.md          # Sequence + flow diagrams
+│   ├── latency-notes.md     # Latency optimization notes
+│   └── setup.md             # Developer setup guide
 ├── sql/
 │   └── init.sql             # Database schema + sample data
+├── tests/                   # Pytest coverage
 ├── audio_cache/             # Generated TTS files (runtime)
 ├── .env.example             # Environment variable template
 ├── requirements.txt         # Python dependencies
@@ -148,11 +177,28 @@ Voice-Agent/
 
 ## Key Design Decisions
 
-- **Async everywhere**: All I/O is non-blocking (`async`/`await`) for maximum concurrency
-- **Streaming LLM**: Chat completions use `stream=True` to begin generating before the full response is ready
-- **In-memory fallback**: Works without PostgreSQL for quick local testing
-- **Silence detection**: RMS-based end-of-speech detection on μ-law audio chunks
-- **HTTP keep-alive**: Groq SDK and httpx sessions are reused across requests
+- **Continuous Conversational Turn-Taking**: Persistent WebSocket loop allows natural multi-turn conversations without manual interaction.
+- **Voice Activity Detection (VAD)**: Energy-based silence detection for automatic endpointing and turn-taking.
+- **Barge-in Support**: Users can interrupt the agent at any point during playback.
+- **Async everywhere**: All I/O is non-blocking (`async`/`await`) for maximum concurrency.
+- **Deterministic control**: State machine, rule-based intents, and slot filling drive logic.
+- **Controlled LLM usage**: LLM is optional and only rephrases deterministic responses.
+- **In-memory fallback**: Works without PostgreSQL for quick local testing.
+- **Structured logging**: Session-aware logging with latency metrics and turn-by-turn tracing.
+- **HTTP keep-alive**: Groq SDK and httpx sessions are reused across requests.
+
+## Testing
+
+```bash
+pytest
+```
+
+## Docs
+
+- [Docs/architecture.md](Docs/architecture.md)
+- [Docs/diagrams.md](Docs/diagrams.md)
+- [Docs/setup.md](Docs/setup.md)
+- [Docs/latency-notes.md](Docs/latency-notes.md)
 
 ## License
 

@@ -8,7 +8,8 @@
 class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.bufferSize = 4096;
+    // Smaller buffer for faster VAD turn detection.
+    this.bufferSize = 1024;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
   }

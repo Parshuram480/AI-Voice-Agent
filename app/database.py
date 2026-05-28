@@ -7,7 +7,7 @@ so the system can still be tested locally without a database.
 """
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, UTC
 from typing import Optional
 
 from app.config import settings
@@ -28,20 +28,66 @@ except ImportError:
 # In-memory fallback data (mirrors sql/init.sql sample data)
 # =============================================================================
 _FALLBACK_CUSTOMERS = [
-    {"id": 1, "full_name": "John Smith",    "date_of_birth": date(1990, 5, 15), "phone": "+15551234567"},
-    {"id": 2, "full_name": "Jane Doe",      "date_of_birth": date(1985, 11, 20), "phone": "+15559876543"},
-    {"id": 3, "full_name": "Alice Johnson", "date_of_birth": date(1992, 3, 8),  "phone": "+15554567890"},
+    {
+        "id": 1,
+        "full_name": "John Smith",
+        "date_of_birth": date(1990, 5, 15),
+        "phone": "+15551234567",
+        "deleted_at": None,
+    },
+    {
+        "id": 2,
+        "full_name": "Jane Doe",
+        "date_of_birth": date(1985, 11, 20),
+        "phone": "+15559876543",
+        "deleted_at": None,
+    },
+    {
+        "id": 3,
+        "full_name": "Alice Johnson",
+        "date_of_birth": date(1992, 3, 8),
+        "phone": "+15554567890",
+        "deleted_at": None,
+    },
 ]
 
 _FALLBACK_ORDERS = [
-    {"id": 1, "customer_id": 1, "order_number": "ORD-20260501-001", "status": "Shipped",
-     "estimated_arrival": date(2026, 5, 25), "items_summary": "2x Wireless Headphones, 1x USB-C Cable"},
-    {"id": 2, "customer_id": 1, "order_number": "ORD-20260510-002", "status": "Processing",
-     "estimated_arrival": date(2026, 5, 28), "items_summary": "1x Mechanical Keyboard"},
-    {"id": 3, "customer_id": 2, "order_number": "ORD-20260505-003", "status": "Delivered",
-     "estimated_arrival": date(2026, 5, 18), "items_summary": "3x Phone Case, 1x Screen Protector"},
-    {"id": 4, "customer_id": 3, "order_number": "ORD-20260512-004", "status": "In Transit",
-     "estimated_arrival": date(2026, 5, 24), "items_summary": "1x Laptop Stand, 2x Monitor Riser"},
+    {
+        "id": 1,
+        "customer_id": 1,
+        "order_number": "ORD-20260501-001",
+        "status": "Shipped",
+        "estimated_arrival": date(2026, 5, 25),
+        "items_summary": "2x Wireless Headphones, 1x USB-C Cable",
+        "deleted_at": None,
+    },
+    {
+        "id": 2,
+        "customer_id": 1,
+        "order_number": "ORD-20260510-002",
+        "status": "Processing",
+        "estimated_arrival": date(2026, 5, 28),
+        "items_summary": "1x Mechanical Keyboard",
+        "deleted_at": None,
+    },
+    {
+        "id": 3,
+        "customer_id": 2,
+        "order_number": "ORD-20260505-003",
+        "status": "Delivered",
+        "estimated_arrival": date(2026, 5, 18),
+        "items_summary": "3x Phone Case, 1x Screen Protector",
+        "deleted_at": None,
+    },
+    {
+        "id": 4,
+        "customer_id": 3,
+        "order_number": "ORD-20260512-004",
+        "status": "In Transit",
+        "estimated_arrival": date(2026, 5, 24),
+        "items_summary": "1x Laptop Stand, 2x Monitor Riser",
+        "deleted_at": None,
+    },
 ]
 
 
@@ -56,6 +102,10 @@ class DatabaseClient:
     def __init__(self):
         self._pool: Optional[object] = None
         self._use_fallback = False
+
+    @property
+    def use_fallback(self) -> bool:
+        return self._use_fallback
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -111,6 +161,7 @@ class DatabaseClient:
             FROM customers
             WHERE LOWER(full_name) = LOWER($1)
               AND date_of_birth = $2
+                            AND deleted_at IS NULL
             LIMIT 1;
         """
         try:
@@ -132,6 +183,8 @@ class DatabaseClient:
             return None
 
         for c in _FALLBACK_CUSTOMERS:
+            if c.get("deleted_at") is not None:
+                continue
             if c["full_name"].lower() == name.lower() and c["date_of_birth"] == dob_date:
                 return c
         return None
@@ -156,6 +209,7 @@ class DatabaseClient:
             SELECT order_number, status, estimated_arrival, items_summary, created_at
             FROM orders
             WHERE customer_id = $1
+              AND deleted_at IS NULL
             ORDER BY created_at DESC
             LIMIT 1;
         """
@@ -177,7 +231,10 @@ class DatabaseClient:
 
     def _fallback_get_latest_order(self, customer_id: int) -> Optional[dict]:
         """In-memory order lookup — returns the latest order for the given customer."""
-        customer_orders = [o for o in _FALLBACK_ORDERS if o["customer_id"] == customer_id]
+        customer_orders = [
+            o for o in _FALLBACK_ORDERS
+            if o["customer_id"] == customer_id and o.get("deleted_at") is None
+        ]
         if not customer_orders:
             return None
         latest = customer_orders[-1]  # Last one is the most recent
@@ -200,6 +257,7 @@ class DatabaseClient:
             SELECT order_number, status, estimated_arrival, items_summary, created_at
             FROM orders
             WHERE customer_id = $1
+              AND deleted_at IS NULL
             ORDER BY created_at DESC;
         """
         try:
@@ -228,5 +286,52 @@ class DatabaseClient:
                 "items_summary": o.get("items_summary", ""),
             }
             for o in reversed(_FALLBACK_ORDERS)
-            if o["customer_id"] == customer_id
+            if o["customer_id"] == customer_id and o.get("deleted_at") is None
         ]
+
+    # -------------------------------------------------------------------------
+    # Soft Delete
+    # -------------------------------------------------------------------------
+    async def soft_delete_customer(self, customer_id: int) -> bool:
+        if self._use_fallback:
+            for customer in _FALLBACK_CUSTOMERS:
+                if customer["id"] == customer_id and customer.get("deleted_at") is None:
+                    customer["deleted_at"] = datetime.now(UTC)
+                    return True
+            return False
+
+        query = """
+            UPDATE customers
+            SET deleted_at = NOW()
+            WHERE id = $1
+              AND deleted_at IS NULL;
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(query, customer_id)
+            return result.endswith("UPDATE 1")
+        except Exception as e:
+            logger.error(f"DB error in soft_delete_customer: {e}")
+            return False
+
+    async def soft_delete_order(self, order_id: int) -> bool:
+        if self._use_fallback:
+            for order in _FALLBACK_ORDERS:
+                if order["id"] == order_id and order.get("deleted_at") is None:
+                    order["deleted_at"] = datetime.now(UTC)
+                    return True
+            return False
+
+        query = """
+            UPDATE orders
+            SET deleted_at = NOW()
+            WHERE id = $1
+              AND deleted_at IS NULL;
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(query, order_id)
+            return result.endswith("UPDATE 1")
+        except Exception as e:
+            logger.error(f"DB error in soft_delete_order: {e}")
+            return False

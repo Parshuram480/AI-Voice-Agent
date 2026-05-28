@@ -1,12 +1,14 @@
 /**
- * Voice Agent Console — Frontend Logic (Streaming Pipeline)
+ * Voice Agent Console — Continuous Conversation Room
  *
  * Handles:
- *  - Simulate form submission (text → /api/simulate)
- *  - Microphone streaming (AudioWorklet + WebSocket → /ws/mic-stream)
- *  - Progressive STT / LLM updates
- *  - Chunked TTS playback via Web Audio API
- *  - Latency instrumentation display
+ *  - Continuous microphone streaming via AudioWorklet + WebSocket
+ *  - Conversation session lifecycle (start once, auto turn-taking)
+ *  - VAD phase tracking (LISTENING → SPEECH_DETECTED → PROCESSING → SPEAKING)
+ *  - Barge-in: interrupt TTS when user speaks during playback
+ *  - Per-turn STT / LLM / TTS result display
+ *  - Latency instrumentation and debug panel
+ *  - Text simulation fallback
  */
 
 // ==========================================================================
@@ -16,6 +18,8 @@ const form = document.getElementById('simulate-form');
 const btnSend = document.getElementById('btn-send');
 const btnClear = document.getElementById('btn-clear');
 const btnMic = document.getElementById('btn-mic');
+const btnEndSession = document.getElementById('btn-end-session');
+const btnSessionReset = document.getElementById('btn-session-reset');
 
 const inputName = document.getElementById('input-name');
 const inputDob = document.getElementById('input-dob');
@@ -24,9 +28,6 @@ const inputQuery = document.getElementById('input-query');
 const statusBadge = document.getElementById('status-badge');
 const stagesContainer = document.getElementById('stages-container');
 const resultSection = document.getElementById('result-section');
-const audioSection = document.getElementById('audio-section');
-const audioPlayer = document.getElementById('audio-player');
-const waveformCanvas = document.getElementById('waveform-canvas');
 const logContainer = document.getElementById('log-container');
 
 const resultTranscript = document.getElementById('result-transcript');
@@ -42,18 +43,37 @@ const metricLlm = document.getElementById('metric-llm');
 const metricTts = document.getElementById('metric-tts');
 const metricTotal = document.getElementById('metric-total');
 
+// Phase & Debug elements
+const phaseDot = document.getElementById('phase-dot');
+const phaseLabel = document.getElementById('phase-label');
+const micHint = document.getElementById('mic-hint');
+const turnBadge = document.getElementById('turn-badge');
+
+const debugSessionId = document.getElementById('debug-session-id');
+const debugPhase = document.getElementById('debug-phase');
+const debugTurn = document.getElementById('debug-turn');
+const debugVerified = document.getElementById('debug-verified');
+const debugState = document.getElementById('debug-state');
+const debugLatency = document.getElementById('debug-latency');
+
 // ==========================================================================
 // State
 // ==========================================================================
 let isProcessing = false;
-let isRecording = false;
+let isSessionActive = false;
 let ws = null;
 let audioContext = null;
 let micStream = null;
 let micSource = null;
 let micProcessor = null;
-let playbackTime = 0; // for scheduling chunks gaplessly
-let micStopTimestamp = null;
+let playbackTime = 0;
+let currentPhase = 'IDLE';
+let turnCount = 0;
+let sessionId = localStorage.getItem('voice_session_id');
+
+// TTS playback queue for barge-in support
+let activeSources = [];
+let isSpeaking = false;
 
 // ==========================================================================
 // Logging
@@ -64,9 +84,12 @@ const LOG_TAGS = {
   tts: 'TTS',
   db_lookup: 'DB',
   intent: 'SYS',
+  conversation: 'SYS',
   audio_prep: 'SYS',
   error: 'ERR',
   system: 'SYS',
+  vad: 'VAD',
+  phase: 'PHASE',
 };
 
 const LOG_TAG_CLASS = {
@@ -76,9 +99,12 @@ const LOG_TAG_CLASS = {
   db_lookup: 'log__tag--db',
   db: 'log__tag--db',
   intent: 'log__tag--sys',
+  conversation: 'log__tag--sys',
   audio_prep: 'log__tag--sys',
   error: 'log__tag--err',
   system: 'log__tag--sys',
+  vad: 'log__tag--vad',
+  phase: 'log__tag--phase',
 };
 
 function clearLog() {
@@ -113,6 +139,71 @@ function escapeHtml(str) {
 }
 
 // ==========================================================================
+// Phase Management
+// ==========================================================================
+function setPhase(phase) {
+  currentPhase = phase;
+
+  // Update phase indicator
+  phaseDot.className = 'phase-dot';
+  switch (phase) {
+    case 'LISTENING':
+      phaseDot.classList.add('phase-dot--listening');
+      phaseLabel.textContent = '● Listening…';
+      micHint.textContent = 'Speak now — silence will finalize your turn';
+      btnMic.className = 'mic-room__btn active';
+      break;
+    case 'SPEECH_DETECTED':
+      phaseDot.classList.add('phase-dot--speech');
+      phaseLabel.textContent = '● Speech detected';
+      micHint.textContent = 'Speaking… pause to send';
+      btnMic.className = 'mic-room__btn active';
+      break;
+    case 'ENDPOINTING':
+      phaseDot.classList.add('phase-dot--processing');
+      phaseLabel.textContent = '● Finalizing utterance…';
+      micHint.textContent = 'Detecting end of speech…';
+      btnMic.className = 'mic-room__btn processing';
+      break;
+    case 'PROCESSING':
+      phaseDot.classList.add('phase-dot--processing');
+      phaseLabel.textContent = '● Processing…';
+      micHint.textContent = 'Transcribing and generating response…';
+      btnMic.className = 'mic-room__btn processing';
+      break;
+    case 'SPEAKING':
+      phaseDot.classList.add('phase-dot--speaking');
+      phaseLabel.textContent = '● Agent speaking…';
+      micHint.textContent = 'Interrupt by speaking to barge in';
+      isSpeaking = true;
+      btnMic.className = 'mic-room__btn speaking';
+      break;
+    case 'INTERRUPTED':
+      phaseDot.classList.add('phase-dot--speech');
+      phaseLabel.textContent = '● Interrupted — listening…';
+      micHint.textContent = 'Agent stopped — listening to you';
+      btnMic.className = 'mic-room__btn active';
+      break;
+    case 'ENDED':
+      phaseDot.classList.add('phase-dot--ended');
+      phaseLabel.textContent = '○ Session ended';
+      micHint.textContent = 'Click mic to start a new conversation';
+      btnMic.className = 'mic-room__btn';
+      isSpeaking = false;
+      break;
+    default:
+      phaseLabel.textContent = 'Ready to start';
+      micHint.textContent = 'Click to start conversation';
+      btnMic.className = 'mic-room__btn';
+  }
+
+  // Update debug panel
+  debugPhase.textContent = phase;
+
+  addLog('phase', phase);
+}
+
+// ==========================================================================
 // Status & Stages
 // ==========================================================================
 function setStatus(status, label) {
@@ -133,12 +224,6 @@ function updateStage(stageName, status) {
   }
 }
 
-function animateStages(stages) {
-  resetStages();
-  if (!stages || !stages.length) return;
-  stages.forEach(s => updateStage(s.stage, s.status));
-}
-
 // ==========================================================================
 // Results & Metrics
 // ==========================================================================
@@ -150,46 +235,79 @@ function resetResults() {
   resultReply.textContent = '—';
   inputAudioPlayer.style.display = 'none';
   if (metricsContainer) metricsContainer.style.display = 'none';
-  resultSection.style.display = 'block';
 }
 
 function updateMetrics(timings) {
   if (!metricsContainer) return;
   metricsContainer.style.display = 'flex';
-  
-  if (timings.stt_early_end) {
-    metricStt.textContent = `${(timings.stt_early_end * 1000).toFixed(0)} ms`;
-  } else if (timings.stt_final_end) {
-    metricStt.textContent = `${(timings.stt_final_end * 1000).toFixed(0)} ms`;
+
+  if (timings.stt_duration) {
+    metricStt.textContent = `${(timings.stt_duration * 1000).toFixed(0)} ms`;
+  } else if (timings.stt_end) {
+    metricStt.textContent = `${(timings.stt_end * 1000).toFixed(0)} ms`;
   }
-  
+
   if (timings.llm_first_token) {
     metricLlm.textContent = `${(timings.llm_first_token * 1000).toFixed(0)} ms`;
+  } else if (timings.conversation_duration) {
+    metricLlm.textContent = `${(timings.conversation_duration * 1000).toFixed(0)} ms`;
   }
-  
+
   if (timings.tts_first_audio) {
     metricTts.textContent = `${(timings.tts_first_audio * 1000).toFixed(0)} ms`;
   }
-  
+
   if (timings.total) {
     const totalMs = (timings.total * 1000).toFixed(0);
     metricTotal.textContent = `${totalMs} ms`;
-    addLog('system', `Latency (total end-to-end): ${totalMs} ms`);
+    debugLatency.textContent = `${totalMs} ms`;
+    addLog('system', `Turn latency (end-to-end): ${totalMs} ms`);
   }
 }
 
 // ==========================================================================
-// Streaming Microphone Flow (WebSocket)
+// Barge-In: Stop all TTS playback
+// ==========================================================================
+function stopAllPlayback() {
+  activeSources.forEach(src => {
+    try { src.stop(); } catch (e) { /* already stopped */ }
+  });
+  activeSources = [];
+  playbackTime = 0;
+  isSpeaking = false;
+
+  // Notify backend
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'barge_in' }));
+  }
+}
+
+// ==========================================================================
+// Continuous Conversation Session
 // ==========================================================================
 btnMic.addEventListener('click', async () => {
-  if (isRecording) {
-    stopRecording();
-  } else {
-    await startRecording();
+  if (isSessionActive) {
+    // If currently speaking, trigger barge-in
+    if (isSpeaking) {
+      stopAllPlayback();
+      addLog('system', 'Barge-in: stopped agent playback');
+      return;
+    }
+    // Otherwise, don't do anything — session is continuous
+    return;
   }
+  await startSession();
 });
 
-async function startRecording() {
+btnEndSession.addEventListener('click', () => {
+  endSession();
+});
+
+btnSessionReset.addEventListener('click', () => {
+  resetSession();
+});
+
+async function startSession() {
   try {
     // Setup AudioContext & AudioWorklet
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -204,111 +322,220 @@ async function startRecording() {
 
     // Setup WebSocket
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${wsProto}//${location.host}/ws/mic-stream`);
-    
+    if (!sessionId) {
+      sessionId = `mic-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(16).slice(2, 10)}`;
+      localStorage.setItem('voice_session_id', sessionId);
+    }
+    const wsUrl = `${wsProto}//${location.host}/ws/mic-stream?session_id=${encodeURIComponent(sessionId)}`;
+    ws = new WebSocket(wsUrl);
+
     ws.onopen = () => {
-      addLog('system', 'Streaming WebSocket connected. Speak now...');
-      
-      // Send audio frames from Worklet to WS
+      addLog('system', 'Conversation session started. Speak naturally…');
+
+      // Stream audio continuously
       micProcessor.port.onmessage = (event) => {
         if (ws && ws.readyState === WebSocket.OPEN && event.data.pcm) {
-          ws.send(event.data.pcm); // Send raw binary PCM
+          ws.send(event.data.pcm);
         }
       };
       micSource.connect(micProcessor);
     };
 
     ws.onmessage = handleWebSocketMessage;
-    
+
     ws.onerror = (e) => {
       addLog('error', 'WebSocket error');
-      stopRecording();
+      endSession();
     };
-    
+
     ws.onclose = () => {
       addLog('system', 'WebSocket closed');
+      if (isSessionActive) {
+        isSessionActive = false;
+        setPhase('ENDED');
+        setStatus('idle', 'Session ended');
+        btnEndSession.disabled = true;
+      }
     };
 
     // UI Updates
-    isRecording = true;
-    btnMic.classList.add('recording');
-    setStatus('processing', 'Recording & Streaming...');
+    isSessionActive = true;
+    turnCount = 0;
     resetStages();
     resetResults();
     resultTranscript.textContent = '';
     resultReply.textContent = '';
-    playbackTime = 0; // reset playback scheduler
-    
+    playbackTime = 0;
+
+    btnEndSession.disabled = false;
+    setStatus('active', 'Active Session');
+    setPhase('LISTENING');
+    turnBadge.textContent = 'Turn 0';
+    debugTurn.textContent = '0';
+
   } catch (err) {
     addLog('error', `Mic error: ${err.message}`);
     setStatus('error', 'Mic Error');
   }
 }
 
-function stopRecording() {
-  isRecording = false;
-  btnMic.classList.remove('recording');
-  setStatus('processing', 'Processing...');
-  
-  micStopTimestamp = performance.now();
-  
+function endSession() {
+  if (!isSessionActive) return;
+
+  isSessionActive = false;
+  isSpeaking = false;
+  stopAllPlayback();
+
   if (micSource) micSource.disconnect();
   if (micProcessor) micProcessor.disconnect();
   if (micStream) micStream.getTracks().forEach(t => t.stop());
-  
+
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ action: 'stop' }));
+    ws.send(JSON.stringify({ action: 'end_session' }));
   }
+
+  setPhase('ENDED');
+  setStatus('idle', 'Session ended');
+  btnEndSession.disabled = true;
+
+  addLog('system', `Session ended after ${turnCount} turns.`);
 }
 
+function resetSession() {
+  endSession();
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
+  ws = null;
+  sessionId = null;
+  localStorage.removeItem('voice_session_id');
+  turnCount = 0;
+
+  resetResults();
+  resetStages();
+  setStatus('idle', 'Idle');
+  setPhase('IDLE');
+  turnBadge.textContent = 'Turn 0';
+  debugSessionId.textContent = '—';
+  debugTurn.textContent = '0';
+  debugPhase.textContent = 'IDLE';
+  debugVerified.textContent = 'No';
+  debugState.textContent = '—';
+  debugLatency.textContent = '—';
+
+  addLog('system', 'Session reset. Click mic to start a new conversation.');
+}
+
+// ==========================================================================
+// WebSocket Message Handler
+// ==========================================================================
 async function handleWebSocketMessage(event) {
   try {
     const data = JSON.parse(event.data);
 
     switch (data.type) {
+      case 'phase':
+        setPhase(data.phase);
+
+        // When we transition to PROCESSING, reset result fields for new turn
+        if (data.phase === 'PROCESSING' || data.phase === 'SPEECH_DETECTED') {
+          resetStages();
+          resultTranscript.textContent = '';
+          resultReply.textContent = '';
+          if (metricsContainer) metricsContainer.style.display = 'none';
+        }
+
+        // When speaking starts, reset playback scheduler
+        if (data.phase === 'SPEAKING') {
+          playbackTime = 0;
+        }
+
+        // When listening resumes, mark speaking done
+        if (data.phase === 'LISTENING' && isSpeaking) {
+          isSpeaking = false;
+        }
+        break;
+
       case 'stage':
         addLog(data.stage, `[${data.status.toUpperCase()}] ${data.detail}`);
         updateStage(data.stage, data.status);
         break;
-        
+
       case 'stt':
         resultTranscript.textContent = data.text;
         break;
-        
+
       case 'llm_token':
         resultReply.textContent += data.token;
         break;
-        
+
       case 'tts_audio':
-        // Decode base64 WAV chunk and play it via AudioContext
-        const arrayBuffer = base64ToArrayBuffer(data.data);
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        playAudioChunk(audioBuffer);
+        // Decode base64 WAV chunk and play it
+        try {
+          const arrayBuffer = base64ToArrayBuffer(data.data);
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          playAudioChunk(audioBuffer);
+        } catch (e) {
+          console.error('Failed to play TTS chunk', e);
+        }
         break;
-        
+
       case 'timing':
         updateMetrics(data.timings);
         break;
-        
-      case 'done':
-        setStatus('success', 'Complete');
-        // Update final data fields
+
+      case 'turn_done':
+        turnCount++;
+        turnBadge.textContent = `Turn ${turnCount}`;
+        debugTurn.textContent = `${turnCount}`;
+
         const r = data.result;
-        resultIntent.textContent = r.intent || '—';
-        if (r.customer) {
-          resultCustomer.textContent = `${r.customer.full_name} (DOB: ${r.customer.date_of_birth})`;
-        } else {
-          resultCustomer.textContent = 'Not found';
+        if (r) {
+          resultIntent.textContent = r.intent || '—';
+          debugState.textContent = r.state || '—';
+          debugVerified.textContent = r.verified ? 'Yes' : 'No';
+
+          if (r.customer) {
+            resultCustomer.textContent = `${r.customer.full_name} (DOB: ${r.customer.date_of_birth})`;
+          } else {
+            resultCustomer.textContent = '—';
+          }
+
+          if (r.orders && r.orders.length > 0) {
+            resultOrder.innerHTML = r.orders.map(o => `#${o.order_number} — ${o.status}`).join('<br>');
+          } else {
+            resultOrder.textContent = '—';
+          }
+
+          if (r.input_audio_url) {
+            inputAudioPlayer.src = r.input_audio_url;
+            inputAudioPlayer.style.display = 'block';
+          }
+
+          if (r.reply_text) {
+            resultReply.textContent = r.reply_text;
+          }
         }
-        if (r.orders && r.orders.length > 0) {
-          resultOrder.innerHTML = r.orders.map(o => `#${o.order_number} — ${o.status}`).join('<br>');
-        } else {
-          resultOrder.textContent = 'No orders found';
+
+        addLog('system', `Turn ${turnCount} complete`);
+        break;
+
+      case 'session':
+        if (data.session_id) {
+          sessionId = data.session_id;
+          localStorage.setItem('voice_session_id', sessionId);
+          debugSessionId.textContent = sessionId;
+          addLog('system', `Session: ${sessionId}`);
         }
-        if (r.input_audio_url) {
-          inputAudioPlayer.src = r.input_audio_url;
-          inputAudioPlayer.style.display = 'block';
-        }
+        break;
+
+      case 'session_end':
+        addLog('system', `Session ended — total turns: ${data.total_turns}`);
+        setPhase('ENDED');
+        setStatus('idle', 'Session ended');
+        isSessionActive = false;
+        btnEndSession.disabled = true;
         break;
     }
   } catch (e) {
@@ -317,7 +544,7 @@ async function handleWebSocketMessage(event) {
 }
 
 // ==========================================================================
-// Progressive Audio Playback
+// Progressive Audio Playback with Barge-In Support
 // ==========================================================================
 function base64ToArrayBuffer(base64) {
   const binary_string = window.atob(base64);
@@ -331,30 +558,29 @@ function base64ToArrayBuffer(base64) {
 
 function playAudioChunk(audioBuffer) {
   if (!audioContext) return;
-  
+
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioContext.destination);
-  
+
   // Schedule gapless playback
   const currentTime = audioContext.currentTime;
   if (playbackTime < currentTime) {
     playbackTime = currentTime;
   }
-  
+
   source.start(playbackTime);
   playbackTime += audioBuffer.duration;
 
-  if (micStopTimestamp !== null) {
-    const latencyMs = Math.max(0, performance.now() - micStopTimestamp);
-    const latencySec = (latencyMs / 1000).toFixed(2);
-    addLog('system', `Latency (mic stop → playback): ${Math.round(latencyMs)} ms (${latencySec}s)`);
-    micStopTimestamp = null;
-  }
+  // Track active source for barge-in
+  activeSources.push(source);
+  source.onended = () => {
+    activeSources = activeSources.filter(s => s !== source);
+  };
 }
 
 // ==========================================================================
-// Simulate Form Submission (Fallback / Text Simulation)
+// Simulate Form Submission (Text Simulation Fallback)
 // ==========================================================================
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -390,26 +616,22 @@ form.addEventListener('submit', async (e) => {
     }
 
     const data = await res.json();
-    if (data.stages) animateStages(data.stages);
+    if (data.stages) {
+      data.stages.forEach(s => updateStage(s.stage, s.status));
+    }
 
     resultTranscript.textContent = data.transcript || '—';
     resultIntent.textContent = data.intent || '—';
     resultReply.textContent = data.reply_text || '—';
-    
+
     if (data.customer) {
       resultCustomer.textContent = `${data.customer.full_name} (DOB: ${data.customer.date_of_birth})`;
     }
     if (data.orders && data.orders.length > 0) {
       resultOrder.innerHTML = data.orders.map(o => `#${o.order_number} — ${o.status}`).join('<br>');
     }
-    
-    if (data.timings) updateMetrics(data.timings);
 
-    if (data.audio_url) {
-      audioSection.style.display = 'block';
-      audioPlayer.src = data.audio_url;
-      audioPlayer.play().catch(e => console.warn(e));
-    }
+    if (data.timings) updateMetrics(data.timings);
 
     setStatus('success', 'Complete');
   } catch (err) {
@@ -429,7 +651,6 @@ btnClear.addEventListener('click', () => {
   resetStages();
   setStatus('idle', 'Idle');
   clearLog();
-  audioSection.style.display = 'none';
 });
 
-addLog('system', 'Voice Agent Console ready (Streaming Mode). Click mic to start streaming audio.');
+addLog('system', 'Voice Agent Conversation Room ready. Click the microphone to start.');

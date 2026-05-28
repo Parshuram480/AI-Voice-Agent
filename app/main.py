@@ -16,19 +16,25 @@ import base64
 import json
 import logging
 import audioop
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-
+from app.api import create_api_router
 from app.config import settings
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.twilio_handler import TwilioHandler
 from app.pipeline import VoicePipeline
 from app.streaming_pipeline import StreamingVoicePipeline, _DONE
+from app.intents import IntentRouter, SlotFiller
+from app.session import SessionManager, InMemorySessionStore
+from app.state_machine import ConversationStateMachine
+from app.repositories import CustomerRepository, OrderRepository
+from app.services import ConversationService, VerificationService, OrderService
+from app.llm import LLMRephraser
 from app.audio_utils import (
     mulaw_to_pcm,
     resample_to_16khz,
@@ -56,17 +62,26 @@ app = FastAPI(
     version="2.0.0",
 )
 
+
+def _get_pipeline() -> VoicePipeline:
+    return pipeline
+
+
+def _get_streaming_pipeline() -> StreamingVoicePipeline:
+    return streaming_pipeline
+
+
+app.include_router(create_api_router(_get_pipeline, _get_streaming_pipeline))
+
 # Shared service instances (initialized on startup)
 groq_client: GroqClient = None  # type: ignore
 db_client: DatabaseClient = None  # type: ignore
 twilio_handler: TwilioHandler = None  # type: ignore
 pipeline: VoicePipeline = None  # type: ignore
 streaming_pipeline: StreamingVoicePipeline = None  # type: ignore
-
-# Audio cache directory
-AUDIO_CACHE_DIR = Path("audio_cache")
-AUDIO_CACHE_DIR.mkdir(exist_ok=True)
-
+session_manager: SessionManager = None  # type: ignore
+conversation_service: ConversationService = None  # type: ignore
+rephraser: LLMRephraser = None  # type: ignore
 
 # =============================================================================
 # Startup / Shutdown
@@ -75,6 +90,7 @@ AUDIO_CACHE_DIR.mkdir(exist_ok=True)
 async def startup():
     """Initialize all services on server startup."""
     global groq_client, db_client, twilio_handler, pipeline, streaming_pipeline
+    global session_manager, conversation_service, rephraser
 
     logger.info("=" * 60)
     logger.info("  Voice Agent v2 — Streaming Pipeline — Starting up")
@@ -97,12 +113,39 @@ async def startup():
     twilio_handler = TwilioHandler()
     logger.info("✓ Twilio handler initialized")
 
+    # Initialize conversation orchestration
+    session_store = InMemorySessionStore()
+    session_manager = SessionManager(session_store)
+    intent_router = IntentRouter()
+    slot_filler = SlotFiller()
+    state_machine = ConversationStateMachine()
+    customer_repo = CustomerRepository(db_client)
+    order_repo = OrderRepository(db_client)
+    verification_service = VerificationService(customer_repo)
+    order_service = OrderService(order_repo)
+    conversation_service = ConversationService(
+        session_manager=session_manager,
+        intent_router=intent_router,
+        slot_filler=slot_filler,
+        state_machine=state_machine,
+        verification_service=verification_service,
+        order_service=order_service,
+    )
+    rephraser = LLMRephraser(groq_client)
+    logger.info("✓ Conversation orchestration initialized")
+
     # Initialize legacy pipeline (for text simulation)
-    pipeline = VoicePipeline(groq_client, db_client, twilio_handler)
+    pipeline = VoicePipeline(groq_client, db_client, twilio_handler, conversation_service, rephraser)
     logger.info("✓ Legacy voice pipeline initialized")
 
     # Initialize streaming pipeline
-    streaming_pipeline = StreamingVoicePipeline(groq_client, db_client, twilio_handler)
+    streaming_pipeline = StreamingVoicePipeline(
+        groq_client,
+        db_client,
+        twilio_handler,
+        conversation_service,
+        rephraser,
+    )
     logger.info("✓ Streaming voice pipeline initialized")
 
     logger.info(f"  Server host: {settings.SERVER_HOST}")
@@ -148,7 +191,7 @@ async def index():
 
 # ---- Twilio Voice Webhook ----
 @app.post("/voice")
-async def voice_webhook(request: Request):
+async def voice_webhook():
     """
     Twilio voice webhook — called when a phone call comes in.
 
@@ -239,6 +282,7 @@ async def audio_stream(websocket: WebSocket):
                         call_sid=call_sid,
                         on_tts_audio=on_tts_audio if use_stream_audio_out else None,
                         update_call_with_audio=not use_stream_audio_out,
+                        session_id=call_sid,
                     )
                 )
 
@@ -279,26 +323,36 @@ async def audio_stream(websocket: WebSocket):
         logger.info("Twilio audio stream WebSocket closed")
 
 
-# ---- Browser Microphone WebSocket (STREAMING PIPELINE) ----
+# ---- Browser Microphone WebSocket (CONTINUOUS CONVERSATION) ----
 @app.websocket("/ws/mic-stream")
 async def mic_stream(websocket: WebSocket):
     """
     WebSocket endpoint for browser microphone streaming.
 
-    Receives raw PCM audio frames from the browser AudioWorklet,
-    runs the streaming pipeline, and sends back progressive results:
+    Upgraded to continuous conversation mode:
+      - User clicks mic ONCE to start a session
+      - Audio streams continuously
+      - VAD detects utterance boundaries automatically
+      - Each utterance is processed through STT → LLM → TTS
+      - Listening resumes automatically after TTS playback
+      - Session ends when user clicks "End Conversation" or disconnects
+
+    Messages sent to client:
+      - {"type": "phase", "phase": "LISTENING|SPEECH_DETECTED|..."}
       - {"type": "stage", "stage": "...", "status": "...", "detail": "..."}
       - {"type": "stt", "text": "..."}
       - {"type": "llm_token", "token": "..."}
       - {"type": "tts_audio", "data": "<base64>", "index": N}
       - {"type": "timing", "timings": {...}}
-      - {"type": "done", "result": {...}}
+      - {"type": "turn_done", "result": {...}}
+      - {"type": "session_end", "total_turns": N}
     """
     await websocket.accept()
-    logger.info("Browser mic-stream WebSocket connected")
+    logger.info("Browser mic-stream WebSocket connected (continuous mode)")
 
     audio_queue: asyncio.Queue = asyncio.Queue()
     ws_open = True
+    barge_in_event = asyncio.Event()
 
     async def safe_send(msg: dict):
         nonlocal ws_open
@@ -308,7 +362,7 @@ async def mic_stream(websocket: WebSocket):
             except Exception:
                 ws_open = False
 
-    # Callbacks that the streaming pipeline will invoke
+    # Callbacks for the streaming pipeline
     audio_chunk_index = 0
 
     def on_stt_text(text: str):
@@ -335,14 +389,45 @@ async def mic_stream(websocket: WebSocket):
             "detail": detail,
         }))
 
-    # Launch pipeline in background
+    def on_phase_change(phase: str):
+        asyncio.create_task(safe_send({"type": "phase", "phase": phase}))
+
+    def on_turn_done(result: dict):
+        nonlocal audio_chunk_index
+        # Reset audio chunk index for next turn
+        audio_chunk_index = 0
+        # Send turn result (strip non-serializable fields)
+        send_result = {
+            k: v for k, v in result.items()
+            if k != "audio_bytes"
+        }
+        asyncio.create_task(safe_send({
+            "type": "timing",
+            "timings": result.get("timings", {}),
+        }))
+        asyncio.create_task(safe_send({
+            "type": "turn_done",
+            "result": send_result,
+        }))
+
+    # Session ID management
+    session_id = websocket.query_params.get("session_id")
+    if not session_id:
+        session_id = f"mic-{uuid.uuid4().hex[:8]}"
+    await safe_send({"type": "session", "session_id": session_id})
+
+    # Launch the continuous conversation pipeline in background
     pipeline_task = asyncio.create_task(
-        streaming_pipeline.process_stream(
+        streaming_pipeline.process_continuous(
             audio_queue=audio_queue,
             on_stt_text=on_stt_text,
             on_llm_token=on_llm_token,
             on_tts_audio=on_tts_audio,
             on_stage=on_stage,
+            on_phase_change=on_phase_change,
+            on_turn_done=on_turn_done,
+            session_id=session_id,
+            barge_in_event=barge_in_event,
         )
     )
 
@@ -361,10 +446,21 @@ async def mic_stream(websocket: WebSocket):
             elif "text" in message and message["text"]:
                 try:
                     ctrl = json.loads(message["text"])
-                    if ctrl.get("action") == "stop":
-                        logger.info("Browser mic-stream: stop received")
+                    action = ctrl.get("action")
+
+                    if action == "stop" or action == "end_session":
+                        logger.info(f"Browser mic-stream: {action} received")
                         await audio_queue.put(_DONE)
                         break
+
+                    elif action == "barge_in":
+                        logger.info("Browser mic-stream: barge-in signal received")
+                        barge_in_event.set()
+                        # Reset after a short delay
+                        asyncio.get_event_loop().call_later(
+                            0.1, barge_in_event.clear
+                        )
+
                 except json.JSONDecodeError:
                     pass
 
@@ -382,15 +478,11 @@ async def mic_stream(websocket: WebSocket):
         # Wait for pipeline completion
         try:
             result = await asyncio.wait_for(pipeline_task, timeout=30.0)
-            # Send final result + timings
             if ws_open:
-                # Strip non-serializable fields
-                send_result = {
-                    k: v for k, v in result.items()
-                    if k != "audio_bytes"
-                }
-                await safe_send({"type": "timing", "timings": result.get("timings", {})})
-                await safe_send({"type": "done", "result": send_result})
+                await safe_send({
+                    "type": "session_end",
+                    "total_turns": result.get("total_turns", 0),
+                })
         except asyncio.TimeoutError:
             logger.error("Browser mic-stream pipeline timed out")
             pipeline_task.cancel()
@@ -398,97 +490,6 @@ async def mic_stream(websocket: WebSocket):
             logger.error(f"Browser mic-stream pipeline error: {e}")
 
         logger.info("Browser mic-stream WebSocket closed")
-
-
-# ---- Serve Audio Files ----
-@app.get("/audio/{filename}")
-async def serve_audio(filename: str):
-    """
-    Serve a cached TTS or STT input audio file.
-
-    Twilio (or the testing UI) fetches audio from here.
-    """
-    filepath = AUDIO_CACHE_DIR / filename
-    if not filepath.exists():
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"Audio file '{filename}' not found"},
-        )
-
-    media_type = "audio/webm" if filename.endswith(".webm") else "audio/wav"
-
-    return FileResponse(
-        path=str(filepath),
-        media_type=media_type,
-        filename=filename,
-    )
-
-
-# ---- Local Test: Simulate Text Query ----
-class SimulateRequest(BaseModel):
-    """Request body for the /api/simulate endpoint."""
-    name: str = "John Smith"
-    dob: str = "1990-05-15"
-    query: str = "What is my order status?"
-
-
-@app.post("/api/simulate")
-async def simulate_call(req: SimulateRequest):
-    """
-    Simulate a voice agent interaction from text input.
-
-    Skips STT — goes directly from text query to LLM/DB → TTS.
-    Returns JSON with transcript, intent, reply, and audio URL.
-    """
-    logger.info(f"Simulate: name={req.name}, dob={req.dob}, query={req.query}")
-
-    result = await pipeline.process_text_query(
-        name=req.name,
-        dob=req.dob,
-        query=req.query,
-    )
-
-    # Replace the full server host with a relative URL for local testing
-    if result.get("audio_url"):
-        filename = result["audio_url"].split("/")[-1]
-        result["audio_url"] = f"/audio/{filename}"
-
-    return JSONResponse(content=result)
-
-
-# ---- Local Test: Microphone Audio (backward-compatible) ----
-@app.post("/api/mic")
-async def process_microphone(request: Request):
-    """
-    Process raw audio from the browser's microphone.
-
-    Accepts raw audio bytes (WAV/WebM) in the request body.
-    Runs through the streaming pipeline for lower latency.
-    """
-    audio_bytes = await request.body()
-    logger.info(f"Microphone audio received: {len(audio_bytes)} bytes")
-
-    if len(audio_bytes) < 1000:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Audio too short. Please speak longer."},
-        )
-
-    result = await streaming_pipeline.process_audio_streaming(
-        audio_bytes,
-        call_sid=None,
-        is_mulaw=False,
-    )
-
-    # Make audio URL relative for local testing
-    if result.get("audio_url"):
-        filename = result["audio_url"].split("/")[-1]
-        result["audio_url"] = f"/audio/{filename}"
-
-    # Remove non-serializable fields
-    result.pop("audio_bytes", None)
-
-    return JSONResponse(content=result)
 
 
 # =============================================================================

@@ -60,9 +60,7 @@ class TwilioHandler:
 
         # Greet the caller
         response.say(
-            "Hello! Welcome to our order support line. "
-            "Please state your name, date of birth, and your query. "
-            "For example: My name is John Smith, born May 15, 1990. What is my order status?",
+            "Hello, how may I help you today?",
             voice="alice",
         )
 

@@ -48,6 +48,21 @@ class Settings:
     LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "96"))
     TWILIO_STREAM_AUDIO_OUT = os.getenv("TWILIO_STREAM_AUDIO_OUT", "true").lower() in ("1", "true", "yes", "on")
 
+    # --- Conversation Settings ---
+    SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "900"))
+    SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
+    SESSION_MAX_RETRIES = int(os.getenv("SESSION_MAX_RETRIES", "2"))
+
+    # --- LLM Rephrase (controlled) ---
+    LLM_REPHRASE = os.getenv("LLM_REPHRASE", "false").lower() in ("1", "true", "yes", "on")
+    LLM_REPHRASE_MAX_TOKENS = int(os.getenv("LLM_REPHRASE_MAX_TOKENS", "96"))
+    LLM_REPHRASE_TEMPERATURE = float(os.getenv("LLM_REPHRASE_TEMPERATURE", "0.2"))
+
+    # --- Voice Activity Detection (VAD) ---
+    VAD_SILENCE_MS = int(os.getenv("VAD_SILENCE_MS", "800"))
+    MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "250"))
+    MAX_UTTERANCE_MS = int(os.getenv("MAX_UTTERANCE_MS", "30000"))
+
     @property
     def database_url(self) -> str:
         """PostgreSQL connection DSN for asyncpg."""
