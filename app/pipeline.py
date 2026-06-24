@@ -6,12 +6,12 @@ it runs the full pipeline and produces an audio response.
 """
 
 import logging
+import os
 import uuid
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Optional
 
-from app.config import settings
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.llm.rephrase import LLMRephraser
@@ -21,6 +21,10 @@ from app.twilio_handler import TwilioHandler
 from app.audio_utils import build_wav, resample_to_16khz, mulaw_to_pcm
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")
+
 
 # Directory to cache generated TTS audio files
 AUDIO_CACHE_DIR = Path("audio_cache")
@@ -104,7 +108,7 @@ class VoicePipeline:
             input_filename = f"input_{input_file_id}_{int(datetime.now(UTC).timestamp())}.{ext}"
             input_filepath = AUDIO_CACHE_DIR / input_filename
             input_filepath.write_bytes(final_audio_bytes)
-            input_audio_url = f"{settings.SERVER_HOST}/audio/{input_filename}"
+            input_audio_url = f"{SERVER_HOST}/audio/{input_filename}"
             result["input_audio_url"] = input_audio_url
 
             stages[-1]["status"] = "done"
@@ -273,7 +277,7 @@ class VoicePipeline:
 
             filepath.write_bytes(audio_bytes)
 
-            audio_url = f"{settings.SERVER_HOST}/audio/{filename}"
+            audio_url = f"{SERVER_HOST}/audio/{filename}"
             result["audio_url"] = audio_url
             result["audio_path"] = str(filepath)
             stages[-1]["status"] = "done"

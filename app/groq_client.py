@@ -9,14 +9,18 @@ All methods are async for maximum pipeline concurrency.
 
 import io
 import logging
+import os
 from typing import AsyncGenerator, Optional, Any
 
 import httpx
 from groq import AsyncGroq
 
-from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 
 
 class GroqClient:
@@ -30,19 +34,19 @@ class GroqClient:
     """
 
     # Default models — can be overridden per call
-    STT_MODEL = "whisper-large-v3-turbo"
-    LLM_MODEL = "llama-3.1-8b-instant"
-    TTS_MODEL = "canopylabs/orpheus-v1-english"
-    TTS_VOICE = "hannah"  # A friendly
+    STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
+    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+    TTS_MODEL = os.getenv("TTS_MODEL", "canopylabs/orpheus-v1-english")
+    TTS_VOICE = os.getenv("TTS_VOICE", "hannah")
 
     def __init__(self, api_key: Optional[str] = None):
         """
         Initialize the Groq client.
 
         Args:
-            api_key: Groq API key. Falls back to settings.GROQ_API_KEY.
+            api_key: Groq API key. Falls back to GROQ_API_KEY.
         """
-        self._api_key = api_key or settings.GROQ_API_KEY
+        self._api_key = api_key or GROQ_API_KEY
         if not self._api_key:
             logger.warning("GROQ_API_KEY is not set — Groq API calls will fail.")
 

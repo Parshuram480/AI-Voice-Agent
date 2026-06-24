@@ -1,11 +1,16 @@
 """Deterministic conversation orchestration service."""
-
 from __future__ import annotations
+
+import os
+import re
+
+# --- Environment Variables ---
+SESSION_MAX_RETRIES = int(os.getenv("SESSION_MAX_RETRIES", "2"))
+SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
 
 import time
 from typing import Optional
 
-from app.config import settings
 from app.intents import IntentRouter, SlotFiller, SlotFillResult
 from app.logging.logger import log_event
 from app.models.response import ConversationResult
@@ -272,7 +277,7 @@ class ConversationService:
         session.retry_counts[key] = session.retry_counts.get(key, 0) + 1
 
     def _retry_exhausted(self, session: SessionState, key: str) -> bool:
-        return session.retry_counts.get(key, 0) > settings.SESSION_MAX_RETRIES
+        return session.retry_counts.get(key, 0) > SESSION_MAX_RETRIES
 
     def _finalize(
         self,
@@ -286,8 +291,8 @@ class ConversationService:
         session.current_state = next_state.value
         session.last_response = reply_text
         if user_text:
-            session.add_turn("user", user_text, settings.SESSION_MAX_TURNS)
-        session.add_turn("assistant", reply_text, settings.SESSION_MAX_TURNS)
+            session.add_turn("user", user_text, SESSION_MAX_TURNS)
+        session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
 
         return ConversationResult(
             session_id=session.session_id,

@@ -168,7 +168,7 @@
       </div>
 
       <!-- ============ Debug & State Panel ============ -->
-      <div class="card animate-in" id="debug-panel">
+      <div class="card grid__full animate-in" id="debug-panel">
         <div class="card__header">
           <div class="card__icon card__icon--debug">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -207,49 +207,7 @@
         </div>
       </div>
 
-      <!-- ============ Simulate Call Panel (collapsed) ============ -->
-      <div class="card animate-in" id="simulate-panel">
-        <div class="card__header">
-          <div class="card__icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
-            </svg>
-          </div>
-          <h2 class="card__title">Text Simulation</h2>
-        </div>
 
-        <form id="simulate-form">
-          <div class="form-group">
-            <label class="form-label" for="input-name">Full Name</label>
-            <input class="form-input" type="text" id="input-name" placeholder="John Smith" value="John Smith" autocomplete="name">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="input-dob">Date of Birth</label>
-            <input class="form-input" type="date" id="input-dob" value="1990-05-15">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="input-query">Query</label>
-            <textarea class="form-input" id="input-query" rows="2" placeholder="What is my order status?">What is my order status?</textarea>
-          </div>
-
-          <div class="btn-group">
-            <button class="btn btn--primary" type="submit" id="btn-send">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"/>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-              </svg>
-              Send Query
-            </button>
-            <button class="btn btn--secondary" type="button" id="btn-clear">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
-              </svg>
-              Clear
-            </button>
-          </div>
-        </form>
-      </div>
 
       <!-- ============ Live Log Panel ============ -->
       <div class="card grid__full animate-in" id="log-panel">

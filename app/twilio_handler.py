@@ -8,14 +8,19 @@ to update live calls with audio playback.
 import json
 
 import logging
+import os
 from typing import Optional
 
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Start, Connect
 
-from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+
 
 
 class TwilioHandler:
@@ -26,10 +31,10 @@ class TwilioHandler:
     def __init__(self):
         """Initialize the Twilio REST client (used for call updates)."""
         self._client: Optional[TwilioClient] = None
-        if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
+        if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
             self._client = TwilioClient(
-                settings.TWILIO_ACCOUNT_SID,
-                settings.TWILIO_AUTH_TOKEN,
+                TWILIO_ACCOUNT_SID,
+                TWILIO_AUTH_TOKEN,
             )
             logger.info("Twilio REST client initialized.")
         else:

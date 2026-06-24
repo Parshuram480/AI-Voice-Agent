@@ -15,6 +15,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).parent.parent
+ENV_PATH = ROOT_DIR / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 import audioop
 import uuid
 from pathlib import Path
@@ -23,7 +30,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from app.api import create_api_router
-from app.config import settings
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.twilio_handler import TwilioHandler
@@ -52,6 +58,12 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+TWILIO_STREAM_AUDIO_OUT = os.getenv("TWILIO_STREAM_AUDIO_OUT", "true").lower() in ("1", "true", "yes", "on")
+
 
 # =============================================================================
 # Application
@@ -146,8 +158,8 @@ async def startup():
     )
     logger.info("✓ Streaming voice pipeline initialized")
 
-    logger.info(f"  Server host: {settings.SERVER_HOST}")
-    logger.info(f"  Listening on port: {settings.SERVER_PORT}")
+    logger.info(f"  Server host: {SERVER_HOST}")
+    logger.info(f"  Listening on port: {SERVER_PORT}")
     logger.info("=" * 60)
 
 
@@ -196,7 +208,7 @@ async def voice_webhook():
     Returns TwiML that starts a media stream and greets the caller.
     """
     # Build the WebSocket URL based on server host
-    host = settings.SERVER_HOST.replace("https://", "wss://").replace("http://", "ws://")
+    host = SERVER_HOST.replace("https://", "wss://").replace("http://", "ws://")
     ws_url = f"{host}/audio-stream"
 
     twiml = twilio_handler.generate_stream_twiml(ws_url)
@@ -221,7 +233,7 @@ async def audio_stream(websocket: WebSocket):
     call_sid = None
     audio_queue: asyncio.Queue = asyncio.Queue()
     pipeline_task = None
-    use_stream_audio_out = settings.TWILIO_STREAM_AUDIO_OUT
+    use_stream_audio_out = TWILIO_STREAM_AUDIO_OUT
     stream_audio_sent = False
 
     async def _send_stream_audio(wav_bytes: bytes):
@@ -452,12 +464,14 @@ async def mic_stream(websocket: WebSocket):
                         break
 
                     elif action == "barge_in":
-                        logger.info("Browser mic-stream: barge-in signal received")
-                        barge_in_event.set()
-                        # Reset after a short delay
-                        asyncio.get_event_loop().call_later(
-                            0.1, barge_in_event.clear
-                        )
+                        # Only interrupt if the agent is actively speaking
+                        if getattr(streaming_pipeline, "_current_phase", None) == "SPEAKING":
+                            logger.info("Browser mic-stream: barge-in signal received")
+                            barge_in_event.set()
+                            # Reset after a short delay
+                            asyncio.get_event_loop().call_later(
+                                0.1, barge_in_event.clear
+                            )
 
                 except json.JSONDecodeError:
                     pass

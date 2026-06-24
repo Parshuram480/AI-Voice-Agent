@@ -14,16 +14,9 @@
 // ==========================================================================
 // DOM Elements
 // ==========================================================================
-const form = document.getElementById('simulate-form');
-const btnSend = document.getElementById('btn-send');
-const btnClear = document.getElementById('btn-clear');
 const btnMic = document.getElementById('btn-mic');
 const btnEndSession = document.getElementById('btn-end-session');
 const btnSessionReset = document.getElementById('btn-session-reset');
-
-const inputName = document.getElementById('input-name');
-const inputDob = document.getElementById('input-dob');
-const inputQuery = document.getElementById('input-query');
 
 const statusBadge = document.getElementById('status-badge');
 const stagesContainer = document.getElementById('stages-container');
@@ -580,78 +573,6 @@ function playAudioChunk(audioBuffer) {
   };
 }
 
-// ==========================================================================
-// Simulate Form Submission (Text Simulation Fallback)
-// ==========================================================================
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (isProcessing) return;
 
-  const name = inputName.value.trim();
-  const dob = inputDob.value.trim();
-  const query = inputQuery.value.trim();
-
-  if (!name || !dob || !query) {
-    addLog('error', 'Please fill in all fields.');
-    return;
-  }
-
-  isProcessing = true;
-  btnSend.disabled = true;
-  resetStages();
-  resetResults();
-  if (metricsContainer) metricsContainer.style.display = 'none';
-  setStatus('processing', 'Processing...');
-  addLog('system', `Query: "${query}" | Customer: ${name} (${dob})`);
-
-  try {
-    const res = await fetch('/api/simulate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, dob, query }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Server error: ${res.status}`);
-    }
-
-    const data = await res.json();
-    if (data.stages) {
-      data.stages.forEach(s => updateStage(s.stage, s.status));
-    }
-
-    resultTranscript.textContent = data.transcript || '—';
-    resultIntent.textContent = data.intent || '—';
-    resultReply.textContent = data.reply_text || '—';
-
-    if (data.customer) {
-      resultCustomer.textContent = `${data.customer.full_name} (DOB: ${data.customer.date_of_birth})`;
-    }
-    if (data.orders && data.orders.length > 0) {
-      resultOrder.innerHTML = data.orders.map(o => `#${o.order_number} — ${o.status}`).join('<br>');
-    }
-
-    if (data.timings) updateMetrics(data.timings);
-
-    setStatus('success', 'Complete');
-  } catch (err) {
-    addLog('error', err.message);
-    setStatus('error', 'Error');
-  } finally {
-    isProcessing = false;
-    btnSend.disabled = false;
-  }
-});
-
-btnClear.addEventListener('click', () => {
-  inputName.value = '';
-  inputDob.value = '';
-  inputQuery.value = '';
-  resetResults();
-  resetStages();
-  setStatus('idle', 'Idle');
-  clearLog();
-});
 
 addLog('system', 'Voice Agent Conversation Room ready. Click the microphone to start.');

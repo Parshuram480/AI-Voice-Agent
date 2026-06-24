@@ -12,6 +12,15 @@ import audioop
 import io
 import struct
 import wave
+import logging
+
+logger = logging.getLogger(__name__)
+
+try:
+    import webrtcvad
+except ImportError:
+    webrtcvad = None
+
 
 
 def mulaw_to_pcm(mulaw_bytes: bytes) -> bytes:
@@ -244,3 +253,47 @@ def resample_pcm(
         None,
     )
     return converted
+
+class FrameGenerator:
+    """Generates audio frames of exactly `frame_duration_ms` from a byte buffer."""
+    def __init__(self, frame_duration_ms: int = 30, sample_rate: int = 16000, sample_width: int = 2):
+        self.frame_duration_ms = frame_duration_ms
+        self.sample_rate = sample_rate
+        self.sample_width = sample_width
+        self.frame_size = int(sample_rate * (frame_duration_ms / 1000.0) * sample_width)
+        self.buffer = bytearray()
+
+    def add_data(self, data: bytes):
+        self.buffer.extend(data)
+
+    def get_frames(self):
+        """Yields available frames of exact size."""
+        while len(self.buffer) >= self.frame_size:
+            frame = bytes(self.buffer[:self.frame_size])
+            self.buffer = self.buffer[self.frame_size:]
+            yield frame
+
+class VoiceActivityDetector:
+    """Wrapper around webrtcvad with a fallback to RMS."""
+    def __init__(self, aggressiveness: int = 2, sample_rate: int = 16000, fallback_threshold: int = 500):
+        self.sample_rate = sample_rate
+        self.fallback_threshold = fallback_threshold
+        self.vad = webrtcvad.Vad(aggressiveness) if webrtcvad else None
+        if not self.vad:
+            logger.warning("webrtcvad not installed. Falling back to RMS-based VAD.")
+
+    def is_speech(self, pcm_frame: bytes) -> bool:
+        """
+        Check if the exact frame contains speech. 
+        Note: For WebRTC VAD, frame must be exactly 10, 20, or 30ms.
+        """
+        if self.vad:
+            try:
+                return self.vad.is_speech(pcm_frame, self.sample_rate)
+            except Exception as e:
+                # Fallback on exception (e.g. invalid frame size)
+                logger.error(f"webrtcvad error: {e}. Falling back to RMS.")
+                return not detect_silence(pcm_frame, self.fallback_threshold)
+        else:
+            return not detect_silence(pcm_frame, self.fallback_threshold)
+

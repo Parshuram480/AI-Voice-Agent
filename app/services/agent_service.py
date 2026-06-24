@@ -2,11 +2,12 @@
 
 import json
 import logging
+import os
+import re
 import re
 import time
 from typing import Optional
 
-from app.config import settings
 from app.groq_client import GroqClient
 from app.models.response import ConversationResult
 from app.models.session import SessionState
@@ -15,6 +16,10 @@ from app.services.verification_service import VerificationService
 from app.session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
+
 
 AGENT_SYSTEM_PROMPT = """You are a helpful, friendly customer support voice agent for an order management system.
 Your ONLY purpose is to help callers check their order status, delivery dates, item summaries, and order numbers.
@@ -50,6 +55,7 @@ _TOOL_LEAK_PATTERNS = [
     re.compile(r'<\|?tool_call\|?>.*?<\|?/tool_call\|?>', re.DOTALL),  # <tool_call>...</tool_call>
     re.compile(r'\{\s*"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:', re.DOTALL),  # {"name":"verify_user","arguments":...}
     re.compile(r'\{\s*"function"\s*:', re.DOTALL),  # {"function":...}
+    re.compile(r'</?function[^>]*>', re.IGNORECASE),  # <function> or </function>
 ]
 
 AGENT_TOOLS = [
@@ -114,7 +120,7 @@ class AgentService:
         
         # Append user turn to history
         if user_text:
-            session.add_turn("user", user_text, settings.SESSION_MAX_TURNS)
+            session.add_turn("user", user_text, SESSION_MAX_TURNS)
             
         from datetime import datetime
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -253,7 +259,7 @@ class AgentService:
         reply_text = self._sanitize_reply_text(reply_text)
         
         session.last_response = reply_text
-        session.add_turn("assistant", reply_text, settings.SESSION_MAX_TURNS)
+        session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
         await self._sessions.update(session)
         
         timings["total"] = round(time.perf_counter() - t0, 4)

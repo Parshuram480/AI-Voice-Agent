@@ -1,10 +1,15 @@
+import os
+import re
+
+# --- Environment Variables ---
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "900"))
+
 """Session manager with TTL and history trimming."""
 
 import asyncio
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 
-from app.config import settings
 from app.models.session import SessionState
 from app.session.store import SessionStore
 from app.state_machine.state_machine import ConversationState
@@ -47,5 +52,5 @@ class SessionManager:
             return len(expired)
 
     def _is_expired(self, session: SessionState) -> bool:
-        ttl = timedelta(seconds=settings.SESSION_TTL_SECONDS)
+        ttl = timedelta(seconds=SESSION_TTL_SECONDS)
         return datetime.now(UTC) - session.updated_at > ttl

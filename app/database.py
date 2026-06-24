@@ -7,12 +7,20 @@ so the system can still be tested locally without a database.
 """
 
 import logging
+import os
 from datetime import date, datetime, UTC
 from typing import Optional
 
-from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_NAME = os.getenv("DB_NAME", "voice_agent")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_PORT = int(os.getenv("DB_PORT", "5432"))
+DB_USER = os.getenv("DB_USER", "postgres")
+
 
 # Try to import asyncpg; allow graceful fallback
 try:
@@ -112,23 +120,23 @@ class DatabaseClient:
     # -------------------------------------------------------------------------
     async def connect(self):
         """Initialize the database connection pool."""
-        if not HAS_ASYNCPG or not settings.DB_PASSWORD:
+        if not HAS_ASYNCPG or not DB_PASSWORD:
             logger.info("Using in-memory fallback database (no asyncpg or DB_PASSWORD not set).")
             self._use_fallback = True
             return
 
         try:
             self._pool = await asyncpg.create_pool(
-                host=settings.DB_HOST,
-                port=settings.DB_PORT,
-                database=settings.DB_NAME,
-                user=settings.DB_USER,
-                password=settings.DB_PASSWORD,
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
                 min_size=2,
                 max_size=10,
                 command_timeout=5,
             )
-            logger.info(f"Connected to PostgreSQL at {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+            logger.info(f"Connected to PostgreSQL at {DB_HOST}:{DB_PORT}/{DB_NAME}")
         except Exception as e:
             logger.warning(f"Could not connect to PostgreSQL: {e}. Using in-memory fallback.")
             self._use_fallback = True

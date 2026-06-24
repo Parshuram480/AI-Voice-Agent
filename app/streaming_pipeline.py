@@ -12,7 +12,10 @@ Each detected utterance spawns the STT → LLM → TTS workers for that turn.
 """
 
 import asyncio
+import io
+import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -28,8 +31,9 @@ from app.audio_utils import (
     detect_silence,
     trim_trailing_silence,
     compute_rms,
+    VoiceActivityDetector,
+    FrameGenerator,
 )
-from app.config import settings
 from app.database import DatabaseClient
 from app.groq_client import GroqClient
 from app.llm.rephrase import LLMRephraser
@@ -39,6 +43,18 @@ from app.response_cache import ResponseCache
 from app.twilio_handler import TwilioHandler
 
 logger = logging.getLogger(__name__)
+
+# --- Environment Variables ---
+MAX_UTTERANCE_MS = int(os.getenv("MAX_UTTERANCE_MS", "30000"))
+SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "1500"))
+VAD_SILENCE_MS = int(os.getenv("VAD_SILENCE_MS", "800"))
+SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))
+TTS_CACHE_SIZE = int(os.getenv("TTS_CACHE_SIZE", "100"))
+STT_EARLY_CHUNK_SECONDS = float(os.getenv("STT_EARLY_CHUNK_SECONDS", "1.0"))
+MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "200"))
+SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")
+VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "3"))
+print()
 
 # Audio cache directory
 AUDIO_CACHE_DIR = Path("audio_cache")
@@ -87,7 +103,7 @@ class StreamingVoicePipeline:
         self.groq = groq_client
         self.db = db_client
         self.twilio = twilio_handler
-        self.tts_cache = ResponseCache(max_size=settings.TTS_CACHE_SIZE)
+        self.tts_cache = ResponseCache(max_size=TTS_CACHE_SIZE)
         self.agent = agent_service
         self.rephraser = rephraser
 
@@ -350,8 +366,8 @@ class StreamingVoicePipeline:
         """
         Listen to the audio_queue and collect frames for one utterance.
 
-        Uses energy-based VAD:
-        1. Wait for speech to start (frames above silence threshold)
+        Uses WebRTC VAD (via VoiceActivityDetector):
+        1. Wait for speech to start (frames where VAD is true)
         2. Once speech starts, buffer all frames
         3. When silence exceeds VAD_SILENCE_MS, finalize the utterance
 
@@ -368,13 +384,16 @@ class StreamingVoicePipeline:
         last_vad_log = t_start
 
         # Configuration
-        silence_threshold = settings.SILENCE_THRESHOLD
-        vad_silence_ms = max(1, settings.VAD_SILENCE_MS)
-        min_speech_ms = max(1, settings.MIN_SPEECH_MS)
+        vad_silence_ms = max(1, VAD_SILENCE_MS)
+        min_speech_ms = max(1, MIN_SPEECH_MS)
         sample_rate = 16000
         sample_width = 2
         # Max utterance in bytes (16kHz, 16-bit mono = 32000 bytes/sec)
-        max_utterance_bytes = int(settings.MAX_UTTERANCE_MS / 1000 * 16000 * 2)
+        max_utterance_bytes = int(MAX_UTTERANCE_MS / 1000 * 16000 * 2)
+
+        # WebRTC VAD works on exact 30ms frames
+        frame_gen = FrameGenerator(frame_duration_ms=30, sample_rate=sample_rate, sample_width=sample_width)
+        vad = VoiceActivityDetector(aggressiveness=VAD_AGGRESSIVENESS, sample_rate=sample_rate, fallback_threshold=SILENCE_THRESHOLD)
 
         if on_stage:
             try:
@@ -401,104 +420,117 @@ class StreamingVoicePipeline:
                 return None, "stream_ended", 0.0
 
             chunk = bytes(item)
+            frame_gen.add_data(chunk)
 
-            chunk_ms = (len(chunk) / (sample_width * sample_rate)) * 1000.0 if chunk else 0.0
-            rms = compute_rms(chunk, sample_width=sample_width) if chunk else 0
+            for frame in frame_gen.get_frames():
+                chunk_ms = frame_gen.frame_duration_ms
+                rms = compute_rms(frame, sample_width=sample_width)
 
-            is_silence = detect_silence(chunk, silence_threshold)
+                # WebRTC VAD checks if frame is speech
+                is_speech_frame = vad.is_speech(frame)
+                is_silence = not is_speech_frame
 
-            if not speech_started:
-                if not is_silence:
-                    speech_started = True
-                    speech_ms = chunk_ms
-                    silence_ms = 0.0
-                    audio_buffer.extend(chunk)
-                    if interruption_event:
-                        interruption_event.set()
-                    if on_phase_change:
-                        on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
-                    log_pipeline_event(
-                        "speech_detected",
-                        session_id=session_id,
-                        utterance_id=utterance_id,
-                        latency_ms=round((time.perf_counter() - t_start) * 1000, 1),
-                    )
-                    if on_stage:
-                        try:
-                            on_stage("vad", "running", "Speech detected")
-                        except Exception:
-                            pass
-                # else: still silence before speech, discard
-            else:
-                audio_buffer.extend(chunk)
-
-                if is_silence:
-                    silence_ms += chunk_ms
-                else:
-                    silence_ms = 0.0
-                    speech_ms += chunk_ms
-
-                now = time.perf_counter()
-                if now - last_vad_log >= 1.0:
-                    log_pipeline_event(
-                        "vad_chunk",
-                        session_id=session_id,
-                        utterance_id=utterance_id,
-                        rms=rms,
-                        chunk_ms=round(chunk_ms, 1),
-                        is_silence=is_silence,
-                        speech_started=speech_started,
-                        speech_ms=round(speech_ms, 1),
-                        silence_ms=round(silence_ms, 1),
-                    )
-                    last_vad_log = now
-
-                # Check endpointing: enough silence after speech
-                if silence_ms >= vad_silence_ms:
-                    if speech_ms >= min_speech_ms:
+                if not speech_started:
+                    if not is_silence:
+                        speech_started = True
+                        speech_ms = chunk_ms
+                        silence_ms = 0.0
+                        audio_buffer.extend(frame)
+                        if interruption_event:
+                            interruption_event.set()
                         if on_phase_change:
-                            on_phase_change(ConversationPhase.ENDPOINTING.value)
+                            on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
                         log_pipeline_event(
-                            "silence_endpointing",
+                            "speech_detected",
                             session_id=session_id,
                             utterance_id=utterance_id,
-                            silence_ms=round(silence_ms, 1),
-                            speech_ms=round(speech_ms, 1),
+                            latency_ms=round((time.perf_counter() - t_start) * 1000, 1),
                         )
                         if on_stage:
                             try:
-                                on_stage("vad", "done", f"Utterance finalized (silence: {round(silence_ms)}ms)")
+                                on_stage("vad", "running", "Speech detected")
                             except Exception:
                                 pass
-                        return bytes(audio_buffer), "silence", speech_ms
+                    # else: still silence before speech, discard
+                else:
+                    audio_buffer.extend(frame)
+
+                    if is_silence:
+                        silence_ms += chunk_ms
                     else:
-                        # False alarm (short click/pop), reset VAD state
-                        speech_started = False
-                        speech_ms = 0.0
                         silence_ms = 0.0
-                        audio_buffer.clear()
-                        if on_phase_change:
-                            on_phase_change(ConversationPhase.LISTENING.value)
+                        speech_ms += chunk_ms
+
+                    now = time.perf_counter()
+                    if now - last_vad_log >= 1.0:
+                        log_pipeline_event(
+                            "vad_chunk",
+                            session_id=session_id,
+                            utterance_id=utterance_id,
+                            rms=rms,
+                            chunk_ms=round(chunk_ms, 1),
+                            is_silence=is_silence,
+                            speech_started=speech_started,
+                            speech_ms=round(speech_ms, 1),
+                            silence_ms=round(silence_ms, 1),
+                        )
+                        last_vad_log = now
+
+                    # Check endpointing: enough silence after speech
+                    if silence_ms >= vad_silence_ms:
+                        if speech_ms >= min_speech_ms:
+                            if on_phase_change:
+                                on_phase_change(ConversationPhase.ENDPOINTING.value)
+                            log_pipeline_event(
+                                "silence_endpointing",
+                                session_id=session_id,
+                                utterance_id=utterance_id,
+                                silence_ms=round(silence_ms, 1),
+                                speech_ms=round(speech_ms, 1),
+                            )
+                            if on_stage:
+                                try:
+                                    on_stage("vad", "done", f"Utterance finalized (silence: {round(silence_ms)}ms)")
+                                except Exception:
+                                    pass
+                            
+                            # Grab any remaining partial frame data in buffer
+                            if len(frame_gen.buffer) > 0:
+                                audio_buffer.extend(frame_gen.buffer)
+                                
+                            return bytes(audio_buffer), "silence", speech_ms
+                        else:
+                            # False alarm (short click/pop), reset VAD state
+                            speech_started = False
+                            speech_ms = 0.0
+                            silence_ms = 0.0
+                            audio_buffer.clear()
+                            if on_phase_change:
+                                on_phase_change(ConversationPhase.LISTENING.value)
+                            if on_stage:
+                                try:
+                                    on_stage("vad", "running", "Listening for speech…")
+                                except Exception:
+                                    pass
+
+                    # Check max utterance duration
+                    if len(audio_buffer) >= max_utterance_bytes:
+                        log_pipeline_event(
+                            "max_utterance_reached",
+                            session_id=session_id,
+                            utterance_id=utterance_id,
+                            duration_ms=MAX_UTTERANCE_MS,
+                        )
                         if on_stage:
                             try:
-                                on_stage("vad", "running", "Listening for speech…")
+                                on_stage("vad", "done", "Max utterance duration reached")
                             except Exception:
                                 pass
-
-                # Check max utterance duration
-                if len(audio_buffer) >= max_utterance_bytes:
-                    log_pipeline_event(
-                        "max_utterance_reached",
-                        session_id=session_id,
-                        utterance_id=utterance_id,
-                        duration_ms=settings.MAX_UTTERANCE_MS,
-                    )
-                    if on_stage:
-                        try:
-                            on_stage("vad", "done", "Max utterance duration reached")
-                        except Exception:
-                            pass
-                    return bytes(audio_buffer), "max_duration", speech_ms
+                        
+                        if len(frame_gen.buffer) > 0:
+                            audio_buffer.extend(frame_gen.buffer)
+                            
+                        return bytes(audio_buffer), "max_duration", speech_ms
 
     # =====================================================================
     #  Process a single utterance through STT → LLM → TTS
@@ -567,7 +599,7 @@ class StreamingVoicePipeline:
         input_filename = f"input_{utterance_id}_{int(datetime.now(UTC).timestamp())}.wav"
         input_filepath = AUDIO_CACHE_DIR / input_filename
         input_filepath.write_bytes(wav_bytes)
-        result["input_audio_url"] = f"{settings.SERVER_HOST}/audio/{input_filename}"
+        result["input_audio_url"] = f"{SERVER_HOST}/audio/{input_filename}"
 
         try:
             transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
@@ -629,9 +661,9 @@ class StreamingVoicePipeline:
         # --- Energy-based noise hallucination check ---
         # If speech energy was very short AND the transcript is a single
         # very short word, it's almost certainly noise that Whisper decoded.
-        # Real user utterances of short words like "yes" have speech_ms > 400.
+        # Adjusted for WebRTC VAD: shorter utterances like "yes" can be ~150ms.
         word_count = len(cleaned_transcript.split())
-        is_very_short_audio = speech_ms > 0 and speech_ms < 400
+        is_very_short_audio = speech_ms > 0 and speech_ms < 150
         is_tiny_transcript = word_count <= 2 and len(cleaned_transcript) <= 8
 
         if is_very_short_audio and is_tiny_transcript:
@@ -758,7 +790,7 @@ class StreamingVoicePipeline:
             filepath = AUDIO_CACHE_DIR / filename
             filepath.write_bytes(combined_audio)
 
-            audio_url = f"{settings.SERVER_HOST}/audio/{filename}"
+            audio_url = f"{SERVER_HOST}/audio/{filename}"
             result["audio_url"] = audio_url
             result["audio_path"] = str(filepath)
             logger.info(f"[{utterance_id}] Combined output audio saved: {filepath} ({len(combined_audio)} bytes)")
@@ -773,7 +805,7 @@ class StreamingVoicePipeline:
             timings=timings,
         )
 
-        latency_ms = timings.get("tts_first_audio", 0.0) * 1000
+        latency_ms = timings.get("total", 0.0) * 1000
         latency_str = f"{latency_ms:.0f}ms" if latency_ms > 0 else ""
         log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
 
@@ -826,11 +858,6 @@ class StreamingVoicePipeline:
                             timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
                         first = False
                         
-                    if on_audio:
-                        try:
-                            on_audio(chunk)
-                        except Exception:
-                            pass
                     chunks.append(chunk)
                 
                 audio_chunk = b"".join(chunks)
@@ -840,6 +867,13 @@ class StreamingVoicePipeline:
                     result["audio_bytes"] = result["audio_bytes"] + audio_chunk
                 else:
                     result["audio_bytes"] = audio_chunk
+
+                # Send fully combined audio file for the sentence to frontend
+                if on_audio:
+                    try:
+                        on_audio(audio_chunk)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.error(f"TTS failed for sentence: {e}")
                 stage_cb("tts", "failed", str(e))
@@ -933,7 +967,7 @@ class StreamingVoicePipeline:
             filepath = AUDIO_CACHE_DIR / filename
             filepath.write_bytes(combined_audio)
 
-            audio_url = f"{settings.SERVER_HOST}/audio/{filename}"
+            audio_url = f"{SERVER_HOST}/audio/{filename}"
             result["audio_url"] = audio_url
             result["audio_path"] = str(filepath)
             logger.info(f"Combined audio saved: {filepath} ({len(combined_audio)} bytes)")
@@ -1025,8 +1059,8 @@ class StreamingVoicePipeline:
         silence_counter = 0
         t_start = time.perf_counter()
 
-        early_bytes = int(16000 * 2 * settings.STT_EARLY_CHUNK_SECONDS)
-        silence_chunks_for_eos = int(settings.SILENCE_DURATION_MS / 20)
+        early_bytes = int(16000 * 2 * STT_EARLY_CHUNK_SECONDS)
+        silence_chunks_for_eos = int(SILENCE_DURATION_MS / 20)
 
         try:
             while True:
@@ -1037,7 +1071,7 @@ class StreamingVoicePipeline:
                 chunk = bytes(item)
                 audio_buffer.extend(chunk)
 
-                if detect_silence(chunk, settings.SILENCE_THRESHOLD):
+                if detect_silence(chunk, SILENCE_THRESHOLD):
                     silence_counter += 1
                 else:
                     silence_counter = 0
@@ -1074,7 +1108,7 @@ class StreamingVoicePipeline:
                 input_filepath = AUDIO_CACHE_DIR / input_filename
                 wav_bytes_full = build_wav(bytes(audio_buffer), sample_rate=16000)
                 input_filepath.write_bytes(wav_bytes_full)
-                input_audio_url = f"{settings.SERVER_HOST}/audio/{input_filename}"
+                input_audio_url = f"{SERVER_HOST}/audio/{input_filename}"
                 result["input_audio_url"] = input_audio_url
 
             # Final STT on the complete audio
