@@ -9,7 +9,7 @@ All methods are async for maximum pipeline concurrency.
 
 import io
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Any
 
 import httpx
 from groq import AsyncGroq
@@ -130,7 +130,10 @@ class GroqClient:
         temperature: float = 0.0,
         max_tokens: int = 256,
         stream: bool = False,
-    ) -> str:
+        return_full_response: bool = False,
+        stage: Optional[str] = None,
+        **kwargs,
+    ) -> Any:
         """
         Generate a chat response using Groq's LLM.
 
@@ -140,12 +143,15 @@ class GroqClient:
             temperature: Sampling temperature (0 = deterministic).
             max_tokens: Maximum tokens in the response.
             stream: Whether to use streaming (collected into full text).
+            return_full_response: Return the complete response object (useful for tool calls).
+            **kwargs: Extra parameters like tools, tool_choice, etc.
 
         Returns:
-            The assistant's reply as a string.
+            The assistant's reply as a string, or the full response object if return_full_response is True.
         """
         model = model or self.LLM_MODEL
-        logger.info(f"LLM: Calling {model} with {len(messages)} messages")
+        stage_info = f" [{stage}]" if stage else ""
+        logger.info(f"LLM{stage_info}: Calling {model} with {len(messages)} messages")
 
         if stream:
             return await self._chat_completion_stream(messages, model, temperature, max_tokens)
@@ -155,8 +161,13 @@ class GroqClient:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            **kwargs
         )
-        reply = response.choices[0].message.content.strip()
+        if return_full_response:
+            return response
+            
+        reply = response.choices[0].message.content
+        reply = reply.strip() if reply else ""
         logger.info(f"LLM result: '{reply[:100]}...'")
         return reply
 

@@ -42,7 +42,7 @@ class Settings:
 
     # --- Streaming Pipeline Tuning ---
     STT_EARLY_CHUNK_SECONDS = float(os.getenv("STT_EARLY_CHUNK_SECONDS", "1.0"))
-    SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))
+    SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "2000"))
     SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "1500"))
     TTS_CACHE_SIZE = int(os.getenv("TTS_CACHE_SIZE", "100"))
     LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "96"))
@@ -60,7 +60,7 @@ class Settings:
 
     # --- Voice Activity Detection (VAD) ---
     VAD_SILENCE_MS = int(os.getenv("VAD_SILENCE_MS", "800"))
-    MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "250"))
+    MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "500"))
     MAX_UTTERANCE_MS = int(os.getenv("MAX_UTTERANCE_MS", "30000"))
 
     @property

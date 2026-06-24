@@ -33,8 +33,8 @@ from app.config import settings
 from app.database import DatabaseClient
 from app.groq_client import GroqClient
 from app.llm.rephrase import LLMRephraser
-from app.services.conversation_service import ConversationService
-from app.logging.logger import log_event, log_pipeline_event
+from app.services.agent_service import AgentService
+from app.logging.logger import log_event, log_pipeline_event, log_transcript
 from app.response_cache import ResponseCache
 from app.twilio_handler import TwilioHandler
 
@@ -81,14 +81,14 @@ class StreamingVoicePipeline:
         groq_client: GroqClient,
         db_client: DatabaseClient,
         twilio_handler: TwilioHandler,
-        conversation_service: ConversationService,
+        agent_service: AgentService,
         rephraser: LLMRephraser,
     ):
         self.groq = groq_client
         self.db = db_client
         self.twilio = twilio_handler
         self.tts_cache = ResponseCache(max_size=settings.TTS_CACHE_SIZE)
-        self.conversation = conversation_service
+        self.agent = agent_service
         self.rephraser = rephraser
 
     # =====================================================================
@@ -147,32 +147,27 @@ class StreamingVoicePipeline:
         _set_phase(ConversationPhase.LISTENING)
         log_pipeline_event("session_start", session_id=resolved_session_id)
 
+        # We start with listening for the first utterance
+        _set_phase(ConversationPhase.LISTENING)
+        utterance_data = await self._vad_collect_utterance(
+            audio_queue,
+            session_id=resolved_session_id,
+            utterance_id=f"{resolved_session_id}-t0",
+            on_phase_change=_set_phase,
+            on_stage=on_stage,
+        )
+
         while not session_ended:
-            turn_index += 1
-            utterance_id = f"{resolved_session_id}-t{turn_index}"
-
-            log_pipeline_event(
-                "turn_start",
-                session_id=resolved_session_id,
-                utterance_id=utterance_id,
-                turn_index=turn_index,
-            )
-
-            # ----- Step 1: VAD — collect one utterance from the audio stream -----
-            _set_phase(ConversationPhase.LISTENING)
-            utterance_audio, vad_done_reason = await self._vad_collect_utterance(
-                audio_queue,
-                session_id=resolved_session_id,
-                utterance_id=utterance_id,
-                on_phase_change=_set_phase,
-                on_stage=on_stage,
-            )
+            if not utterance_data:
+                break
+                
+            utterance_audio, vad_done_reason, vad_speech_ms = utterance_data
 
             if vad_done_reason == "stream_ended":
                 log_pipeline_event(
                     "stream_ended",
                     session_id=resolved_session_id,
-                    utterance_id=utterance_id,
+                    utterance_id=f"{resolved_session_id}-end",
                     turn_index=turn_index,
                 )
                 session_ended = True
@@ -184,13 +179,32 @@ class StreamingVoicePipeline:
                 log_pipeline_event(
                     "utterance_too_short",
                     session_id=resolved_session_id,
-                    utterance_id=utterance_id,
+                    utterance_id=f"{resolved_session_id}-short",
                     turn_index=turn_index,
                     bytes=len(utterance_audio) if utterance_audio else 0,
                 )
                 if session_ended:
                     break
+                # Fetch next utterance directly
+                utterance_data = await self._vad_collect_utterance(
+                    audio_queue,
+                    session_id=resolved_session_id,
+                    utterance_id=f"{resolved_session_id}-t{turn_index}",
+                    on_phase_change=_set_phase,
+                    on_stage=on_stage,
+                )
                 continue
+
+            # We have a valid utterance. Advance the turn index.
+            turn_index += 1
+            utterance_id = f"{resolved_session_id}-t{turn_index}"
+            
+            log_pipeline_event(
+                "turn_start",
+                session_id=resolved_session_id,
+                utterance_id=utterance_id,
+                turn_index=turn_index,
+            )
 
             # ----- Step 2: Process the utterance (STT → LLM → TTS) -----
             _set_phase(ConversationPhase.PROCESSING)
@@ -202,46 +216,110 @@ class StreamingVoicePipeline:
                 audio_bytes=len(utterance_audio),
             )
 
-            turn_result = await self._process_single_utterance(
-                utterance_audio,
-                session_id=resolved_session_id,
-                utterance_id=utterance_id,
-                turn_index=turn_index,
-                on_stt_text=on_stt_text,
-                on_llm_token=on_llm_token,
-                on_tts_audio=on_tts_audio,
-                on_stage=on_stage,
-                on_phase_change=_set_phase,
+            # Create the processing task
+            process_task = asyncio.create_task(
+                self._process_single_utterance(
+                    utterance_audio,
+                    session_id=resolved_session_id,
+                    utterance_id=utterance_id,
+                    turn_index=turn_index,
+                    speech_ms=vad_speech_ms,
+                    on_stt_text=on_stt_text,
+                    on_llm_token=on_llm_token,
+                    on_tts_audio=on_tts_audio,
+                    on_stage=on_stage,
+                    on_phase_change=_set_phase,
+                )
             )
 
-            all_timings.append(turn_result.get("timings", {}))
-
-            if on_turn_done:
-                try:
-                    on_turn_done(turn_result)
-                except Exception:
-                    pass
-
-            # Check if the conversation should end
-            if turn_result.get("should_end", False):
-                session_ended = True
-                _set_phase(ConversationPhase.ENDED)
-                log_pipeline_event(
-                    "session_end_by_intent",
+            # ----- Step 3: Listen for interruption concurrently -----
+            interruption_event = asyncio.Event()
+            vad_task = asyncio.create_task(
+                self._vad_collect_utterance(
+                    audio_queue,
                     session_id=resolved_session_id,
+                    utterance_id=f"{resolved_session_id}-t{turn_index+1}",
+                    on_phase_change=_set_phase,
+                    on_stage=on_stage,
+                    interruption_event=interruption_event,
+                )
+            )
+
+            waiters = [process_task, asyncio.create_task(interruption_event.wait())]
+            if barge_in_event:
+                waiters.append(asyncio.create_task(barge_in_event.wait()))
+
+            # Wait for either processing to finish OR an interruption
+            done, pending = await asyncio.wait(
+                waiters, 
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            interrupted = False
+            for task in done:
+                # If either interruption event was set, we have a barge-in
+                if task is not process_task:
+                    interrupted = True
+
+            if interrupted:
+                log_pipeline_event(
+                    "barge_in_detected",
+                    session_id=resolved_session_id,
+                    utterance_id=utterance_id,
                     turn_index=turn_index,
                 )
-                break
+                
+                # Cancel the currently processing/speaking turn
+                process_task.cancel()
+                try:
+                    await process_task
+                except asyncio.CancelledError:
+                    pass
 
-            # ----- Step 3: Resume listening -----
-            _set_phase(ConversationPhase.LISTENING)
-            log_pipeline_event(
-                "turn_complete",
-                session_id=resolved_session_id,
-                utterance_id=utterance_id,
-                turn_index=turn_index,
-                timings=turn_result.get("timings", {}),
-            )
+                if barge_in_event and barge_in_event.is_set():
+                    barge_in_event.clear()
+
+                _set_phase(ConversationPhase.INTERRUPTED)
+                
+                # Wait for the VAD task to finish collecting the new interrupting utterance
+                utterance_data = await vad_task
+
+            else:
+                # Processing finished normally without interruption
+                turn_result = process_task.result()
+                
+                all_timings.append(turn_result.get("timings", {}))
+
+                if on_turn_done:
+                    try:
+                        on_turn_done(turn_result)
+                    except Exception:
+                        pass
+
+                # Check if the conversation should end
+                if turn_result.get("should_end", False):
+                    session_ended = True
+                    _set_phase(ConversationPhase.ENDED)
+                    log_pipeline_event(
+                        "session_end_by_intent",
+                        session_id=resolved_session_id,
+                        turn_index=turn_index,
+                    )
+                    # We can cancel the waiting vad task since we're ending
+                    vad_task.cancel()
+                    break
+                    
+                _set_phase(ConversationPhase.LISTENING)
+                log_pipeline_event(
+                    "turn_complete",
+                    session_id=resolved_session_id,
+                    utterance_id=utterance_id,
+                    turn_index=turn_index,
+                    timings=turn_result.get("timings", {}),
+                )
+                
+                # Now wait for the user's next utterance (the VAD task is already running and waiting)
+                utterance_data = await vad_task
 
         _set_phase(ConversationPhase.ENDED)
         log_pipeline_event(
@@ -267,7 +345,8 @@ class StreamingVoicePipeline:
         utterance_id: str,
         on_phase_change: Optional[Callable] = None,
         on_stage: Optional[Callable] = None,
-    ) -> tuple[Optional[bytes], str]:
+        interruption_event: Optional[asyncio.Event] = None,
+    ) -> tuple[Optional[bytes], str, float]:
         """
         Listen to the audio_queue and collect frames for one utterance.
 
@@ -277,8 +356,9 @@ class StreamingVoicePipeline:
         3. When silence exceeds VAD_SILENCE_MS, finalize the utterance
 
         Returns:
-            (utterance_pcm_bytes, reason)
+            (utterance_pcm_bytes, reason, speech_ms)
             reason is one of: "silence", "max_duration", "stream_ended"
+            speech_ms is the total milliseconds of detected speech energy
         """
         audio_buffer = bytearray()
         speech_started = False
@@ -311,14 +391,14 @@ class StreamingVoicePipeline:
                 if speech_started and len(audio_buffer) > 0:
                     silence_ms += 500
                     if silence_ms >= vad_silence_ms:
-                        return bytes(audio_buffer), "silence"
+                        return bytes(audio_buffer), "silence", speech_ms
                 continue
 
             if item is _DONE:
                 # Stream ended
                 if speech_started and audio_buffer:
-                    return bytes(audio_buffer), "stream_ended"
-                return None, "stream_ended"
+                    return bytes(audio_buffer), "stream_ended", speech_ms
+                return None, "stream_ended", 0.0
 
             chunk = bytes(item)
 
@@ -333,6 +413,8 @@ class StreamingVoicePipeline:
                     speech_ms = chunk_ms
                     silence_ms = 0.0
                     audio_buffer.extend(chunk)
+                    if interruption_event:
+                        interruption_event.set()
                     if on_phase_change:
                         on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
                     log_pipeline_event(
@@ -372,22 +454,36 @@ class StreamingVoicePipeline:
                     last_vad_log = now
 
                 # Check endpointing: enough silence after speech
-                if silence_ms >= vad_silence_ms and speech_ms >= min_speech_ms:
-                    if on_phase_change:
-                        on_phase_change(ConversationPhase.ENDPOINTING.value)
-                    log_pipeline_event(
-                        "silence_endpointing",
-                        session_id=session_id,
-                        utterance_id=utterance_id,
-                        silence_ms=round(silence_ms, 1),
-                        speech_ms=round(speech_ms, 1),
-                    )
-                    if on_stage:
-                        try:
-                            on_stage("vad", "done", f"Utterance finalized (silence: {round(silence_ms)}ms)")
-                        except Exception:
-                            pass
-                    return bytes(audio_buffer), "silence"
+                if silence_ms >= vad_silence_ms:
+                    if speech_ms >= min_speech_ms:
+                        if on_phase_change:
+                            on_phase_change(ConversationPhase.ENDPOINTING.value)
+                        log_pipeline_event(
+                            "silence_endpointing",
+                            session_id=session_id,
+                            utterance_id=utterance_id,
+                            silence_ms=round(silence_ms, 1),
+                            speech_ms=round(speech_ms, 1),
+                        )
+                        if on_stage:
+                            try:
+                                on_stage("vad", "done", f"Utterance finalized (silence: {round(silence_ms)}ms)")
+                            except Exception:
+                                pass
+                        return bytes(audio_buffer), "silence", speech_ms
+                    else:
+                        # False alarm (short click/pop), reset VAD state
+                        speech_started = False
+                        speech_ms = 0.0
+                        silence_ms = 0.0
+                        audio_buffer.clear()
+                        if on_phase_change:
+                            on_phase_change(ConversationPhase.LISTENING.value)
+                        if on_stage:
+                            try:
+                                on_stage("vad", "running", "Listening for speech…")
+                            except Exception:
+                                pass
 
                 # Check max utterance duration
                 if len(audio_buffer) >= max_utterance_bytes:
@@ -402,7 +498,7 @@ class StreamingVoicePipeline:
                             on_stage("vad", "done", "Max utterance duration reached")
                         except Exception:
                             pass
-                    return bytes(audio_buffer), "max_duration"
+                    return bytes(audio_buffer), "max_duration", speech_ms
 
     # =====================================================================
     #  Process a single utterance through STT → LLM → TTS
@@ -414,6 +510,7 @@ class StreamingVoicePipeline:
         session_id: str,
         utterance_id: str,
         turn_index: int,
+        speech_ms: float = 0.0,
         on_stt_text: Optional[Callable] = None,
         on_llm_token: Optional[Callable] = None,
         on_tts_audio: Optional[Callable] = None,
@@ -502,8 +599,48 @@ class StreamingVoicePipeline:
             result["reply_text"] = "I'm sorry, I couldn't understand that. Could you repeat?"
             return result
 
+        cleaned_transcript = transcript.strip().lower()
+
+        # --- Pure Whisper artifacts (always discard) ---
+        whisper_artifacts = {
+            ".", ",", "!", "?",
+            "you.", "you",
+            "you're welcome.", "you're welcome", "welcome.", "welcome",
+            "test.", "test", "am i?", "am i", "is it?", "is it",
+            "i", "i.", "my...", "my",
+            "goodbye.", "goodbye", "good bye.", "good bye",
+        }
+
         if not transcript or not transcript.strip():
             _stage("stt", "done", "No speech detected")
+            result["reply_text"] = ""
+            return result
+
+        if cleaned_transcript in whisper_artifacts:
+            _stage("stt", "done", f"Whisper artifact suppressed: '{cleaned_transcript}'")
+            log_pipeline_event(
+                "turn_route", route="whisper_artifact_suppressed",
+                session_id=session_id, utterance_id=utterance_id,
+                transcript=cleaned_transcript,
+            )
+            result["reply_text"] = ""
+            return result
+
+        # --- Energy-based noise hallucination check ---
+        # If speech energy was very short AND the transcript is a single
+        # very short word, it's almost certainly noise that Whisper decoded.
+        # Real user utterances of short words like "yes" have speech_ms > 400.
+        word_count = len(cleaned_transcript.split())
+        is_very_short_audio = speech_ms > 0 and speech_ms < 400
+        is_tiny_transcript = word_count <= 2 and len(cleaned_transcript) <= 8
+
+        if is_very_short_audio and is_tiny_transcript:
+            _stage("stt", "done", f"Noise hallucination suppressed (speech_ms={round(speech_ms)}ms): '{cleaned_transcript}'")
+            log_pipeline_event(
+                "turn_route", route="noise_hallucination_suppressed",
+                session_id=session_id, utterance_id=utterance_id,
+                transcript=cleaned_transcript, speech_ms=round(speech_ms, 1),
+            )
             result["reply_text"] = ""
             return result
 
@@ -512,7 +649,7 @@ class StreamingVoicePipeline:
         timings["conversation_start"] = round(time.perf_counter() - t0, 4)
 
         try:
-            conversation = await self.conversation.handle_user_text(session_id, transcript)
+            conversation = await self.agent.handle_user_text(session_id, transcript)
             result["intent"] = conversation.intent
             result["reply_text"] = conversation.reply_text
             result["state"] = conversation.state
@@ -597,18 +734,34 @@ class StreamingVoicePipeline:
             except Exception as e:
                 logger.error(f"[{utterance_id}] LLM rephrase failed: {e}")
                 _stage("llm", "failed", "Rephrase failed — using original")
-                await self._tts_sentence(
-                    reply_text, result, timings, t0, _stage, on_tts_audio
-                )
+                for sentence in _split_sentences(reply_text):
+                    if sentence.strip():
+                        await self._tts_sentence(
+                            sentence.strip(), result, timings, t0, _stage, on_tts_audio
+                        )
         else:
             _stage("llm", "done", "Deterministic response")
-            # TTS the reply directly
-            await self._tts_sentence(
-                reply_text, result, timings, t0, _stage, on_tts_audio
-            )
+            # Pipelined TTS: Split reply into sentences and synthesize sequentially
+            for sentence in _split_sentences(reply_text):
+                if sentence.strip():
+                    await self._tts_sentence(
+                        sentence.strip(), result, timings, t0, _stage, on_tts_audio
+                    )
 
         if on_phase_change:
             on_phase_change(ConversationPhase.SPEAKING.value)
+
+        # Save combined output audio to cache
+        combined_audio = result.get("audio_bytes")
+        if combined_audio:
+            filename = f"output_{utterance_id}_{int(datetime.now(UTC).timestamp())}.wav"
+            filepath = AUDIO_CACHE_DIR / filename
+            filepath.write_bytes(combined_audio)
+
+            audio_url = f"{settings.SERVER_HOST}/audio/{filename}"
+            result["audio_url"] = audio_url
+            result["audio_path"] = str(filepath)
+            logger.info(f"[{utterance_id}] Combined output audio saved: {filepath} ({len(combined_audio)} bytes)")
 
         timings["total"] = round(time.perf_counter() - t0, 4)
 
@@ -619,6 +772,10 @@ class StreamingVoicePipeline:
             turn_index=turn_index,
             timings=timings,
         )
+
+        latency_ms = timings.get("tts_first_audio", 0.0) * 1000
+        latency_str = f"{latency_ms:.0f}ms" if latency_ms > 0 else ""
+        log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
 
         return result
 
@@ -646,30 +803,47 @@ class StreamingVoicePipeline:
         cached = self.tts_cache.get(sentence)
         if cached:
             logger.info(f"TTS cache hit: '{sentence[:40]}…'")
-            audio_chunk = cached
+            if "tts_first_audio" not in timings:
+                timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+
+            if result.get("audio_bytes"):
+                result["audio_bytes"] = result["audio_bytes"] + cached
+            else:
+                result["audio_bytes"] = cached
+
+            if on_audio:
+                try:
+                    on_audio(cached)
+                except Exception:
+                    pass
         else:
+            chunks = []
             try:
-                audio_chunk = await self.groq.text_to_speech(sentence)
+                first = True
+                async for chunk in self.groq.text_to_speech_streaming(sentence):
+                    if first:
+                        if "tts_first_audio" not in timings:
+                            timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+                        first = False
+                        
+                    if on_audio:
+                        try:
+                            on_audio(chunk)
+                        except Exception:
+                            pass
+                    chunks.append(chunk)
+                
+                audio_chunk = b"".join(chunks)
                 self.tts_cache.put(sentence, audio_chunk)
+                
+                if result.get("audio_bytes"):
+                    result["audio_bytes"] = result["audio_bytes"] + audio_chunk
+                else:
+                    result["audio_bytes"] = audio_chunk
             except Exception as e:
                 logger.error(f"TTS failed for sentence: {e}")
                 stage_cb("tts", "failed", str(e))
                 return
-
-        if "tts_first_audio" not in timings:
-            timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
-
-        # Accumulate audio in result
-        if result.get("audio_bytes"):
-            result["audio_bytes"] = result["audio_bytes"] + audio_chunk
-        else:
-            result["audio_bytes"] = audio_chunk
-
-        if on_audio:
-            try:
-                on_audio(audio_chunk)
-            except Exception:
-                pass
 
         timings["tts_end"] = round(time.perf_counter() - t0, 4)
         stage_cb("tts", "done", f"Cache stats: {self.tts_cache.stats}")
@@ -974,7 +1148,7 @@ class StreamingVoicePipeline:
                 return
 
             stage_cb("conversation", "running", "Routing intent and slots")
-            conversation = await self.conversation.handle_user_text(session_id, transcript)
+            conversation = await self.agent.handle_user_text(session_id, transcript)
             result["intent"] = conversation.intent
             result["reply_text"] = conversation.reply_text
             result["state"] = conversation.state

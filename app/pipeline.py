@@ -16,7 +16,7 @@ from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.llm.rephrase import LLMRephraser
 from app.logging.logger import log_event
-from app.services.conversation_service import ConversationService
+from app.services.agent_service import AgentService
 from app.twilio_handler import TwilioHandler
 from app.audio_utils import build_wav, resample_to_16khz, mulaw_to_pcm
 
@@ -40,13 +40,13 @@ class VoicePipeline:
         groq_client: GroqClient,
         db_client: DatabaseClient,
         twilio_handler: TwilioHandler,
-        conversation_service: ConversationService,
+        agent_service: AgentService,
         rephraser: LLMRephraser,
     ):
         self.groq = groq_client
         self.db = db_client
         self.twilio = twilio_handler
-        self.conversation = conversation_service
+        self.agent = agent_service
         self.rephraser = rephraser
 
     # -------------------------------------------------------------------------
@@ -129,7 +129,7 @@ class VoicePipeline:
             # Stage 3: Deterministic conversation handling
             # -----------------------------------------------------------------
             stages.append({"stage": "conversation", "status": "running", "ts": _now()})
-            conversation = await self.conversation.handle_user_text(result["session_id"], transcript)
+            conversation = await self.agent.handle_user_text(result["session_id"], transcript)
             result["intent"] = conversation.intent
             result["reply_text"] = conversation.reply_text
             result["customer"] = _serialize_customer(conversation.customer)
@@ -214,7 +214,7 @@ class VoicePipeline:
             composite_query = f"My name is {name} and DOB is {dob}. {query}".strip()
 
             stages.append({"stage": "conversation", "status": "running", "ts": _now()})
-            conversation = await self.conversation.handle_user_text(result["session_id"], composite_query)
+            conversation = await self.agent.handle_user_text(result["session_id"], composite_query)
             result["intent"] = conversation.intent
             result["reply_text"] = conversation.reply_text
             result["customer"] = _serialize_customer(conversation.customer)

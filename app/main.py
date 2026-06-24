@@ -33,7 +33,7 @@ from app.intents import IntentRouter, SlotFiller
 from app.session import SessionManager, InMemorySessionStore
 from app.state_machine import ConversationStateMachine
 from app.repositories import CustomerRepository, OrderRepository
-from app.services import ConversationService, VerificationService, OrderService
+from app.services import AgentService, VerificationService, OrderService
 from app.llm import LLMRephraser
 from app.audio_utils import (
     mulaw_to_pcm,
@@ -80,7 +80,7 @@ twilio_handler: TwilioHandler = None  # type: ignore
 pipeline: VoicePipeline = None  # type: ignore
 streaming_pipeline: StreamingVoicePipeline = None  # type: ignore
 session_manager: SessionManager = None  # type: ignore
-conversation_service: ConversationService = None  # type: ignore
+agent_service: AgentService = None  # type: ignore
 rephraser: LLMRephraser = None  # type: ignore
 
 # =============================================================================
@@ -90,7 +90,7 @@ rephraser: LLMRephraser = None  # type: ignore
 async def startup():
     """Initialize all services on server startup."""
     global groq_client, db_client, twilio_handler, pipeline, streaming_pipeline
-    global session_manager, conversation_service, rephraser
+    global session_manager, agent_service, rephraser
 
     logger.info("=" * 60)
     logger.info("  Voice Agent v2 — Streaming Pipeline — Starting up")
@@ -123,11 +123,9 @@ async def startup():
     order_repo = OrderRepository(db_client)
     verification_service = VerificationService(customer_repo)
     order_service = OrderService(order_repo)
-    conversation_service = ConversationService(
+    agent_service = AgentService(
         session_manager=session_manager,
-        intent_router=intent_router,
-        slot_filler=slot_filler,
-        state_machine=state_machine,
+        groq_client=groq_client,
         verification_service=verification_service,
         order_service=order_service,
     )
@@ -135,7 +133,7 @@ async def startup():
     logger.info("✓ Conversation orchestration initialized")
 
     # Initialize legacy pipeline (for text simulation)
-    pipeline = VoicePipeline(groq_client, db_client, twilio_handler, conversation_service, rephraser)
+    pipeline = VoicePipeline(groq_client, db_client, twilio_handler, agent_service, rephraser)
     logger.info("✓ Legacy voice pipeline initialized")
 
     # Initialize streaming pipeline
@@ -143,7 +141,7 @@ async def startup():
         groq_client,
         db_client,
         twilio_handler,
-        conversation_service,
+        agent_service,
         rephraser,
     )
     logger.info("✓ Streaming voice pipeline initialized")
@@ -490,6 +488,8 @@ async def mic_stream(websocket: WebSocket):
             logger.error(f"Browser mic-stream pipeline error: {e}")
 
         logger.info("Browser mic-stream WebSocket closed")
+        if session_id:
+            await session_manager.delete(session_id)
 
 
 # =============================================================================

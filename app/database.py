@@ -153,8 +153,11 @@ class DatabaseClient:
         Returns:
             Customer dict {"id", "full_name", "date_of_birth", "phone"} or None.
         """
+        # Clean name
+        name_clean = name.strip().rstrip('.')
+
         if self._use_fallback:
-            return self._fallback_verify_customer(name, dob)
+            return self._fallback_verify_customer(name_clean, dob)
 
         query = """
             SELECT id, full_name, date_of_birth, phone
@@ -165,9 +168,33 @@ class DatabaseClient:
             LIMIT 1;
         """
         try:
-            dob_date = date.fromisoformat(dob) if isinstance(dob, str) else dob
+            if isinstance(dob, str):
+                import re
+                from datetime import datetime
+                # Clean dob string
+                dob_clean = re.sub(r'(st|nd|rd|th)', '', dob.lower())
+                dob_clean = dob_clean.replace(',', '').strip()
+                # Try to extract YYYY, MM, DD using regex if it's messy
+                match = re.search(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})", dob_clean)
+                if match:
+                    dob_date = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                else:
+                    # Attempt standard fallback formats (e.g., DD May YYYY, etc.)
+                    try:
+                        dob_date = datetime.strptime(dob_clean, "%d %b %Y").date()
+                    except ValueError:
+                        try:
+                            dob_date = datetime.strptime(dob_clean, "%d %B %Y").date()
+                        except ValueError:
+                            try:
+                                dob_date = date.fromisoformat(dob_clean)
+                            except ValueError:
+                                # if nothing works, return None
+                                return None
+            else:
+                dob_date = dob
             async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(query, name, dob_date)
+                row = await conn.fetchrow(query, name_clean, dob_date)
             if row:
                 return dict(row)
             return None
@@ -177,15 +204,36 @@ class DatabaseClient:
 
     def _fallback_verify_customer(self, name: str, dob: str) -> Optional[dict]:
         """In-memory customer lookup."""
+        name_clean = name.strip().rstrip('.')
         try:
-            dob_date = date.fromisoformat(dob) if isinstance(dob, str) else dob
-        except ValueError:
+            if isinstance(dob, str):
+                import re
+                from datetime import datetime
+                dob_clean = re.sub(r'(st|nd|rd|th)', '', dob.lower())
+                dob_clean = dob_clean.replace(',', '').strip()
+                match = re.search(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})", dob_clean)
+                if match:
+                    dob_date = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                else:
+                    try:
+                        dob_date = datetime.strptime(dob_clean, "%d %b %Y").date()
+                    except ValueError:
+                        try:
+                            dob_date = datetime.strptime(dob_clean, "%d %B %Y").date()
+                        except ValueError:
+                            try:
+                                dob_date = date.fromisoformat(dob_clean)
+                            except ValueError:
+                                return None
+            else:
+                dob_date = dob
+        except Exception:
             return None
 
         for c in _FALLBACK_CUSTOMERS:
             if c.get("deleted_at") is not None:
                 continue
-            if c["full_name"].lower() == name.lower() and c["date_of_birth"] == dob_date:
+            if c["full_name"].lower() == name_clean.lower() and c["date_of_birth"] == dob_date:
                 return c
         return None
 

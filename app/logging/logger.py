@@ -48,3 +48,25 @@ def log_pipeline_event(
         logger.info(json.dumps(payload, default=str))
     except Exception:
         logger.info("event=%s fields=%s", event, payload)
+
+
+import os
+from datetime import datetime
+
+TRANSCRIPTS_DIR = "transcripts"
+
+def log_transcript(session_id: str, user_text: str, agent_text: str, latency_str: str = "") -> None:
+    """Log the raw user input and agent response to a session-specific file."""
+    if not os.path.exists(TRANSCRIPTS_DIR):
+        os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+        
+    filepath = os.path.join(TRANSCRIPTS_DIR, f"{session_id}.txt")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = f"[{timestamp}]"
+    if latency_str:
+        header += f" (Latency: {latency_str})"
+    
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(f"{header}\n")
+        f.write(f"user: \"{user_text}\"\n")
+        f.write(f"agent: \"{agent_text}\"\n\n")

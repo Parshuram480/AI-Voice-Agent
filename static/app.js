@@ -183,6 +183,7 @@ function setPhase(phase) {
       phaseLabel.textContent = '● Interrupted — listening…';
       micHint.textContent = 'Agent stopped — listening to you';
       btnMic.className = 'mic-room__btn active';
+      stopAllPlayback();
       break;
     case 'ENDED':
       phaseDot.classList.add('phase-dot--ended');

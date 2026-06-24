@@ -30,7 +30,9 @@ class SessionState:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     retry_counts: dict[str, int] = field(default_factory=dict)
     customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
     last_order: Optional[dict] = None
+    orders: list[dict] = field(default_factory=list)
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC)
