@@ -1,12 +1,16 @@
-"""LLM-driven conversational agent service."""
+"""LLM-driven conversational agent service using LangGraph."""
 
 import json
 import logging
 import os
 import re
-import re
 import time
-from typing import Optional
+from typing import Optional, Annotated, Sequence, TypedDict
+import operator
+
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.groq_client import GroqClient
 from app.models.response import ConversationResult
@@ -14,12 +18,11 @@ from app.models.session import SessionState
 from app.services.order_service import OrderService
 from app.services.verification_service import VerificationService
 from app.session.manager import SessionManager
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# --- Environment Variables ---
 SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
-
 
 AGENT_SYSTEM_PROMPT = """You are a helpful, friendly customer support voice agent for an order management system.
 Your ONLY purpose is to help callers check their order status, delivery dates, item summaries, and order numbers.
@@ -31,8 +34,8 @@ Your text response will be spoken aloud by a TTS engine. You must NEVER include 
 
 VERIFICATION FLOW:
 1. When a user wants to check their order, ask for their full name first, then their date of birth. Ask naturally, e.g. "Could you please tell me your full name?" and "And your date of birth?"
-2. When you have both, call the verify_user tool. Convert any natural-language date (like "May 15th 1990") to YYYY-MM-DD internally — NEVER tell the user what format you need.
-3. If verification fails, say something like "I wasn't able to find an account with those details. Would you like to try again?" Do NOT reveal the format or technical reason.
+2. When you have both, call the verify_user tool. Convert any natural-language date (like "May 15th 1990") to YYYY-MM-DD internally. If the user provides an incomplete date (e.g., "May 19" without a year), explicitly ask them for the missing information before verifying.
+3. If verification fails, naturally and dynamically explain that you couldn't find a matching account and ask them to try again. Vary your wording every time so you don't sound repetitive like a robot.
 4. After successful verification, immediately summarize their most recent order. Do NOT ask if they want you to proceed.
 
 DO NOT (CRITICAL — violating these is a failure):
@@ -49,13 +52,12 @@ CONVERSATION STYLE:
 - If the user says goodbye or thanks, respond warmly and end the conversation.
 """
 
-# Regex patterns to detect raw tool-call JSON leaked into reply text
 _TOOL_LEAK_PATTERNS = [
-    re.compile(r'function\s*=\s*\w+\s*>\s*\{.*?\}', re.DOTALL),   # function=verify_user>{...}
-    re.compile(r'<\|?tool_call\|?>.*?<\|?/tool_call\|?>', re.DOTALL),  # <tool_call>...</tool_call>
-    re.compile(r'\{\s*"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:', re.DOTALL),  # {"name":"verify_user","arguments":...}
-    re.compile(r'\{\s*"function"\s*:', re.DOTALL),  # {"function":...}
-    re.compile(r'</?function[^>]*>', re.IGNORECASE),  # <function> or </function>
+    re.compile(r'function\s*=\s*\w+\s*>\s*\{.*?\}', re.DOTALL),
+    re.compile(r'<\|?tool_call\|?>.*?<\|?/tool_call\|?>', re.DOTALL),
+    re.compile(r'\{\s*"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:', re.DOTALL),
+    re.compile(r'\{\s*"function"\s*:', re.DOTALL),
+    re.compile(r'</?function[^>]*>', re.IGNORECASE),
 ]
 
 AGENT_TOOLS = [
@@ -82,8 +84,17 @@ AGENT_TOOLS = [
     }
 ]
 
+class AgentState(TypedDict):
+    messages: Annotated[list[dict], operator.add]
+    verified: bool
+    user_name: Optional[str]
+    dob: Optional[str]
+    customer: Optional[dict]
+    orders: list[dict]
+    reply_text: str
+
 class AgentService:
-    """Primary orchestration layer for LLM-driven dialog."""
+    """Primary orchestration layer for LLM-driven dialog using LangGraph."""
 
     def __init__(
         self,
@@ -96,44 +107,50 @@ class AgentService:
         self._groq = groq_client
         self._verification = verification_service
         self._orders = order_service
+        self._memory = MemorySaver()
+        self._graph = self._build_graph()
+
+    def _build_graph(self):
+        graph = StateGraph(AgentState)
+        
+        graph.add_node("agent", self._agent_node)
+        graph.add_node("verify_tool", self._verify_tool_node)
+        
+        graph.add_edge(START, "agent")
+        
+        def route_agent(state: AgentState):
+            last_msg = state["messages"][-1]
+            if last_msg["role"] == "assistant" and "tool_calls" in last_msg and last_msg["tool_calls"]:
+                return "verify_tool"
+            return END
+            
+        graph.add_conditional_edges("agent", route_agent, {"verify_tool": "verify_tool", END: END})
+        graph.add_edge("verify_tool", "agent")
+        
+        return graph.compile(checkpointer=self._memory)
 
     @staticmethod
     def _sanitize_reply_text(text: str) -> str:
-        """Strip any raw tool-call JSON that leaked into the spoken reply."""
         if not text:
             return text
         sanitized = text
         for pattern in _TOOL_LEAK_PATTERNS:
             sanitized = pattern.sub('', sanitized)
-        # Clean up leftover whitespace / punctuation fragments
         sanitized = sanitized.strip()
         if not sanitized or len(sanitized) < 3:
-            # The entire reply was just leaked JSON — use a natural fallback
             return "Let me look into that for you."
         return sanitized
 
-    async def handle_user_text(self, session_id: str, user_text: str) -> ConversationResult:
-        timings: dict[str, float] = {}
-        t0 = time.perf_counter()
-
-        session = await self._sessions.get_or_create(session_id)
-        
-        # Append user turn to history
-        if user_text:
-            session.add_turn("user", user_text, SESSION_MAX_TURNS)
-            
-        from datetime import datetime
+    async def _agent_node(self, state: AgentState) -> dict:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         dynamic_prompt = f"{AGENT_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
-        messages = [{"role": "system", "content": dynamic_prompt}]
-        
-        # Inject system context if already verified — include cached order data
-        # so the LLM can answer follow-up queries from memory (no repeated DB calls)
-        if session.verified and session.customer_id:
+        messages_to_send = [{"role": "system", "content": dynamic_prompt}]
+
+        if state.get("verified") and state.get("customer"):
             orders_context = ""
-            if session.orders:
+            if state.get("orders"):
                 order_lines = []
-                for o in session.orders:
+                for o in state["orders"]:
                     parts = [
                         f"Order #{o.get('order_number', 'N/A')}",
                         f"Status: {o.get('status', 'unknown')}",
@@ -147,43 +164,37 @@ class AgentService:
             else:
                 orders_context = "No orders found for this customer."
 
-            messages.append({
+            messages_to_send.append({
                 "role": "system",
                 "content": (
                     f"VERIFIED USER CONTEXT (internal — do NOT read this aloud or echo to the user):\n"
-                    f"Customer name: {session.customer_name or session.user_name}\n"
+                    f"Customer name: {state.get('user_name', '')}\n"
                     f"The user is already verified. Do NOT ask for their name or date of birth again.\n"
                     f"Their orders:\n{orders_context}\n\n"
                     f"Use ONLY this order data to answer the user's questions. Do NOT make up information."
                 )
             })
-            
-        for turn in session.conversation_history:
-            messages.append({"role": turn.role, "content": turn.text})
 
-        # Only offer tools when the user is NOT yet verified
-        # (once verified, all order data is in the system context — no tool needed)
-        use_tools = not session.verified
-        
-        # LLM Call 1
+        # Append state messages (limiting to last N turns if necessary, but LangGraph keeps them)
+        messages_to_send.extend(state["messages"][-20:])
+
+        use_tools = not state.get("verified", False)
         llm_kwargs = dict(
-            messages=messages,
+            messages=messages_to_send,
             return_full_response=True,
             temperature=0.3,
-            stage="slot_extraction",
+            stage="graph_agent",
         )
         if use_tools:
             llm_kwargs["tools"] = AGENT_TOOLS
             llm_kwargs["tool_choice"] = "auto"
-        
+
         response = await self._groq.chat_completion(**llm_kwargs)
-        
         reply_message = response.choices[0].message
         
-        customer: Optional[dict] = None
-        orders: list[dict] = []
-        
-        # Handle tool calls
+        assistant_msg = {"role": "assistant"}
+        if reply_message.content:
+            assistant_msg["content"] = reply_message.content
         if reply_message.tool_calls:
             safe_tool_calls = []
             for tc in reply_message.tool_calls:
@@ -195,70 +206,88 @@ class AgentService:
                         "arguments": tc.function.arguments
                     }
                 })
-            
-            safe_msg = {"role": "assistant"}
-            if reply_message.content:
-                safe_msg["content"] = reply_message.content
-            safe_msg["tool_calls"] = safe_tool_calls
-            messages.append(safe_msg)
-            
-            for tool_call in reply_message.tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                
-                tool_result_str = "{}"
-                if func_name == "verify_user":
-                    name = args.get("name", "")
-                    dob = args.get("dob", "")
-                    verification = await self._verification.verify(name, dob)
-                    if verification.verified:
-                        session.verified = True
-                        session.user_name = name
-                        session.dob = dob
-                        if verification.customer:
-                            customer = verification.customer
-                            session.customer_id = customer.get("id")
-                            session.customer_name = customer.get("full_name") or customer.get("name")
-                            
-                            # Fetch orders ONCE and cache in session (in-memory)
-                            orders_list = await self._orders.get_orders(session.customer_id)
-                            orders = orders_list
-                            session.orders = orders_list  # Cache for the session lifetime
-                            if orders_list:
-                                session.last_order = orders_list[0]
-                                
-                            tool_result_str = json.dumps({
-                                "verified": True, 
-                                "message": "Account verified successfully.",
-                                "orders": orders_list
-                            })
-                    else:
-                        tool_result_str = json.dumps({"verified": False, "message": "No matching account found."})
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result_str
-                })
-            
-            # LLM Call 2 (after tool results)
-            final_response = await self._groq.chat_completion(
-                messages=messages,
-                return_full_response=True,
-                temperature=0.3,
-                stage="response_generation"
-            )
-            reply_text = final_response.choices[0].message.content
-        else:
-            reply_text = reply_message.content
+            assistant_msg["tool_calls"] = safe_tool_calls
 
-        reply_text = reply_text.strip() if reply_text else "I'm sorry, I couldn't process that. Let me know how I can help."
-        reply_text = self._sanitize_reply_text(reply_text)
+        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_message.content or "")}
+
+    async def _verify_tool_node(self, state: AgentState) -> dict:
+        last_msg = state["messages"][-1]
+        updates = {"messages": []}
+        
+        for tc in last_msg.get("tool_calls", []):
+            if tc["function"]["name"] == "verify_user":
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except Exception:
+                    args = {}
+                name = args.get("name", "")
+                dob = args.get("dob", "")
+                
+                verification = await self._verification.verify(name, dob)
+                if verification.verified and verification.customer:
+                    updates["verified"] = True
+                    updates["user_name"] = name
+                    updates["dob"] = dob
+                    updates["customer"] = verification.customer
+                    orders = await self._orders.get_orders(verification.customer.get("id"))
+                    updates["orders"] = orders
+                    result_str = json.dumps({"verified": True, "message": "Account verified successfully.", "orders": orders})
+                else:
+                    result_str = json.dumps({"verified": False, "message": "No matching account found."})
+                
+                updates["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result_str
+                })
+        return updates
+
+    async def handle_user_text(self, session_id: str, user_text: str) -> ConversationResult:
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+
+        # Get or create the session state (for compatibility with legacy SessionManager)
+        session = await self._sessions.get_or_create(session_id)
+        
+        config = {"configurable": {"thread_id": session_id}}
+        
+        # Initialize graph state if empty
+        graph_state = await self._graph.aget_state(config)
+        if not graph_state.values:
+            # Sync initial state from legacy SessionState if needed, but we start fresh
+            await self._graph.aupdate_state(config, {
+                "verified": session.verified,
+                "user_name": session.user_name,
+                "dob": session.dob,
+                "customer": {"id": session.customer_id, "name": session.customer_name} if session.customer_id else None,
+                "orders": session.orders if hasattr(session, "orders") else [],
+                "messages": [],
+            })
+        
+        user_msg = {"role": "user", "content": user_text}
+        
+        # Run graph
+        async for output in self._graph.astream({"messages": [user_msg]}, config):
+            pass  # It streams state updates, we just need the final state
+
+        final_state = await self._graph.aget_state(config)
+        state_values = final_state.values
+        reply_text = state_values.get("reply_text", "")
+        if not reply_text:
+            reply_text = "I'm sorry, I couldn't process that. Let me know how I can help."
+            
+        # Update legacy SessionState for compatibility with the rest of the app logging
+        session.verified = state_values.get("verified", False)
+        session.user_name = state_values.get("user_name")
+        session.dob = state_values.get("dob")
+        if state_values.get("customer"):
+            session.customer_id = state_values["customer"].get("id")
+            session.customer_name = state_values["customer"].get("name")
+            session.orders = state_values.get("orders", [])
         
         session.last_response = reply_text
+        if user_text:
+            session.add_turn("user", user_text, SESSION_MAX_TURNS)
         session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
         await self._sessions.update(session)
         
@@ -271,7 +300,7 @@ class AgentService:
             state="AGENT_ACTIVE",
             should_end=False,
             verified=session.verified,
-            customer=customer,
-            orders=orders,
+            customer=state_values.get("customer"),
+            orders=state_values.get("orders", []),
             timings=timings,
         )

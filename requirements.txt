@@ -11,3 +11,13 @@ aiofiles>=24.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 webrtcvad-wheels>=2.0.14
+
+# Optional: Neural VAD (much better noise rejection)
+# pip install silero-vad-lite
+silero-vad-lite>=0.2.0
+
+# LangGraph state orchestration
+langchain-core>=0.3.0
+langchain-groq>=0.2.0
+langgraph>=0.2.0
+

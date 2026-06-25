@@ -274,26 +274,92 @@ class FrameGenerator:
             yield frame
 
 class VoiceActivityDetector:
-    """Wrapper around webrtcvad with a fallback to RMS."""
-    def __init__(self, aggressiveness: int = 2, sample_rate: int = 16000, fallback_threshold: int = 500):
+    """
+    Multi-engine voice activity detector.
+
+    Priority chain:
+      1. Silero VAD (neural, best noise rejection) — if USE_SILERO_VAD=true
+      2. WebRTC VAD (rule-based, decent) — if webrtcvad is installed
+      3. RMS energy threshold (basic fallback)
+    """
+    def __init__(
+        self,
+        aggressiveness: int = 2,
+        sample_rate: int = 16000,
+        fallback_threshold: int = 500,
+        use_silero: bool = False,
+        silero_threshold: float = 0.5,
+    ):
         self.sample_rate = sample_rate
         self.fallback_threshold = fallback_threshold
-        self.vad = webrtcvad.Vad(aggressiveness) if webrtcvad else None
-        if not self.vad:
-            logger.warning("webrtcvad not installed. Falling back to RMS-based VAD.")
+        self._silero = None
+        self._webrtc_vad = None
+        self._engine = "rms"  # default
+
+        # Try Silero first (if requested)
+        if use_silero:
+            try:
+                from app.vad.silero_vad import SileroVoiceDetector, is_silero_available
+                if is_silero_available():
+                    self._silero = SileroVoiceDetector(
+                        sample_rate=sample_rate,
+                        threshold=silero_threshold,
+                    )
+                    self._engine = "silero"
+                    logger.info("VAD engine: Silero (neural)")
+                else:
+                    logger.warning("Silero VAD requested but silero-vad-lite not installed.")
+            except Exception as e:
+                logger.warning(f"Silero VAD init failed: {e}. Falling back.")
+
+        # Try WebRTC as second choice
+        if self._engine != "silero" and webrtcvad:
+            try:
+                self._webrtc_vad = webrtcvad.Vad(aggressiveness)
+                self._engine = "webrtc"
+                logger.info(f"VAD engine: WebRTC (aggressiveness={aggressiveness})")
+            except Exception as e:
+                logger.warning(f"WebRTC VAD init failed: {e}. Using RMS fallback.")
+
+        if self._engine == "rms":
+            logger.warning("VAD engine: RMS energy (basic fallback)")
+
+    @property
+    def engine_name(self) -> str:
+        """Return the name of the active VAD engine."""
+        return self._engine
 
     def is_speech(self, pcm_frame: bytes) -> bool:
         """
-        Check if the exact frame contains speech. 
-        Note: For WebRTC VAD, frame must be exactly 10, 20, or 30ms.
+        Check if the frame contains speech.
+
+        Args:
+            pcm_frame: Raw 16-bit PCM bytes.
+                       For WebRTC: must be exactly 10, 20, or 30ms.
+                       For Silero: any length (internally buffered to 32ms).
+
+        Returns:
+            True if speech is detected.
         """
-        if self.vad:
+        if self._silero:
             try:
-                return self.vad.is_speech(pcm_frame, self.sample_rate)
+                return self._silero.is_speech(pcm_frame)
             except Exception as e:
-                # Fallback on exception (e.g. invalid frame size)
-                logger.error(f"webrtcvad error: {e}. Falling back to RMS.")
+                logger.error(f"Silero VAD error: {e}. Falling back to RMS.")
                 return not detect_silence(pcm_frame, self.fallback_threshold)
-        else:
-            return not detect_silence(pcm_frame, self.fallback_threshold)
+
+        if self._webrtc_vad:
+            try:
+                return self._webrtc_vad.is_speech(pcm_frame, self.sample_rate)
+            except Exception as e:
+                logger.error(f"WebRTC VAD error: {e}. Falling back to RMS.")
+                return not detect_silence(pcm_frame, self.fallback_threshold)
+
+        return not detect_silence(pcm_frame, self.fallback_threshold)
+
+    def reset(self):
+        """Reset VAD state (useful between utterances)."""
+        if self._silero:
+            self._silero.reset()
+
 

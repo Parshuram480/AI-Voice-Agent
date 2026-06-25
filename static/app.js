@@ -314,6 +314,16 @@ async function startSession() {
     micSource = audioContext.createMediaStreamSource(micStream);
     micProcessor = new AudioWorkletNode(audioContext, 'pcm-processor');
 
+    // Client-side noise gate: high-pass filter removes low-frequency hum/rumble
+    const highPassFilter = audioContext.createBiquadFilter();
+    highPassFilter.type = 'highpass';
+    highPassFilter.frequency.value = 85;  // Cut frequencies below 85Hz (fans, AC, hum)
+    highPassFilter.Q.value = 0.7;
+
+    // Gain compensation — ensure filtered audio isn't too quiet
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1.1;
+
     // Setup WebSocket
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     if (!sessionId) {
@@ -326,13 +336,16 @@ async function startSession() {
     ws.onopen = () => {
       addLog('system', 'Conversation session started. Speak naturally…');
 
-      // Stream audio continuously
+      // Stream audio continuously through noise filter chain
       micProcessor.port.onmessage = (event) => {
         if (ws && ws.readyState === WebSocket.OPEN && event.data.pcm) {
           ws.send(event.data.pcm);
         }
       };
-      micSource.connect(micProcessor);
+      // Audio chain: mic → highpass → gain → AudioWorklet → WebSocket
+      micSource.connect(highPassFilter);
+      highPassFilter.connect(gainNode);
+      gainNode.connect(micProcessor);
     };
 
     ws.onmessage = handleWebSocketMessage;
@@ -440,10 +453,7 @@ async function handleWebSocketMessage(event) {
           if (metricsContainer) metricsContainer.style.display = 'none';
         }
 
-        // When speaking starts, reset playback scheduler
-        if (data.phase === 'SPEAKING') {
-          playbackTime = 0;
-        }
+        // Playback scheduler continues gaplessly without resetting on SPEAKING.
 
         // When listening resumes, mark speaking done
         if (data.phase === 'LISTENING' && isSpeaking) {

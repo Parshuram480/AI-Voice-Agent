@@ -54,7 +54,10 @@ STT_EARLY_CHUNK_SECONDS = float(os.getenv("STT_EARLY_CHUNK_SECONDS", "1.0"))
 MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "200"))
 SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")
 VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "3"))
-print()
+USE_SILERO_VAD = os.getenv("USE_SILERO_VAD", "false").lower() in ("1", "true", "yes", "on")
+SILERO_THRESHOLD = float(os.getenv("SILERO_THRESHOLD", "0.5"))
+
+USE_FILLER_WORDS = os.getenv("USE_FILLER_WORDS", "true").lower() in ("1", "true", "yes", "on")
 
 # Audio cache directory
 AUDIO_CACHE_DIR = Path("audio_cache")
@@ -106,6 +109,13 @@ class StreamingVoicePipeline:
         self.tts_cache = ResponseCache(max_size=TTS_CACHE_SIZE)
         self.agent = agent_service
         self.rephraser = rephraser
+        self._current_phase = None
+
+
+
+        # Filler words manager
+        from app.fillers import FillerManager
+        self._fillers = FillerManager() if USE_FILLER_WORDS else None
 
     # =====================================================================
     #  NEW: Continuous conversation loop (multi-turn)
@@ -153,10 +163,12 @@ class StreamingVoicePipeline:
         session_ended = False
         all_timings: list[dict] = []
 
-        def _set_phase(phase: ConversationPhase):
+        def _set_phase(phase):
+            val = phase.value if hasattr(phase, 'value') else phase
+            self._current_phase = val
             if on_phase_change:
                 try:
-                    on_phase_change(phase.value)
+                    on_phase_change(val)
                 except Exception:
                     pass
 
@@ -393,7 +405,13 @@ class StreamingVoicePipeline:
 
         # WebRTC VAD works on exact 30ms frames
         frame_gen = FrameGenerator(frame_duration_ms=30, sample_rate=sample_rate, sample_width=sample_width)
-        vad = VoiceActivityDetector(aggressiveness=VAD_AGGRESSIVENESS, sample_rate=sample_rate, fallback_threshold=SILENCE_THRESHOLD)
+        vad = VoiceActivityDetector(
+            aggressiveness=VAD_AGGRESSIVENESS,
+            sample_rate=sample_rate,
+            fallback_threshold=SILENCE_THRESHOLD,
+            use_silero=USE_SILERO_VAD,
+            silero_threshold=SILERO_THRESHOLD,
+        )
 
         if on_stage:
             try:
@@ -601,13 +619,15 @@ class StreamingVoicePipeline:
         input_filepath.write_bytes(wav_bytes)
         result["input_audio_url"] = f"{SERVER_HOST}/audio/{input_filename}"
 
+        stt_engine_used = "groq"
         try:
             transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
+
             timings["stt_end"] = round(time.perf_counter() - t0, 4)
             timings["stt_duration"] = round(timings["stt_end"] - timings["stt_start"], 4)
             result["transcript"] = transcript
-            _stage("stt", "done", transcript)
-            logger.info(f"[{utterance_id}] STT: '{transcript}'")
+            _stage("stt", "done", f"[{stt_engine_used}] {transcript}")
+            logger.info(f"[{utterance_id}] STT ({stt_engine_used}): '{transcript}'")
 
             log_pipeline_event(
                 "stt_complete",
@@ -616,6 +636,7 @@ class StreamingVoicePipeline:
                 turn_index=turn_index,
                 duration_ms=timings["stt_duration"] * 1000,
                 transcript=transcript[:100],
+                engine=stt_engine_used,
             )
 
             if on_stt_text:
@@ -623,6 +644,23 @@ class StreamingVoicePipeline:
                     on_stt_text(transcript)
                 except Exception:
                     pass
+
+            # ------ Send filler word while processing ------
+            if self._fillers and transcript and transcript.strip():
+                filler_phrase = self._fillers.get_filler_for_turn(turn_index)
+                if filler_phrase and on_tts_audio:
+                    try:
+                        filler_audio = self.tts_cache.get(filler_phrase)
+                        if not filler_audio:
+                            filler_audio = await self.groq.text_to_speech(filler_phrase)
+                            self.tts_cache.put(filler_phrase, filler_audio)
+                        if filler_audio:
+                            on_tts_audio(filler_audio)
+                            if "tts_first_audio" not in timings:
+                                timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+                            logger.info(f"[{utterance_id}] Filler sent: '{filler_phrase}'")
+                    except Exception as filler_err:
+                        logger.warning(f"Filler TTS failed: {filler_err}")
 
         except Exception as e:
             logger.error(f"[{utterance_id}] STT failed: {e}")
