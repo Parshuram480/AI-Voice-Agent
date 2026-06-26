@@ -33,17 +33,21 @@ CRITICAL OUTPUT RULE:
 Your text response will be spoken aloud by a TTS engine. You must NEVER include raw JSON, function call syntax, tool names, parameter names, or any code in your spoken response. Your response must always be natural, conversational English. If you need to call a tool, use the tool_calls mechanism ONLY — never write tool calls in your text content.
 
 VERIFICATION FLOW:
-1. When a user wants to check their order, ask for their full name first, then their date of birth. Ask naturally, e.g. "Could you please tell me your full name?" and "And your date of birth?"
-2. When you have both, call the verify_user tool. Convert any natural-language date (like "May 15th 1990") to YYYY-MM-DD internally. If the user provides an incomplete date (e.g., "May 19" without a year), explicitly ask them for the missing information before verifying.
-3. If verification fails, naturally and dynamically explain that you couldn't find a matching account and ask them to try again. Vary your wording every time so you don't sound repetitive like a robot.
-4. After successful verification, immediately summarize their most recent order. Do NOT ask if they want you to proceed.
+1. If the user only says hello or greets you without stating their intent, greet them warmly and ask how you can help them today. Do NOT immediately ask for their name.
+2. Once the user explicitly states they want to check an order or their account, ask for their full name first, then their date of birth. Ask naturally, e.g. "I can help with that. Could you please tell me your full name?"
+3. When you have BOTH a valid full name AND a valid date of birth, call the `verify_user` tool.
+   - NEVER call `verify_user` if you only have a name or an incomplete DOB. You MUST explicitly ask the user for their DOB and wait for their answer before attempting to verify.
+   - Convert any natural-language date (like "May 15th 1990") to YYYY-MM-DD internally. 
+   - If the user provides an incomplete date (e.g., "May 19" without a year), explicitly ask them for the missing information before verifying.
+4. If verification fails, naturally and dynamically explain that you couldn't find a matching account and ask them to try again.
+5. After successful verification, immediately call the `get_order_status` tool to fetch their latest orders. Do NOT ask if they want you to proceed.
 
 DO NOT (CRITICAL — violating these is a failure):
-- NEVER tell the user what date format you need. Do NOT say "please provide your date of birth in YYYY-MM-DD format" or anything similar. Just ask for their date of birth naturally.
-- NEVER echo the user's full name and date of birth back to them after verification. Simply say "I've verified your account" or "Great, I found your account" and move on.
-- NEVER reveal internal system details like customer IDs, tool names, function names, or parameter formats.
-- NEVER answer questions outside the scope of order status, delivery information, and item details. If the user asks about weather, news, general knowledge, or anything unrelated, politely say: "I'm only able to help with order-related questions. Is there anything about your orders I can help with?"
-- NEVER make up order information. Only use the data provided to you in the system context. If information is not available, say so honestly.
+- NEVER output raw tool syntax or XML tags like `<function=verify_user>`. If you need to verify a user or get orders, use the formal tool_calls mechanism provided by the API.
+- NEVER make up or hallucinate order data. You MUST call `get_order_status` to get real order data. Do not invent items like "blue shirts" or "jeans". 
+- NEVER answer questions outside the scope of order status, delivery information, and item details.
+- NEVER tell the user what date format you need. Just ask for their date of birth naturally.
+- NEVER echo the user's full name and date of birth back to them after verification.
 
 CONVERSATION STYLE:
 - Use the conversation history to understand context. If the user says "when will it arrive?" after discussing an order, you know which order they mean.
@@ -75,10 +79,22 @@ AGENT_TOOLS = [
                     },
                     "dob": {
                         "type": "string",
-                        "description": "The user's date of birth, formatted as YYYY-MM-DD (e.g., 1990-05-15)."
+                        "description": "The user's date of birth, formatted as YYYY-MM-DD (e.g., 1985-10-25)."
                     }
                 },
                 "required": ["name", "dob"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_order_status",
+            "description": "Fetches the latest orders for the currently verified user.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
             }
         }
     }
@@ -147,38 +163,20 @@ class AgentService:
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
-            orders_context = ""
-            if state.get("orders"):
-                order_lines = []
-                for o in state["orders"]:
-                    parts = [
-                        f"Order #{o.get('order_number', 'N/A')}",
-                        f"Status: {o.get('status', 'unknown')}",
-                    ]
-                    if o.get('estimated_arrival'):
-                        parts.append(f"ETA: {o['estimated_arrival']}")
-                    if o.get('items_summary'):
-                        parts.append(f"Items: {o['items_summary']}")
-                    order_lines.append(", ".join(parts))
-                orders_context = "\n".join(order_lines)
-            else:
-                orders_context = "No orders found for this customer."
-
             messages_to_send.append({
                 "role": "system",
                 "content": (
                     f"VERIFIED USER CONTEXT (internal — do NOT read this aloud or echo to the user):\n"
                     f"Customer name: {state.get('user_name', '')}\n"
                     f"The user is already verified. Do NOT ask for their name or date of birth again.\n"
-                    f"Their orders:\n{orders_context}\n\n"
-                    f"Use ONLY this order data to answer the user's questions. Do NOT make up information."
+                    f"Call the `get_order_status` tool to answer order questions."
                 )
             })
 
         # Append state messages (limiting to last N turns if necessary, but LangGraph keeps them)
         messages_to_send.extend(state["messages"][-20:])
 
-        use_tools = not state.get("verified", False)
+        use_tools = True
         llm_kwargs = dict(
             messages=messages_to_send,
             return_full_response=True,
@@ -223,6 +221,38 @@ class AgentService:
                 name = args.get("name", "")
                 dob = args.get("dob", "")
                 
+                # SECURITY CHECK: Enforce that both name and dob are present
+                if not name or not dob:
+                    result_str = json.dumps({
+                        "error": "MISSING_INFORMATION",
+                        "message": "You MUST collect BOTH the full name AND the date of birth before calling this tool. Ask the user for the missing information now."
+                    })
+                    updates["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result_str
+                    })
+                    continue
+                
+                # SECURITY CHECK: Prevent overwriting an already verified session with a different user
+                current_verified = state.get("verified", False)
+                current_customer = state.get("customer")
+                
+                if current_verified and current_customer:
+                    existing_name = state.get("user_name", "")
+                    if existing_name.lower() != name.lower():
+                        result_str = json.dumps({
+                            "verified": False,
+                            "error": "SECURITY_VIOLATION",
+                            "message": f"CRITICAL ERROR: This session is permanently locked to {existing_name}. You CANNOT verify {name}. You MUST explicitly tell the user: 'I can only provide information for {existing_name}.' Do NOT call any other tools."
+                        })
+                        updates["messages"].append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_str
+                        })
+                        continue
+                
                 verification = await self._verification.verify(name, dob)
                 if verification.verified and verification.customer:
                     updates["verified"] = True
@@ -231,9 +261,25 @@ class AgentService:
                     updates["customer"] = verification.customer
                     orders = await self._orders.get_orders(verification.customer.get("id"))
                     updates["orders"] = orders
-                    result_str = json.dumps({"verified": True, "message": "Account verified successfully.", "orders": orders})
+                    result_str = json.dumps({"verified": True, "message": "Account verified successfully. You can now call get_order_status to fetch their orders."})
                 else:
                     result_str = json.dumps({"verified": False, "message": "No matching account found."})
+                
+                updates["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result_str
+                })
+            elif tc["function"]["name"] == "get_order_status":
+                if not state.get("verified") or not state.get("customer"):
+                    result_str = json.dumps({"error": "User not verified. Please verify user first."})
+                else:
+                    orders = await self._orders.get_orders(state["customer"]["id"])
+                    updates["orders"] = orders
+                    result_str = json.dumps({
+                        "customer_name": state["customer"].get("full_name", "Unknown"),
+                        "orders": orders
+                    })
                 
                 updates["messages"].append({
                     "role": "tool",
@@ -290,6 +336,26 @@ class AgentService:
             session.add_turn("user", user_text, SESSION_MAX_TURNS)
         session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
         await self._sessions.update(session)
+        
+        # --- Save history to folder ---
+        try:
+            history_dir = os.path.join(os.getcwd(), "histories")
+            os.makedirs(history_dir, exist_ok=True)
+            history_file = os.path.join(history_dir, f"{session_id}.json")
+            
+            history_data = []
+            for msg in state_values.get("messages", []):
+                if hasattr(msg, "model_dump"):
+                    history_data.append(msg.model_dump())
+                elif isinstance(msg, dict):
+                    history_data.append(msg)
+                else:
+                    history_data.append({"role": getattr(msg, "role", "unknown"), "content": getattr(msg, "content", str(msg))})
+                    
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(history_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save history for {session_id}: {e}")
         
         timings["total"] = round(time.perf_counter() - t0, 4)
 

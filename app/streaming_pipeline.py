@@ -102,8 +102,11 @@ class StreamingVoicePipeline:
         twilio_handler: TwilioHandler,
         agent_service: AgentService,
         rephraser: LLMRephraser,
+        cartesia_client = None,
     ):
         self.groq = groq_client
+        self.cartesia = cartesia_client
+        self.tts_provider = os.getenv("TTS_PROVIDER", "groq").lower()
         self.db = db_client
         self.twilio = twilio_handler
         self.tts_cache = ResponseCache(max_size=TTS_CACHE_SIZE)
@@ -652,7 +655,10 @@ class StreamingVoicePipeline:
                     try:
                         filler_audio = self.tts_cache.get(filler_phrase)
                         if not filler_audio:
-                            filler_audio = await self.groq.text_to_speech(filler_phrase)
+                            if self.tts_provider == "cartesia" and self.cartesia:
+                                filler_audio = await self.cartesia.text_to_speech(filler_phrase)
+                            else:
+                                filler_audio = await self.groq.text_to_speech(filler_phrase)
                             self.tts_cache.put(filler_phrase, filler_audio)
                         if filler_audio:
                             on_tts_audio(filler_audio)
@@ -833,6 +839,28 @@ class StreamingVoicePipeline:
             result["audio_path"] = str(filepath)
             logger.info(f"[{utterance_id}] Combined output audio saved: {filepath} ({len(combined_audio)} bytes)")
 
+        stt_ms = timings.get("stt_duration", 0.0) * 1000
+        llm_ms = timings.get("conversation_duration", 0.0) * 1000
+        tts_start = timings.get("tts_start", 0.0)
+        tts_first = timings.get("tts_first_audio", timings.get("tts_end", timings.get("total", 0.0)))
+        tts_ms = (tts_first - tts_start) * 1000 if tts_start else 0.0
+        
+        vad_wait_str = os.getenv("VAD_SILENCE_MS", "800")
+        try:
+            vad_wait = float(vad_wait_str)
+        except ValueError:
+            vad_wait = 800.0
+            
+        # Ensure the Total is exactly equal to the sum of all components as requested (Time to First Audio)
+        total_ms = vad_wait + stt_ms + llm_ms + tts_ms
+        
+        # Inject exact TTFA calculations into timings for the frontend UI
+        timings["vad_wait_ms"] = vad_wait
+        timings["stt_ms"] = stt_ms
+        timings["llm_ms"] = llm_ms
+        timings["tts_first_ms"] = tts_ms
+        timings["ttfa_total_ms"] = total_ms
+
         timings["total"] = round(time.perf_counter() - t0, 4)
 
         log_pipeline_event(
@@ -842,9 +870,8 @@ class StreamingVoicePipeline:
             turn_index=turn_index,
             timings=timings,
         )
-
-        latency_ms = timings.get("total", 0.0) * 1000
-        latency_str = f"{latency_ms:.0f}ms" if latency_ms > 0 else ""
+        
+        latency_str = f"Total: {total_ms:.0f}ms [VAD Wait: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st Word): {tts_ms:.0f}ms]"
         log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
 
         return result
@@ -890,15 +917,34 @@ class StreamingVoicePipeline:
             chunks = []
             try:
                 first = True
-                async for chunk in self.groq.text_to_speech_streaming(sentence):
+                
+                if self.tts_provider == "cartesia" and self.cartesia:
+                    stream_gen = self.cartesia.text_to_speech_streaming(sentence)
+                else:
+                    stream_gen = self.groq.text_to_speech_streaming(sentence)
+
+                async for chunk in stream_gen:
                     if first:
                         if "tts_first_audio" not in timings:
                             timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
                         first = False
                         
                     chunks.append(chunk)
+
+                    # Stream Cartesia PCM chunks progressively to frontend for sub-second latency
+                    if on_audio and self.tts_provider == "cartesia":
+                        try:
+                            from app.audio_utils import build_wav
+                            on_audio(build_wav(chunk, sample_rate=16000))
+                        except Exception:
+                            pass
                 
                 audio_chunk = b"".join(chunks)
+                
+                if self.tts_provider == "cartesia" and self.cartesia:
+                    from app.audio_utils import build_wav
+                    audio_chunk = build_wav(audio_chunk, sample_rate=16000)
+                    
                 self.tts_cache.put(sentence, audio_chunk)
                 
                 if result.get("audio_bytes"):
@@ -906,8 +952,8 @@ class StreamingVoicePipeline:
                 else:
                     result["audio_bytes"] = audio_chunk
 
-                # Send fully combined audio file for the sentence to frontend
-                if on_audio:
+                # Send fully combined audio file for the sentence to frontend (only if not already streamed)
+                if on_audio and self.tts_provider != "cartesia":
                     try:
                         on_audio(audio_chunk)
                     except Exception:
@@ -1281,7 +1327,11 @@ class StreamingVoicePipeline:
                     stage_cb("llm", "failed", "Rephrase failed")
             else:
                 stage_cb("llm", "done", "Deterministic response")
-                await output_queue.put(reply_text)
+                sentences = _split_sentences(reply_text)
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if sentence:
+                        await output_queue.put(sentence)
                 result["reply_text"] = reply_text
 
         except Exception as e:

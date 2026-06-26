@@ -87,6 +87,7 @@ app.include_router(create_api_router(_get_pipeline, _get_streaming_pipeline))
 
 # Shared service instances (initialized on startup)
 groq_client: GroqClient = None  # type: ignore
+cartesia_client = None
 db_client: DatabaseClient = None  # type: ignore
 twilio_handler: TwilioHandler = None  # type: ignore
 pipeline: VoicePipeline = None  # type: ignore
@@ -101,7 +102,7 @@ rephraser: LLMRephraser = None  # type: ignore
 @app.on_event("startup")
 async def startup():
     """Initialize all services on server startup."""
-    global groq_client, db_client, twilio_handler, pipeline, streaming_pipeline
+    global groq_client, cartesia_client, db_client, twilio_handler, pipeline, streaming_pipeline
     global session_manager, agent_service, rephraser
 
     logger.info("=" * 60)
@@ -115,6 +116,13 @@ async def startup():
     # Warm up Groq connections (pre-establish TLS)
     await groq_client.warmup()
     logger.info("✓ Groq connections warmed up")
+
+    # Initialize Cartesia client if configured
+    tts_provider = os.getenv("TTS_PROVIDER", "groq").lower()
+    if tts_provider == "cartesia":
+        from app.cartesia_client import CartesiaClient
+        cartesia_client = CartesiaClient()
+        logger.info("✓ Cartesia client initialized")
 
     # Initialize database
     db_client = DatabaseClient()
@@ -155,6 +163,7 @@ async def startup():
         twilio_handler,
         agent_service,
         rephraser,
+        cartesia_client=cartesia_client,
     )
     logger.info("✓ Streaming voice pipeline initialized")
 

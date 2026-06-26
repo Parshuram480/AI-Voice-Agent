@@ -235,27 +235,44 @@ function updateMetrics(timings) {
   if (!metricsContainer) return;
   metricsContainer.style.display = 'flex';
 
-  if (timings.stt_duration) {
-    metricStt.textContent = `${(timings.stt_duration * 1000).toFixed(0)} ms`;
-  } else if (timings.stt_end) {
-    metricStt.textContent = `${(timings.stt_end * 1000).toFixed(0)} ms`;
-  }
-
-  if (timings.llm_first_token) {
-    metricLlm.textContent = `${(timings.llm_first_token * 1000).toFixed(0)} ms`;
-  } else if (timings.conversation_duration) {
-    metricLlm.textContent = `${(timings.conversation_duration * 1000).toFixed(0)} ms`;
-  }
-
-  if (timings.tts_first_audio) {
-    metricTts.textContent = `${(timings.tts_first_audio * 1000).toFixed(0)} ms`;
-  }
-
-  if (timings.total) {
-    const totalMs = (timings.total * 1000).toFixed(0);
+  if (timings.stt_ms !== undefined) {
+    // Use pre-computed TTFA precise metrics
+    metricStt.textContent = `${timings.stt_ms.toFixed(0)} ms`;
+    metricLlm.textContent = `${timings.llm_ms.toFixed(0)} ms`;
+    metricTts.textContent = `${timings.tts_first_ms.toFixed(0)} ms`;
+    
+    // Total is VAD + STT + LLM + TTS First Word
+    const totalMs = timings.ttfa_total_ms.toFixed(0);
     metricTotal.textContent = `${totalMs} ms`;
-    debugLatency.textContent = `${totalMs} ms`;
-    addLog('system', `Turn latency (end-to-end): ${totalMs} ms`);
+    
+    // Add VAD text to debug to be clear
+    debugLatency.textContent = `VAD: ${timings.vad_wait_ms.toFixed(0)}ms | Total: ${totalMs} ms (TTFA)`;
+    addLog('system', `Turn latency (TTFA): ${totalMs} ms`);
+
+  } else {
+    // Fallback for legacy events
+    if (timings.stt_duration) {
+      metricStt.textContent = `${(timings.stt_duration * 1000).toFixed(0)} ms`;
+    } else if (timings.stt_end) {
+      metricStt.textContent = `${(timings.stt_end * 1000).toFixed(0)} ms`;
+    }
+
+    if (timings.llm_first_token) {
+      metricLlm.textContent = `${(timings.llm_first_token * 1000).toFixed(0)} ms`;
+    } else if (timings.conversation_duration) {
+      metricLlm.textContent = `${(timings.conversation_duration * 1000).toFixed(0)} ms`;
+    }
+
+    if (timings.tts_first_audio) {
+      metricTts.textContent = `${(timings.tts_first_audio * 1000).toFixed(0)} ms`;
+    }
+
+    if (timings.total) {
+      const totalMs = (timings.total * 1000).toFixed(0);
+      metricTotal.textContent = `${totalMs} ms`;
+      debugLatency.textContent = `${totalMs} ms`;
+      addLog('system', `Turn latency (end-to-end): ${totalMs} ms`);
+    }
   }
 }
 
