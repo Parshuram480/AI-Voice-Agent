@@ -114,6 +114,14 @@ class StreamingVoicePipeline:
         self.rephraser = rephraser
         self._current_phase = None
 
+        self.stt_provider = os.getenv("STT_PROVIDER", "groq").lower()
+        if self.stt_provider == "deepgram":
+            from app.stt.deepgram_client import DeepgramStreamingClient
+            dg_key = os.getenv("DEEPGRAM_API_KEY", "")
+            self.deepgram = DeepgramStreamingClient(dg_key) if dg_key else None
+        else:
+            self.deepgram = None
+
 
 
         # Filler words manager
@@ -124,6 +132,37 @@ class StreamingVoicePipeline:
     #  NEW: Continuous conversation loop (multi-turn)
     # =====================================================================
     async def process_continuous(
+        self,
+        audio_queue: asyncio.Queue,
+        *,
+        on_stt_text: Optional[Callable] = None,
+        on_llm_token: Optional[Callable] = None,
+        on_tts_audio: Optional[Callable] = None,
+        on_stage: Optional[Callable] = None,
+        on_phase_change: Optional[Callable] = None,
+        on_turn_done: Optional[Callable] = None,
+        session_id: Optional[str] = None,
+        barge_in_event: Optional[asyncio.Event] = None,
+    ) -> dict:
+        if self.deepgram:
+            await self.deepgram.connect()
+        try:
+            return await self._process_continuous_internal(
+                audio_queue=audio_queue,
+                on_stt_text=on_stt_text,
+                on_llm_token=on_llm_token,
+                on_tts_audio=on_tts_audio,
+                on_stage=on_stage,
+                on_phase_change=on_phase_change,
+                on_turn_done=on_turn_done,
+                session_id=session_id,
+                barge_in_event=barge_in_event,
+            )
+        finally:
+            if self.deepgram:
+                await self.deepgram.close()
+
+    async def _process_continuous_internal(
         self,
         audio_queue: asyncio.Queue,
         *,
@@ -193,6 +232,7 @@ class StreamingVoicePipeline:
                 break
                 
             utterance_audio, vad_done_reason, vad_speech_ms = utterance_data
+            dg_task = None
 
             if vad_done_reason == "stream_ended":
                 log_pipeline_event(
@@ -255,6 +295,7 @@ class StreamingVoicePipeline:
                     utterance_id=utterance_id,
                     turn_index=turn_index,
                     speech_ms=vad_speech_ms,
+                    dg_task=dg_task,
                     on_stt_text=on_stt_text,
                     on_llm_token=on_llm_token,
                     on_tts_audio=on_tts_audio,
@@ -397,6 +438,8 @@ class StreamingVoicePipeline:
         speech_ms = 0.0
         t_start = time.perf_counter()
         last_vad_log = t_start
+        
+
 
         # Configuration
         vad_silence_ms = max(1, VAD_SILENCE_MS)
@@ -457,6 +500,10 @@ class StreamingVoicePipeline:
                         speech_ms = chunk_ms
                         silence_ms = 0.0
                         audio_buffer.extend(frame)
+                        
+                        if self.deepgram:
+                            await self.deepgram.send_audio(bytes(audio_buffer))
+                        
                         if interruption_event:
                             interruption_event.set()
                         if on_phase_change:
@@ -475,6 +522,8 @@ class StreamingVoicePipeline:
                     # else: still silence before speech, discard
                 else:
                     audio_buffer.extend(frame)
+                    if self.deepgram:
+                        await self.deepgram.send_audio(bytes(frame))
 
                     if is_silence:
                         silence_ms += chunk_ms
@@ -518,10 +567,13 @@ class StreamingVoicePipeline:
                             # Grab any remaining partial frame data in buffer
                             if len(frame_gen.buffer) > 0:
                                 audio_buffer.extend(frame_gen.buffer)
+                                if self.deepgram: await self.deepgram.send_audio(bytes(frame_gen.buffer))
                                 
                             return bytes(audio_buffer), "silence", speech_ms
                         else:
                             # False alarm (short click/pop), reset VAD state
+                            if self.deepgram:
+                                _ = await self.deepgram.get_transcript()
                             speech_started = False
                             speech_ms = 0.0
                             silence_ms = 0.0
@@ -550,6 +602,7 @@ class StreamingVoicePipeline:
                         
                         if len(frame_gen.buffer) > 0:
                             audio_buffer.extend(frame_gen.buffer)
+                            if self.deepgram: await self.deepgram.send_audio(bytes(frame_gen.buffer))
                             
                         return bytes(audio_buffer), "max_duration", speech_ms
 
@@ -564,6 +617,7 @@ class StreamingVoicePipeline:
         utterance_id: str,
         turn_index: int,
         speech_ms: float = 0.0,
+        dg_task: Optional[asyncio.Task] = None,
         on_stt_text: Optional[Callable] = None,
         on_llm_token: Optional[Callable] = None,
         on_tts_audio: Optional[Callable] = None,
@@ -609,272 +663,365 @@ class StreamingVoicePipeline:
                 except Exception:
                     pass
 
-        # ------ STT ------
-        _stage("stt", "running", "Transcribing utterance…")
-        timings["stt_start"] = round(time.perf_counter() - t0, 4)
-
-        trimmed_pcm = trim_trailing_silence(utterance_pcm)
-        wav_bytes = build_wav(trimmed_pcm, sample_rate=16000)
-
-        # Save input audio
-        input_filename = f"input_{utterance_id}_{int(datetime.now(UTC).timestamp())}.wav"
-        input_filepath = AUDIO_CACHE_DIR / input_filename
-        input_filepath.write_bytes(wav_bytes)
-        result["input_audio_url"] = f"{SERVER_HOST}/audio/{input_filename}"
-
-        stt_engine_used = "groq"
         try:
-            transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
+            # ------ STT ------
+            _stage("stt", "running", "Transcribing utterance…")
+            timings["stt_start"] = round(time.perf_counter() - t0, 4)
 
-            timings["stt_end"] = round(time.perf_counter() - t0, 4)
-            timings["stt_duration"] = round(timings["stt_end"] - timings["stt_start"], 4)
-            result["transcript"] = transcript
-            _stage("stt", "done", f"[{stt_engine_used}] {transcript}")
-            logger.info(f"[{utterance_id}] STT ({stt_engine_used}): '{transcript}'")
-
-            log_pipeline_event(
-                "stt_complete",
-                session_id=session_id,
-                utterance_id=utterance_id,
-                turn_index=turn_index,
-                duration_ms=timings["stt_duration"] * 1000,
-                transcript=transcript[:100],
-                engine=stt_engine_used,
-            )
-
-            if on_stt_text:
-                try:
-                    on_stt_text(transcript)
-                except Exception:
-                    pass
-
-            # ------ Send filler word while processing ------
-            if self._fillers and transcript and transcript.strip():
-                filler_phrase = self._fillers.get_filler_for_turn(turn_index)
-                if filler_phrase and on_tts_audio:
+            # For Deepgram streaming STT, skip heavy audio processing — Deepgram already has the audio.
+            # Only build WAV for Groq Whisper fallback (which needs a file upload).
+            if self.stt_provider == "deepgram" and self.deepgram:
+                # Save input audio in background (non-blocking) for debugging only
+                async def _save_input_audio_bg(pcm, uid):
                     try:
-                        filler_audio = self.tts_cache.get(filler_phrase)
-                        if not filler_audio:
-                            if self.tts_provider == "cartesia" and self.cartesia:
-                                filler_audio = await self.cartesia.text_to_speech(filler_phrase)
-                            else:
-                                filler_audio = await self.groq.text_to_speech(filler_phrase)
-                            self.tts_cache.put(filler_phrase, filler_audio)
-                        if filler_audio:
-                            on_tts_audio(filler_audio)
-                            if "tts_first_audio" not in timings:
-                                timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
-                            logger.info(f"[{utterance_id}] Filler sent: '{filler_phrase}'")
-                    except Exception as filler_err:
-                        logger.warning(f"Filler TTS failed: {filler_err}")
+                        wav = build_wav(pcm, sample_rate=16000)
+                        fn = f"input_{uid}_{int(datetime.now(UTC).timestamp())}.wav"
+                        fp = AUDIO_CACHE_DIR / fn
+                        await asyncio.to_thread(fp.write_bytes, wav)
+                        result["input_audio_url"] = f"{SERVER_HOST}/audio/{fn}"
+                    except Exception as e:
+                        logger.debug(f"Background audio save failed: {e}")
+                asyncio.create_task(_save_input_audio_bg(utterance_pcm, utterance_id))
+            else:
+                trimmed_pcm = trim_trailing_silence(utterance_pcm)
+                wav_bytes = build_wav(trimmed_pcm, sample_rate=16000)
+                # Save input audio in background
+                async def _save_input_wav_bg(wb, uid):
+                    try:
+                        fn = f"input_{uid}_{int(datetime.now(UTC).timestamp())}.wav"
+                        fp = AUDIO_CACHE_DIR / fn
+                        await asyncio.to_thread(fp.write_bytes, wb)
+                        result["input_audio_url"] = f"{SERVER_HOST}/audio/{fn}"
+                    except Exception as e:
+                        logger.debug(f"Background audio save failed: {e}")
+                asyncio.create_task(_save_input_wav_bg(wav_bytes, utterance_id))
 
-        except Exception as e:
-            logger.error(f"[{utterance_id}] STT failed: {e}")
-            _stage("stt", "failed", str(e))
-            timings["stt_end"] = round(time.perf_counter() - t0, 4)
-            result["reply_text"] = "I'm sorry, I couldn't understand that. Could you repeat?"
-            return result
-
-        cleaned_transcript = transcript.strip().lower()
-
-        # --- Pure Whisper artifacts (always discard) ---
-        whisper_artifacts = {
-            ".", ",", "!", "?",
-            "you.", "you",
-            "you're welcome.", "you're welcome", "welcome.", "welcome",
-            "test.", "test", "am i?", "am i", "is it?", "is it",
-            "i", "i.", "my...", "my",
-            "goodbye.", "goodbye", "good bye.", "good bye",
-        }
-
-        if not transcript or not transcript.strip():
-            _stage("stt", "done", "No speech detected")
-            result["reply_text"] = ""
-            return result
-
-        if cleaned_transcript in whisper_artifacts:
-            _stage("stt", "done", f"Whisper artifact suppressed: '{cleaned_transcript}'")
-            log_pipeline_event(
-                "turn_route", route="whisper_artifact_suppressed",
-                session_id=session_id, utterance_id=utterance_id,
-                transcript=cleaned_transcript,
-            )
-            result["reply_text"] = ""
-            return result
-
-        # --- Energy-based noise hallucination check ---
-        # If speech energy was very short AND the transcript is a single
-        # very short word, it's almost certainly noise that Whisper decoded.
-        # Adjusted for WebRTC VAD: shorter utterances like "yes" can be ~150ms.
-        word_count = len(cleaned_transcript.split())
-        is_very_short_audio = speech_ms > 0 and speech_ms < 150
-        is_tiny_transcript = word_count <= 2 and len(cleaned_transcript) <= 8
-
-        if is_very_short_audio and is_tiny_transcript:
-            _stage("stt", "done", f"Noise hallucination suppressed (speech_ms={round(speech_ms)}ms): '{cleaned_transcript}'")
-            log_pipeline_event(
-                "turn_route", route="noise_hallucination_suppressed",
-                session_id=session_id, utterance_id=utterance_id,
-                transcript=cleaned_transcript, speech_ms=round(speech_ms, 1),
-            )
-            result["reply_text"] = ""
-            return result
-
-        # ------ Conversation Service (intent + verification + DB) ------
-        _stage("conversation", "running", "Routing intent and slots")
-        timings["conversation_start"] = round(time.perf_counter() - t0, 4)
-
-        try:
-            conversation = await self.agent.handle_user_text(session_id, transcript)
-            result["intent"] = conversation.intent
-            result["reply_text"] = conversation.reply_text
-            result["state"] = conversation.state
-            result["verified"] = conversation.verified
-            result["customer"] = _serialize_customer(conversation.customer)
-            result["orders"] = conversation.orders
-            result["should_end"] = conversation.should_end
-            timings.update(conversation.timings)
-            timings["conversation_end"] = round(time.perf_counter() - t0, 4)
-            timings["conversation_duration"] = round(
-                timings["conversation_end"] - timings["conversation_start"], 4
-            )
-            _stage("conversation", "done", f"intent={conversation.intent}, state={conversation.state}")
-
-            log_pipeline_event(
-                "conversation_complete",
-                session_id=session_id,
-                utterance_id=utterance_id,
-                turn_index=turn_index,
-                intent=conversation.intent,
-                state=conversation.state,
-                duration_ms=timings["conversation_duration"] * 1000,
-            )
-        except Exception as e:
-            logger.error(f"[{utterance_id}] Conversation service error: {e}")
-            _stage("conversation", "failed", str(e))
-            result["reply_text"] = "I'm sorry, something went wrong. Please try again."
-            timings["conversation_end"] = round(time.perf_counter() - t0, 4)
-
-        reply_text = result["reply_text"]
-        if not reply_text:
-            reply_text = "I'm sorry, I couldn't process that. Please try again."
-            result["reply_text"] = reply_text
-
-        # ------ Optional LLM Rephrase ------
-        if self.rephraser and self.rephraser.enabled:
-            _stage("llm", "running", "Rephrasing response…")
-            timings["llm_start"] = round(time.perf_counter() - t0, 4)
-            first_token_received = False
-            token_buffer = []
-            full_reply_parts = []
-
+            stt_engine_used = self.stt_provider
             try:
-                async for token in self.rephraser.stream_rephrase(reply_text):
-                    if not first_token_received:
-                        timings["llm_first_token"] = round(time.perf_counter() - t0, 4)
-                        first_token_received = True
+                if self.stt_provider == "deepgram" and self.deepgram:
+                    transcript = await self.deepgram.get_transcript()
+                else:
+                    transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
 
-                    token_buffer.append(token)
-                    full_reply_parts.append(token)
+                timings["stt_end"] = round(time.perf_counter() - t0, 4)
+                timings["stt_duration"] = round(timings["stt_end"] - timings["stt_start"], 4)
+                result["transcript"] = transcript
+                _stage("stt", "done", f"[{stt_engine_used}] {transcript}")
+                logger.info(f"[{utterance_id}] STT ({stt_engine_used}): '{transcript}'")
 
-                    if on_llm_token:
+                log_pipeline_event(
+                    "stt_complete",
+                    session_id=session_id,
+                    utterance_id=utterance_id,
+                    turn_index=turn_index,
+                    duration_ms=timings["stt_duration"] * 1000,
+                    transcript=transcript[:100],
+                    engine=stt_engine_used,
+                )
+
+                if on_stt_text:
+                    try:
+                        on_stt_text(transcript)
+                    except Exception:
+                        pass
+
+                # ------ Send filler word while processing ------
+                if self._fillers and transcript and transcript.strip():
+                    filler_phrase = self._fillers.get_filler_for_turn(turn_index)
+                    if filler_phrase and on_tts_audio:
                         try:
-                            on_llm_token(token)
-                        except Exception:
-                            pass
-
-                    current_text = "".join(token_buffer)
-                    sentences = _split_sentences(current_text)
-
-                    if len(sentences) > 1:
-                        for sentence in sentences[:-1]:
-                            sentence = sentence.strip()
-                            if sentence:
-                                # TTS each sentence as it completes
-                                await self._tts_sentence(
-                                    sentence, result, timings, t0, _stage, on_tts_audio
-                                )
-                        token_buffer = [sentences[-1]]
-
-                remaining = "".join(token_buffer).strip()
-                if remaining:
-                    await self._tts_sentence(
-                        remaining, result, timings, t0, _stage, on_tts_audio
-                    )
-
-                full_reply = "".join(full_reply_parts).strip()
-                result["reply_text"] = full_reply or reply_text
-                timings["llm_end"] = round(time.perf_counter() - t0, 4)
-                _stage("llm", "done", result["reply_text"][:80])
+                            filler_audio = self.tts_cache.get(filler_phrase)
+                            if not filler_audio:
+                                if self.tts_provider == "cartesia" and self.cartesia:
+                                    filler_audio = await self.cartesia.text_to_speech(filler_phrase)
+                                else:
+                                    filler_audio = await self.groq.text_to_speech(filler_phrase)
+                                self.tts_cache.put(filler_phrase, filler_audio)
+                            if filler_audio:
+                                on_tts_audio(filler_audio)
+                                if "tts_first_audio" not in timings:
+                                    timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+                                logger.info(f"[{utterance_id}] Filler sent: '{filler_phrase}'")
+                        except Exception as filler_err:
+                            logger.warning(f"Filler TTS failed: {filler_err}")
 
             except Exception as e:
-                logger.error(f"[{utterance_id}] LLM rephrase failed: {e}")
-                _stage("llm", "failed", "Rephrase failed — using original")
+                logger.error(f"[{utterance_id}] STT failed: {e}")
+                _stage("stt", "failed", str(e))
+                timings["stt_end"] = round(time.perf_counter() - t0, 4)
+                result["reply_text"] = "I'm sorry, I couldn't understand that. Could you repeat?"
+                return result
+
+            cleaned_transcript = transcript.strip().lower()
+
+            # --- Pure Whisper artifacts (always discard) ---
+            whisper_artifacts = {
+                ".", ",", "!", "?",
+                "you.", "you",
+                "you're welcome.", "you're welcome", "welcome.", "welcome",
+                "test.", "test", "am i?", "am i", "is it?", "is it",
+                "i", "i.", "my...", "my",
+                "goodbye.", "goodbye", "good bye.", "good bye",
+            }
+
+            if not transcript or not transcript.strip():
+                _stage("stt", "done", "No speech detected")
+                result["reply_text"] = ""
+                return result
+
+            if cleaned_transcript in whisper_artifacts:
+                _stage("stt", "done", f"Whisper artifact suppressed: '{cleaned_transcript}'")
+                log_pipeline_event(
+                    "turn_route", route="whisper_artifact_suppressed",
+                    session_id=session_id, utterance_id=utterance_id,
+                    transcript=cleaned_transcript,
+                )
+                result["reply_text"] = ""
+                return result
+
+            # --- Energy-based noise hallucination check ---
+            # If speech energy was very short AND the transcript is a single
+            # very short word, it's almost certainly noise that Whisper decoded.
+            # Adjusted for WebRTC VAD: shorter utterances like "yes" can be ~150ms.
+            word_count = len(cleaned_transcript.split())
+            is_very_short_audio = speech_ms > 0 and speech_ms < 150
+            is_tiny_transcript = word_count <= 2 and len(cleaned_transcript) <= 8
+
+            if is_very_short_audio and is_tiny_transcript:
+                _stage("stt", "done", f"Noise hallucination suppressed (speech_ms={round(speech_ms)}ms): '{cleaned_transcript}'")
+                log_pipeline_event(
+                    "turn_route", route="noise_hallucination_suppressed",
+                    session_id=session_id, utterance_id=utterance_id,
+                    transcript=cleaned_transcript, speech_ms=round(speech_ms, 1),
+                )
+                result["reply_text"] = ""
+                return result
+
+            # ------ Conversation Service (intent + verification + DB) ------
+            _stage("conversation", "running", "Routing intent and slots")
+            timings["conversation_start"] = round(time.perf_counter() - t0, 4)
+
+            tts_queue = asyncio.Queue()
+            token_buffer = []
+            
+            # Decide if we stream TTS directly from LangGraph (only if not rephrasing)
+            stream_direct = not (self.rephraser and self.rephraser.enabled)
+
+            def _handle_llm_token(token: str):
+                if on_llm_token:
+                    try:
+                        on_llm_token(token)
+                    except Exception:
+                        pass
+                
+                if stream_direct:
+                    token_buffer.append(token)
+                    current_text = "".join(token_buffer)
+                    sentences = _split_sentences(current_text)
+                    if len(sentences) > 1:
+                        for sentence in sentences[:-1]:
+                            s = sentence.strip()
+                            if s:
+                                tts_queue.put_nowait(s)
+                        token_buffer.clear()
+                        token_buffer.append(sentences[-1])
+
+            async def _tts_consumer():
+                while True:
+                    sentence = await tts_queue.get()
+                    if sentence is None:
+                        break
+                    await self._tts_sentence(sentence, result, timings, t0, _stage, on_tts_audio)
+                    tts_queue.task_done()
+
+            tts_consumer_task = None
+            if stream_direct:
+                tts_consumer_task = asyncio.create_task(_tts_consumer())
+
+            try:
+                conversation = await self.agent.handle_user_text(session_id, transcript, on_llm_token=_handle_llm_token)
+                
+                if stream_direct:
+                    remaining = "".join(token_buffer).strip()
+                    if remaining:
+                        tts_queue.put_nowait(remaining)
+                    tts_queue.put_nowait(None)
+                
+                result["intent"] = conversation.intent
+                result["reply_text"] = conversation.reply_text
+                result["state"] = conversation.state
+                result["verified"] = conversation.verified
+                result["customer"] = _serialize_customer(conversation.customer)
+                result["orders"] = conversation.orders
+                result["should_end"] = conversation.should_end
+                timings.update(conversation.timings)
+                
+                # Record conversation duration BEFORE awaiting TTS to prevent audio generation time from inflating LLM time
+                timings["conversation_end"] = round(time.perf_counter() - t0, 4)
+                timings["conversation_duration"] = round(
+                    timings["conversation_end"] - timings["conversation_start"], 4
+                )
+                
+                if stream_direct:
+                    await tts_consumer_task
+                _stage("conversation", "done", f"intent={conversation.intent}, state={conversation.state}")
+
+                log_pipeline_event(
+                    "conversation_complete",
+                    session_id=session_id,
+                    utterance_id=utterance_id,
+                    turn_index=turn_index,
+                    intent=conversation.intent,
+                    state=conversation.state,
+                    duration_ms=timings["conversation_duration"] * 1000,
+                )
+            except Exception as e:
+                logger.exception(f"[{utterance_id}] Conversation service error: {e}")
+                _stage("conversation", "failed", str(e))
+                if stream_direct:
+                    tts_queue.put_nowait(None)
+                    await tts_consumer_task
+                result["reply_text"] = "I'm sorry, something went wrong. Please try again."
+            finally:
+                if tts_consumer_task and not tts_consumer_task.done():
+                    tts_consumer_task.cancel()
+                    try:
+                        await tts_consumer_task
+                    except asyncio.CancelledError:
+                        pass
+                timings["conversation_end"] = round(time.perf_counter() - t0, 4)
+
+            reply_text = result["reply_text"]
+            if not reply_text:
+                reply_text = "I'm sorry, I couldn't process that. Please try again."
+                result["reply_text"] = reply_text
+
+            # ------ Optional LLM Rephrase ------
+            if self.rephraser and self.rephraser.enabled:
+                _stage("llm", "running", "Rephrasing response…")
+                timings["llm_start"] = round(time.perf_counter() - t0, 4)
+                first_token_received = False
+                token_buffer = []
+                full_reply_parts = []
+
+                try:
+                    async for token in self.rephraser.stream_rephrase(reply_text):
+                        if not first_token_received:
+                            timings["llm_first_token"] = round(time.perf_counter() - t0, 4)
+                            first_token_received = True
+
+                        token_buffer.append(token)
+                        full_reply_parts.append(token)
+
+                        if on_llm_token:
+                            try:
+                                on_llm_token(token)
+                            except Exception:
+                                pass
+
+                        current_text = "".join(token_buffer)
+                        sentences = _split_sentences(current_text)
+
+                        if len(sentences) > 1:
+                            for sentence in sentences[:-1]:
+                                sentence = sentence.strip()
+                                if sentence:
+                                    # TTS each sentence as it completes
+                                    await self._tts_sentence(
+                                        sentence, result, timings, t0, _stage, on_tts_audio
+                                    )
+                            token_buffer = [sentences[-1]]
+
+                    remaining = "".join(token_buffer).strip()
+                    if remaining:
+                        await self._tts_sentence(
+                            remaining, result, timings, t0, _stage, on_tts_audio
+                        )
+
+                    full_reply = "".join(full_reply_parts).strip()
+                    result["reply_text"] = full_reply or reply_text
+                    timings["llm_end"] = round(time.perf_counter() - t0, 4)
+                    _stage("llm", "done", result["reply_text"][:80])
+
+                except Exception as e:
+                    logger.error(f"[{utterance_id}] LLM rephrase failed: {e}")
+                    _stage("llm", "failed", "Rephrase failed — using original")
+                    for sentence in _split_sentences(reply_text):
+                        if sentence.strip():
+                            await self._tts_sentence(
+                                sentence.strip(), result, timings, t0, _stage, on_tts_audio
+                            )
+            elif not stream_direct:
+                _stage("llm", "done", "Deterministic response")
+                # Pipelined TTS: Split reply into sentences and synthesize sequentially
                 for sentence in _split_sentences(reply_text):
                     if sentence.strip():
                         await self._tts_sentence(
                             sentence.strip(), result, timings, t0, _stage, on_tts_audio
                         )
-        else:
-            _stage("llm", "done", "Deterministic response")
-            # Pipelined TTS: Split reply into sentences and synthesize sequentially
-            for sentence in _split_sentences(reply_text):
-                if sentence.strip():
-                    await self._tts_sentence(
-                        sentence.strip(), result, timings, t0, _stage, on_tts_audio
-                    )
+            else:
+                _stage("llm", "done", "Streamed direct response")
 
-        if on_phase_change:
-            on_phase_change(ConversationPhase.SPEAKING.value)
+            if on_phase_change:
+                on_phase_change(ConversationPhase.SPEAKING.value)
 
-        # Save combined output audio to cache
-        combined_audio = result.get("audio_bytes")
-        if combined_audio:
-            filename = f"output_{utterance_id}_{int(datetime.now(UTC).timestamp())}.wav"
-            filepath = AUDIO_CACHE_DIR / filename
-            filepath.write_bytes(combined_audio)
+            # Save combined output audio to cache (background — non-blocking)
+            combined_audio = result.get("audio_bytes")
+            if combined_audio:
+                filename = f"output_{utterance_id}_{int(datetime.now(UTC).timestamp())}.wav"
+                filepath = AUDIO_CACHE_DIR / filename
+                audio_url = f"{SERVER_HOST}/audio/{filename}"
+                result["audio_url"] = audio_url
+                result["audio_path"] = str(filepath)
+                async def _save_output_bg(fp, data):
+                    try:
+                        await asyncio.to_thread(fp.write_bytes, data)
+                        logger.info(f"[{utterance_id}] Output audio saved: {fp} ({len(data)} bytes)")
+                    except Exception as e:
+                        logger.debug(f"Background output save failed: {e}")
+                asyncio.create_task(_save_output_bg(filepath, combined_audio))
 
-            audio_url = f"{SERVER_HOST}/audio/{filename}"
-            result["audio_url"] = audio_url
-            result["audio_path"] = str(filepath)
-            logger.info(f"[{utterance_id}] Combined output audio saved: {filepath} ({len(combined_audio)} bytes)")
-
-        stt_ms = timings.get("stt_duration", 0.0) * 1000
-        llm_ms = timings.get("conversation_duration", 0.0) * 1000
-        tts_start = timings.get("tts_start", 0.0)
-        tts_first = timings.get("tts_first_audio", timings.get("tts_end", timings.get("total", 0.0)))
-        tts_ms = (tts_first - tts_start) * 1000 if tts_start else 0.0
-        
-        vad_wait_str = os.getenv("VAD_SILENCE_MS", "800")
-        try:
-            vad_wait = float(vad_wait_str)
-        except ValueError:
-            vad_wait = 800.0
+            stt_ms = timings.get("stt_duration", 0.0) * 1000
+            llm_ms = timings.get("conversation_duration", 0.0) * 1000
+            tts_start = timings.get("tts_start", 0.0)
+            tts_first = timings.get("tts_first_audio", timings.get("tts_end", timings.get("total", 0.0)))
+            tts_ms = (tts_first - tts_start) * 1000 if tts_start else 0.0
             
-        # Ensure the Total is exactly equal to the sum of all components as requested (Time to First Audio)
-        total_ms = vad_wait + stt_ms + llm_ms + tts_ms
-        
-        # Inject exact TTFA calculations into timings for the frontend UI
-        timings["vad_wait_ms"] = vad_wait
-        timings["stt_ms"] = stt_ms
-        timings["llm_ms"] = llm_ms
-        timings["tts_first_ms"] = tts_ms
-        timings["ttfa_total_ms"] = total_ms
+            vad_wait_str = os.getenv("VAD_SILENCE_MS", "800")
+            try:
+                vad_wait = float(vad_wait_str)
+            except ValueError:
+                vad_wait = 800.0
+                
+            # Ensure the Total is exactly equal to the sum of all components as requested (Time to First Audio)
+            total_ms = vad_wait + stt_ms + llm_ms + tts_ms
+            
+            # Inject exact TTFA calculations into timings for the frontend UI
+            timings["vad_wait_ms"] = vad_wait
+            timings["stt_ms"] = stt_ms
+            timings["llm_ms"] = llm_ms
+            timings["tts_first_ms"] = tts_ms
+            timings["ttfa_total_ms"] = total_ms
 
-        timings["total"] = round(time.perf_counter() - t0, 4)
+            timings["total"] = round(time.perf_counter() - t0, 4)
 
-        log_pipeline_event(
-            "turn_pipeline_complete",
-            session_id=session_id,
-            utterance_id=utterance_id,
-            turn_index=turn_index,
-            timings=timings,
-        )
-        
-        latency_str = f"Total: {total_ms:.0f}ms [VAD Wait: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st Word): {tts_ms:.0f}ms]"
-        log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
+            log_pipeline_event(
+                "turn_pipeline_complete",
+                session_id=session_id,
+                utterance_id=utterance_id,
+                turn_index=turn_index,
+                timings=timings,
+            )
+            
+            latency_str = f"Total: {total_ms:.0f}ms [VAD Wait: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st Word): {tts_ms:.0f}ms]"
+            log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
 
-        return result
+            return result
+        except asyncio.CancelledError:
+            logger.info(f"[{utterance_id}] Process task cancelled (barge-in detected).")
+            if result.get("transcript"):
+                log_transcript(session_id, result["transcript"], result.get("reply_text", "[Cancelled by barge-in]"), "Cancelled")
+            return result
 
     # =====================================================================
     #  TTS helper — synthesize a single sentence

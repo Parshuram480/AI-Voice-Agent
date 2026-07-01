@@ -150,6 +150,43 @@ class DatabaseClient:
     # -------------------------------------------------------------------------
     # Customer Verification
     # -------------------------------------------------------------------------
+    @staticmethod
+    def _parse_dob_string(dob_clean: str) -> Optional[date]:
+        """Parse a DOB string in various formats into a date object."""
+        from datetime import datetime as dt
+        import re as _re
+
+        # 1) YYYY-MM-DD or YYYY/MM/DD  (e.g. "1990-05-15", "1990/05/15")
+        m = _re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", dob_clean)
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+
+        # 2) MM/DD/YYYY or MM-DD-YYYY  (e.g. "05/15/1990", "05-15-1990")
+        m = _re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})", dob_clean)
+        if m:
+            try:
+                return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                pass
+
+        # 3) Natural language: "15 may 1990", "may 15 1990"
+        for fmt in ("%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"):
+            try:
+                return dt.strptime(dob_clean, fmt).date()
+            except ValueError:
+                continue
+
+        # 4) ISO format fallback
+        try:
+            return date.fromisoformat(dob_clean)
+        except ValueError:
+            pass
+
+        return None
+
     async def verify_customer(self, name: str, dob: str) -> Optional[dict]:
         """
         Verify a customer by full name and date of birth.
@@ -182,23 +219,9 @@ class DatabaseClient:
                 # Clean dob string
                 dob_clean = re.sub(r'(st|nd|rd|th)', '', dob.lower())
                 dob_clean = dob_clean.replace(',', '').strip()
-                # Try to extract YYYY, MM, DD using regex if it's messy
-                match = re.search(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})", dob_clean)
-                if match:
-                    dob_date = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                else:
-                    # Attempt standard fallback formats (e.g., DD May YYYY, etc.)
-                    try:
-                        dob_date = datetime.strptime(dob_clean, "%d %b %Y").date()
-                    except ValueError:
-                        try:
-                            dob_date = datetime.strptime(dob_clean, "%d %B %Y").date()
-                        except ValueError:
-                            try:
-                                dob_date = date.fromisoformat(dob_clean)
-                            except ValueError:
-                                # if nothing works, return None
-                                return None
+                dob_date = self._parse_dob_string(dob_clean)
+                if dob_date is None:
+                    return None
             else:
                 dob_date = dob
             async with self._pool.acquire() as conn:
@@ -219,20 +242,9 @@ class DatabaseClient:
                 from datetime import datetime
                 dob_clean = re.sub(r'(st|nd|rd|th)', '', dob.lower())
                 dob_clean = dob_clean.replace(',', '').strip()
-                match = re.search(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})", dob_clean)
-                if match:
-                    dob_date = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                else:
-                    try:
-                        dob_date = datetime.strptime(dob_clean, "%d %b %Y").date()
-                    except ValueError:
-                        try:
-                            dob_date = datetime.strptime(dob_clean, "%d %B %Y").date()
-                        except ValueError:
-                            try:
-                                dob_date = date.fromisoformat(dob_clean)
-                            except ValueError:
-                                return None
+                dob_date = self._parse_dob_string(dob_clean)
+                if dob_date is None:
+                    return None
             else:
                 dob_date = dob
         except Exception:

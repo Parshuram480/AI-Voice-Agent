@@ -5,10 +5,12 @@ import logging
 import os
 import re
 import time
-from typing import Optional, Annotated, Sequence, TypedDict
+from typing import Optional, Annotated, Sequence, TypedDict, Callable
 import operator
 
+import asyncio
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -24,36 +26,26 @@ logger = logging.getLogger(__name__)
 
 SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
 
-AGENT_SYSTEM_PROMPT = """You are a helpful, friendly customer support voice agent for an order management system.
-Your ONLY purpose is to help callers check their order status, delivery dates, item summaries, and order numbers.
-Keep your responses to 1-2 sentences since they will be spoken aloud over the phone.
-Be warm, professional, and direct. Do not use markdown, emojis, or formatting.
+AGENT_SYSTEM_PROMPT = """You are a helpful customer support voice agent for an order management system.
+Help callers check order status, delivery dates, and item summaries.
+Keep responses to 1-2 short sentences (spoken aloud over phone).
+Be warm, professional, direct. No markdown, emojis, or formatting.
 
-CRITICAL OUTPUT RULE:
-Your text response will be spoken aloud by a TTS engine. You must NEVER include raw JSON, function call syntax, tool names, parameter names, or any code in your spoken response. Your response must always be natural, conversational English. If you need to call a tool, use the tool_calls mechanism ONLY — never write tool calls in your text content.
-
-VERIFICATION FLOW:
-1. If the user only says hello or greets you without stating their intent, greet them warmly and ask how you can help them today. Do NOT immediately ask for their name.
-2. Once the user explicitly states they want to check an order or their account, ask for their full name first, then their date of birth. Ask naturally, e.g. "I can help with that. Could you please tell me your full name?"
-3. When you have BOTH a valid full name AND a valid date of birth, call the `verify_user` tool.
-   - NEVER call `verify_user` if you only have a name or an incomplete DOB. You MUST explicitly ask the user for their DOB and wait for their answer before attempting to verify.
-   - Convert any natural-language date (like "May 15th 1990") to YYYY-MM-DD internally. 
-   - If the user provides an incomplete date (e.g., "May 19" without a year), explicitly ask them for the missing information before verifying.
-4. If verification fails, naturally and dynamically explain that you couldn't find a matching account and ask them to try again.
-5. After successful verification, immediately call the `get_order_status` tool to fetch their latest orders. Do NOT ask if they want you to proceed.
-
-DO NOT (CRITICAL — violating these is a failure):
-- NEVER output raw tool syntax or XML tags like `<function=verify_user>`. If you need to verify a user or get orders, use the formal tool_calls mechanism provided by the API.
-- NEVER make up or hallucinate order data. You MUST call `get_order_status` to get real order data. Do not invent items like "blue shirts" or "jeans". 
-- NEVER answer questions outside the scope of order status, delivery information, and item details.
-- NEVER tell the user what date format you need. Just ask for their date of birth naturally.
-- NEVER echo the user's full name and date of birth back to them after verification.
-
-CONVERSATION STYLE:
-- Use the conversation history to understand context. If the user says "when will it arrive?" after discussing an order, you know which order they mean.
-- Keep your tone natural, warm, and human. Avoid robotic phrasing.
-- When answering follow-up questions, do not repeat the full order summary — just answer the specific question.
-- If the user says goodbye or thanks, respond warmly and end the conversation.
+CRITICAL RULES:
+- NEVER include raw JSON, xml tags, or function syntax in spoken text. Use tool_calls mechanism.
+- If user greets, greet back and ask how to help. Do NOT ask for name immediately.
+- To check orders, you need full name AND date of birth (DOB). Ask for name first, then DOB.
+- NEVER call `verify_user` without BOTH name and DOB.
+- If the user provides an incomplete date (e.g. "May 15th"), explicitly ask for the year.
+- Do NOT ask the user to say their DOB "in words". Accept numbers like "05/15/1990".
+- IMMEDIATELY call `verify_user` once you have both name and DOB. Do NOT ask the user to confirm their information.
+- If the user corrects their name (e.g. spelling), acknowledge the correction before proceeding.
+- If verification fails, politely ask them to try again.
+- Successful `verify_user` calls will automatically return the user's orders.
+- NEVER invent or hallucinate order data. Use tool results.
+- If the user asks for information you do not have (e.g., price, amount paid, payment method), explicitly state that you do not have access to that information. NEVER say "let me check that for you" or pretend to look it up.
+- Answer the user's specific query directly and accurately based on the conversation context and tool results.
+- Keep tone natural. Don't repeat full order summaries for follow-ups, answer specifically.
 """
 
 _TOOL_LEAK_PATTERNS = [
@@ -69,20 +61,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "verify_user",
-            "description": "Verifies the user's account using their full name and date of birth.",
+            "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call if DOB is missing.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The user's full name (e.g., John Smith)."
-                    },
-                    "dob": {
-                        "type": "string",
-                        "description": "The user's date of birth, formatted as YYYY-MM-DD (e.g., 1985-10-25)."
-                    }
-                },
-                "required": ["name", "dob"]
+                    "name": {"type": "string", "description": "User's full name."},
+                    "dob": {"type": "string", "description": "YYYY-MM-DD. Ask for missing info (e.g. year) if incomplete."}
+                }
             }
         }
     },
@@ -90,11 +75,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "Fetches the latest orders for the currently verified user.",
+            "description": "Fetches latest orders for verified user.",
             "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
+                "type": "object", 
+                "properties": {
+                    "name": {"type": "string", "description": "Optional. Automatically ignored by backend."},
+                    "dob": {"type": "string", "description": "Optional. Automatically ignored by backend."}
+                }
             }
         }
     }
@@ -108,6 +95,7 @@ class AgentState(TypedDict):
     customer: Optional[dict]
     orders: list[dict]
     reply_text: str
+    summary: Optional[str]
 
 class AgentService:
     """Primary orchestration layer for LLM-driven dialog using LangGraph."""
@@ -157,7 +145,7 @@ class AgentService:
             return "Let me look into that for you."
         return sanitized
 
-    async def _agent_node(self, state: AgentState) -> dict:
+    async def _agent_node(self, state: AgentState, config: RunnableConfig) -> dict:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         dynamic_prompt = f"{AGENT_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
@@ -166,47 +154,184 @@ class AgentService:
             messages_to_send.append({
                 "role": "system",
                 "content": (
-                    f"VERIFIED USER CONTEXT (internal — do NOT read this aloud or echo to the user):\n"
-                    f"Customer name: {state.get('user_name', '')}\n"
-                    f"The user is already verified. Do NOT ask for their name or date of birth again.\n"
+                    f"Verified Customer: {state['customer'].get('full_name', 'Unknown')}\n"
                     f"Call the `get_order_status` tool to answer order questions."
                 )
             })
 
-        # Append state messages (limiting to last N turns if necessary, but LangGraph keeps them)
-        messages_to_send.extend(state["messages"][-20:])
+        if state.get("summary"):
+            messages_to_send.append({
+                "role": "system",
+                "content": f"Here is a brief summary of the conversation so far: {state['summary']}"
+            })
+            messages_to_send.extend(state["messages"][-3:])
+        else:
+            messages_to_send.extend(state["messages"][-20:])
 
         use_tools = True
         llm_kwargs = dict(
             messages=messages_to_send,
-            return_full_response=True,
             temperature=0.3,
-            stage="graph_agent",
         )
         if use_tools:
             llm_kwargs["tools"] = AGENT_TOOLS
             llm_kwargs["tool_choice"] = "auto"
 
-        response = await self._groq.chat_completion(**llm_kwargs)
-        reply_message = response.choices[0].message
+        on_llm_token = config.get("configurable", {}).get("on_llm_token")
         
-        assistant_msg = {"role": "assistant"}
-        if reply_message.content:
-            assistant_msg["content"] = reply_message.content
-        if reply_message.tool_calls:
-            safe_tool_calls = []
-            for tc in reply_message.tool_calls:
-                safe_tool_calls.append({
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                })
-            assistant_msg["tool_calls"] = safe_tool_calls
+        reply_content = ""
+        tool_calls = []
+        
+        start_time = time.perf_counter()
+        first_token_time = None
+        
+        async for chunk_type, chunk_data in self._groq.chat_completion_stream_with_tools(**llm_kwargs):
+            if not first_token_time:
+                first_token_time = time.perf_counter()
+                logger.info(f"LLM TTFT internally measured: {round(first_token_time - start_time, 4)}s")
+            
+            if chunk_type == "content":
+                reply_content += chunk_data
+                if on_llm_token:
+                    try:
+                        on_llm_token(chunk_data)
+                    except Exception as e:
+                        logger.debug(f"on_llm_token failed: {e}")
+            elif chunk_type == "tool_calls":
+                tool_calls = chunk_data
 
-        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_message.content or "")}
+        logger.info(f"LLM Stream Finished. Total stream time: {round(time.perf_counter() - start_time, 4)}s")
+
+        # CRITICAL FIX: Detect when LLM outputs tool-call syntax as TEXT 
+        # instead of using the structured tool_calls API.
+        # The llama-3.1-8b model sometimes does this, outputting patterns like:
+        #   function=verify_user>{"name": "...", "dob": "..."}
+        #   <function=get_order_status></function>
+        # We parse these and convert them into proper tool_calls.
+        if not tool_calls and reply_content:
+            rescued_calls = self._rescue_leaked_tool_calls(reply_content)
+            if rescued_calls:
+                tool_calls = rescued_calls
+                logger.warning(
+                    f"Rescued {len(rescued_calls)} leaked tool call(s) from LLM text output: "
+                    f"{[tc['function']['name'] for tc in rescued_calls]}"
+                )
+                reply_content = ""  # Clear the leaked text
+
+        assistant_msg = {"role": "assistant"}
+        if reply_content:
+            assistant_msg["content"] = reply_content
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+
+        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_content)}
+
+    @staticmethod
+    def _rescue_leaked_tool_calls(text: str) -> list[dict]:
+        import uuid
+        calls = []
+        
+        # Pattern 1: function=verify_user>{"name": "...", "dob": "..."}
+        m1 = re.search(r'function\s*=\s*(verify_user)\s*>\s*(\{.*?\})', text, re.DOTALL)
+        if m1:
+            calls.append({
+                "id": "call_" + str(uuid.uuid4())[:8],
+                "type": "function",
+                "function": {
+                    "name": m1.group(1),
+                    "arguments": m1.group(2)
+                }
+            })
+            return calls
+            
+        # Pattern 2: function=get_order_status>
+        m2 = re.search(r'function\s*=\s*(get_order_status)\s*>', text)
+        if m2:
+            calls.append({
+                "id": "call_" + str(uuid.uuid4())[:8],
+                "type": "function",
+                "function": {
+                    "name": m2.group(1),
+                    "arguments": "{}"
+                }
+            })
+            return calls
+            
+        return calls
+
+    @staticmethod
+    def _dob_found_in_user_messages(messages: list, dob: str) -> bool:
+        """Check if a date-of-birth-like string actually appears in user messages.
+        
+        This prevents the LLM from hallucinating a DOB that the user never spoke.
+        We look for date-like patterns in user messages (digits, month names, slashes, dashes).
+        """
+        import calendar
+        
+        # Extract all user message texts
+        user_texts = []
+        for msg in messages:
+            role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if role == "user" and content:
+                user_texts.append(content.lower())
+        
+        if not user_texts:
+            return False
+        
+        combined_user_text = " ".join(user_texts)
+        
+        # Check 1: Look for any date-like numeric patterns in user messages
+        # Patterns like: MM/DD/YYYY, DD-MM-YYYY, YYYY-MM-DD, MM.DD.YYYY, etc.
+        date_patterns = [
+            re.compile(r'\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}'),  # MM/DD/YYYY or DD-MM-YYYY variants
+            re.compile(r'\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}'),     # YYYY-MM-DD variants
+        ]
+        
+        has_date_pattern = any(p.search(combined_user_text) for p in date_patterns)
+        
+        # Check 2: Look for month names (January, Jan, etc.) combined with numbers
+        month_names = [m.lower() for m in calendar.month_name[1:]] + [m.lower() for m in calendar.month_abbr[1:]]
+        has_month_name = any(m in combined_user_text for m in month_names if m)
+        has_numbers = bool(re.search(r'\d{1,4}', combined_user_text))
+        has_verbal_date = has_month_name and has_numbers
+        
+        # Check 3: Look for keywords indicating DOB context
+        dob_keywords = ["birth", "born", "dob", "birthday", "date of birth"]
+        has_dob_keyword = any(kw in combined_user_text for kw in dob_keywords)
+        
+        # The user must have provided SOME date-like information
+        return has_date_pattern or has_verbal_date or (has_dob_keyword and has_numbers)
+
+    @staticmethod
+    def _name_found_in_user_messages(messages: list, name: str) -> bool:
+        """Check if the name passed to verify_user was actually spoken by the user.
+        
+        This prevents the LLM from hallucinating a name when the user only provided DOB.
+        We check that at least the major parts of the name appear in user messages.
+        """
+        # Extract all user message texts
+        user_texts = []
+        for msg in messages:
+            role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if role == "user" and content:
+                user_texts.append(content.lower())
+        
+        if not user_texts:
+            return False
+        
+        combined_user_text = " ".join(user_texts)
+        
+        # Split the name into parts and check that each significant part appears in user messages
+        # e.g., for "Rohit Sharma", check that both "rohit" and "sharma" appear
+        name_parts = [p.strip().lower() for p in name.split() if len(p.strip()) > 1]
+        
+        if not name_parts:
+            return False
+        
+        # All significant parts of the name must appear in user messages
+        return all(part in combined_user_text for part in name_parts)
 
     async def _verify_tool_node(self, state: AgentState) -> dict:
         last_msg = state["messages"][-1]
@@ -222,16 +347,63 @@ class AgentService:
                 dob = args.get("dob", "")
                 
                 # SECURITY CHECK: Enforce that both name and dob are present
-                if not name or not dob:
+                if not name and not dob:
                     result_str = json.dumps({
                         "error": "MISSING_INFORMATION",
-                        "message": "You MUST collect BOTH the full name AND the date of birth before calling this tool. Ask the user for the missing information now."
+                        "message": "You MUST explicitly ask the user for both their full name and date of birth. Do NOT guess or fabricate any information."
                     })
-                    updates["messages"].append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result_str
+                    updates["messages"].append({"role": "tool", "tool_call_id": tc["id"], "name": tc["function"]["name"], "content": result_str})
+                    continue
+                elif name and not dob:
+                    result_str = json.dumps({
+                        "error": "MISSING_DOB",
+                        "message": "Missing date of birth. You MUST explicitly ask the user for their date of birth before verifying. Do NOT guess a DOB."
                     })
+                    updates["messages"].append({"role": "tool", "tool_call_id": tc["id"], "name": tc["function"]["name"], "content": result_str})
+                    continue
+                elif dob and not name:
+                    result_str = json.dumps({
+                        "error": "MISSING_NAME",
+                        "message": "Missing full name. You MUST explicitly ask the user for their full name before verifying."
+                    })
+                    updates["messages"].append({"role": "tool", "tool_call_id": tc["id"], "name": tc["function"]["name"], "content": result_str})
+                    continue
+                
+                # ANTI-HALLUCINATION CHECK: Verify the DOB was actually spoken by the user
+                all_messages = state.get("messages", [])
+                if not self._dob_found_in_user_messages(all_messages, dob):
+                    logger.warning(
+                        f"DOB hallucination blocked: LLM tried to verify with dob='{dob}' "
+                        f"but no date was found in user messages. Name='{name}'"
+                    )
+                    result_str = json.dumps({
+                        "error": "DOB_NOT_PROVIDED_BY_USER",
+                        "message": (
+                            "REJECTED: The date of birth you provided was NOT spoken by the user. "
+                            "You appear to have fabricated or guessed the DOB. This is NOT allowed. "
+                            "You MUST ask the user: 'Could you please tell me your date of birth?' "
+                            "and wait for their actual response before calling verify_user again."
+                        )
+                    })
+                    updates["messages"].append({"role": "tool", "tool_call_id": tc["id"], "name": tc["function"]["name"], "content": result_str})
+                    continue
+                
+                # ANTI-HALLUCINATION CHECK: Verify the name was actually spoken by the user
+                if not self._name_found_in_user_messages(all_messages, name):
+                    logger.warning(
+                        f"Name hallucination blocked: LLM tried to verify with name='{name}' "
+                        f"but the name was not found in user messages."
+                    )
+                    result_str = json.dumps({
+                        "error": "NAME_NOT_PROVIDED_BY_USER",
+                        "message": (
+                            "REJECTED: The name you provided was NOT spoken by the user. "
+                            "You appear to have fabricated or guessed the name. This is NOT allowed. "
+                            "You MUST ask the user: 'Could you please tell me your full name?' "
+                            "and wait for their actual response before calling verify_user again."
+                        )
+                    })
+                    updates["messages"].append({"role": "tool", "tool_call_id": tc["id"], "name": tc["function"]["name"], "content": result_str})
                     continue
                 
                 # SECURITY CHECK: Prevent overwriting an already verified session with a different user
@@ -249,6 +421,7 @@ class AgentService:
                         updates["messages"].append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
+                            "name": tc["function"]["name"],
                             "content": result_str
                         })
                         continue
@@ -261,13 +434,26 @@ class AgentService:
                     updates["customer"] = verification.customer
                     orders = await self._orders.get_orders(verification.customer.get("id"))
                     updates["orders"] = orders
-                    result_str = json.dumps({"verified": True, "message": "Account verified successfully. You can now call get_order_status to fetch their orders."})
+                    result_str = json.dumps({
+                        "verified": True, 
+                        "message": "Account verified successfully.",
+                        "customer_name": verification.customer.get("full_name"),
+                        "orders": orders
+                    })
                 else:
-                    result_str = json.dumps({"verified": False, "message": "No matching account found."})
+                    updates["verified"] = False
+                    updates["user_name"] = None
+                    updates["dob"] = None
+                    updates["customer"] = None
+                    result_str = json.dumps({
+                        "verified": False, 
+                        "message": "CRITICAL: No matching account found. The provided Name and DOB are incorrect. You MUST explicitly tell the user the verification failed, drop the previous name and DOB, and ask them to provide BOTH their full name and date of birth again."
+                    })
                 
                 updates["messages"].append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
+                    "name": tc["function"]["name"],
                     "content": result_str
                 })
             elif tc["function"]["name"] == "get_order_status":
@@ -284,18 +470,21 @@ class AgentService:
                 updates["messages"].append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
+                    "name": tc["function"]["name"],
                     "content": result_str
                 })
         return updates
 
-    async def handle_user_text(self, session_id: str, user_text: str) -> ConversationResult:
+    async def handle_user_text(
+        self, session_id: str, user_text: str, on_llm_token: Optional[Callable[[str], None]] = None
+    ) -> ConversationResult:
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
 
         # Get or create the session state (for compatibility with legacy SessionManager)
         session = await self._sessions.get_or_create(session_id)
         
-        config = {"configurable": {"thread_id": session_id}}
+        config = {"configurable": {"thread_id": session_id, "on_llm_token": on_llm_token}}
         
         # Initialize graph state if empty
         graph_state = await self._graph.aget_state(config)
@@ -305,9 +494,10 @@ class AgentService:
                 "verified": session.verified,
                 "user_name": session.user_name,
                 "dob": session.dob,
-                "customer": {"id": session.customer_id, "name": session.customer_name} if session.customer_id else None,
+                "customer": {"id": session.customer_id, "full_name": session.customer_name} if session.customer_id else None,
                 "orders": session.orders if hasattr(session, "orders") else [],
                 "messages": [],
+                "summary": None,
             })
         
         user_msg = {"role": "user", "content": user_text}
@@ -328,7 +518,7 @@ class AgentService:
         session.dob = state_values.get("dob")
         if state_values.get("customer"):
             session.customer_id = state_values["customer"].get("id")
-            session.customer_name = state_values["customer"].get("name")
+            session.customer_name = state_values["customer"].get("full_name", state_values["customer"].get("name"))
             session.orders = state_values.get("orders", [])
         
         session.last_response = reply_text
@@ -337,27 +527,34 @@ class AgentService:
         session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
         await self._sessions.update(session)
         
-        # --- Save history to folder ---
-        try:
-            history_dir = os.path.join(os.getcwd(), "histories")
-            os.makedirs(history_dir, exist_ok=True)
-            history_file = os.path.join(history_dir, f"{session_id}.json")
-            
-            history_data = []
-            for msg in state_values.get("messages", []):
-                if hasattr(msg, "model_dump"):
-                    history_data.append(msg.model_dump())
-                elif isinstance(msg, dict):
-                    history_data.append(msg)
-                else:
-                    history_data.append({"role": getattr(msg, "role", "unknown"), "content": getattr(msg, "content", str(msg))})
-                    
-            with open(history_file, "w", encoding="utf-8") as f:
-                json.dump(history_data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save history for {session_id}: {e}")
+        # --- Save history to folder (background — non-blocking) ---
+        async def _save_history_bg():
+            try:
+                history_dir = os.path.join(os.getcwd(), "histories")
+                os.makedirs(history_dir, exist_ok=True)
+                history_file = os.path.join(history_dir, f"{session_id}.json")
+                
+                history_data = []
+                for msg in state_values.get("messages", []):
+                    if hasattr(msg, "model_dump"):
+                        history_data.append(msg.model_dump())
+                    elif isinstance(msg, dict):
+                        history_data.append(msg)
+                    else:
+                        history_data.append({"role": getattr(msg, "role", "unknown"), "content": getattr(msg, "content", str(msg))})
+                
+                def _write():
+                    with open(history_file, "w", encoding="utf-8") as f:
+                        json.dump(history_data, f, indent=2)
+                await asyncio.to_thread(_write)
+            except Exception as e:
+                logger.error(f"Failed to save history for {session_id}: {e}")
+        asyncio.create_task(_save_history_bg())
         
         timings["total"] = round(time.perf_counter() - t0, 4)
+
+        # Trigger background summarization
+        asyncio.create_task(self._summarize_session_async(session_id))
 
         return ConversationResult(
             session_id=session.session_id,
@@ -370,3 +567,65 @@ class AgentService:
             orders=state_values.get("orders", []),
             timings=timings,
         )
+
+    async def _summarize_session_async(self, session_id: str):
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+            graph_state = await self._graph.aget_state(config)
+            if not graph_state.values:
+                return
+                
+            messages = graph_state.values.get("messages", [])
+            # Only summarize if we have more than 6 messages (approx 3 user turns)
+            if len(messages) <= 6:
+                return
+                
+            # Create a separate Groq client instance using the summary API key
+            summary_api_key = os.getenv("GROQ_SUMMARY_API_KEY")
+            summary_model = os.getenv("SUMMARY_MODEL", "llama-3.1-8b-instant")
+            
+            if not summary_api_key:
+                logger.warning("GROQ_SUMMARY_API_KEY not set, skipping summarization.")
+                return
+                
+            summary_groq = GroqClient(api_key=summary_api_key)
+            
+            # We want to summarize everything EXCEPT the last 3 messages
+            messages_to_summarize = messages[:-3]
+            
+            text_to_summarize = ""
+            for msg in messages_to_summarize:
+                role = msg.get("role", "unknown") if isinstance(msg, dict) else getattr(msg, "role", "unknown")
+                content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+                
+                # Exclude tool calls and empty content to save tokens
+                if role == "tool" or not content:
+                    continue
+                text_to_summarize += f"{role}: {content}\n"
+                
+            if not text_to_summarize.strip():
+                await summary_groq.close()
+                return
+                
+            prompt = [
+                {"role": "system", "content": "You are a concise summarizer. Summarize the following conversation in at most 15 words. Focus on user intent, verified status, and key details (like names, orders). Be extremely concise."},
+                {"role": "user", "content": f"Conversation:\n{text_to_summarize}"}
+            ]
+            
+            summary = await summary_groq.chat_completion(
+                messages=prompt,
+                model=summary_model,
+                temperature=0.1,
+                max_tokens=30,
+                stage="summarizer"
+            )
+            
+            await summary_groq.close()
+            
+            # Update the graph state with the new summary
+            if summary:
+                await self._graph.aupdate_state(config, {"summary": summary})
+                logger.info(f"Session {session_id} background summary generated: {summary}")
+            
+        except Exception as e:
+            logger.error(f"Background summarization failed for {session_id}: {e}")

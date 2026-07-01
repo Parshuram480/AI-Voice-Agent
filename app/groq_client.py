@@ -232,6 +232,70 @@ class GroqClient:
             if delta and delta.content:
                 yield delta.content
 
+    async def chat_completion_stream_with_tools(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 256,
+        **kwargs,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """
+        Stream chat completion yielding (type, data).
+        type can be 'content' (yields strings) or 'tool_calls' (yields final tool calls list).
+        """
+        model = model or self.LLM_MODEL
+        logger.info(f"LLM stream-with-tools: {model}, {len(messages)} messages")
+
+        stream = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            **kwargs
+        )
+        
+        tool_calls = []
+        try:
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if not delta: continue
+                
+                if delta.content:
+                    yield ("content", delta.content)
+                    
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        while len(tool_calls) <= tc.index:
+                            tool_calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                        if tc.id:
+                            tool_calls[tc.index]["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            tool_calls[tc.index]["function"]["name"] += tc.function.name
+                        if tc.function and tc.function.arguments:
+                            tool_calls[tc.index]["function"]["arguments"] += tc.function.arguments
+
+            if tool_calls:
+                yield ("tool_calls", tool_calls)
+        except Exception as e:
+            if "Failed to call a function" in str(e):
+                logger.warning("Groq API strict validation failed. Retrying without tools to allow text reply...")
+                # Retry without tools
+                fallback_stream = await self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True
+                )
+                async for chunk in fallback_stream:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        yield ("content", delta.content)
+            else:
+                raise e
+
     # -------------------------------------------------------------------------
     # 3. Text-to-Speech
     # -------------------------------------------------------------------------

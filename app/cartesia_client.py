@@ -30,7 +30,7 @@ class CartesiaClient:
         audio_stream = await self.client.tts.sse(
             model_id="sonic-3",
             transcript=text,
-            voice={"mode": "id", "id": voice, "__experimental_controls": {"speed": "slowest"}},
+            voice={"mode": "id", "id": voice},
             output_format={
                 "container": "raw",
                 "encoding": "pcm_s16le",
@@ -62,7 +62,7 @@ class CartesiaClient:
         audio_stream = await self.client.tts.sse(
             model_id="sonic-3",
             transcript=text,
-            voice={"mode": "id", "id": voice, "__experimental_controls": {"speed": "slowest"}},
+            voice={"mode": "id", "id": voice},
             output_format={
                 "container": "raw",
                 "encoding": "pcm_s16le",
