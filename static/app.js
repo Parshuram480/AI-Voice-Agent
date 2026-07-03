@@ -55,7 +55,8 @@ const debugLatency = document.getElementById('debug-latency');
 let isProcessing = false;
 let isSessionActive = false;
 let ws = null;
-let audioContext = null;
+let micAudioContext = null;   // 16kHz for mic capture
+let playbackContext = null;    // 24kHz for Gemini audio playback
 let micStream = null;
 let micSource = null;
 let micProcessor = null;
@@ -235,7 +236,14 @@ function updateMetrics(timings) {
   if (!metricsContainer) return;
   metricsContainer.style.display = 'flex';
 
-  if (timings.stt_ms !== undefined) {
+  if (timings.is_native) {
+    metricStt.textContent = 'N/A';
+    metricLlm.textContent = 'N/A';
+    metricTts.textContent = 'N/A';
+    metricTotal.textContent = 'Native';
+    debugLatency.textContent = 'Native Audio (TTFA: N/A)';
+    addLog('system', 'Turn latency: Native Audio (TTFA: N/A)');
+  } else if (timings.stt_ms !== undefined) {
     // Use pre-computed TTFA precise metrics
     metricStt.textContent = `${timings.stt_ms.toFixed(0)} ms`;
     metricLlm.textContent = `${timings.llm_ms.toFixed(0)} ms`;
@@ -320,25 +328,26 @@ btnSessionReset.addEventListener('click', () => {
 
 async function startSession() {
   try {
-    // Setup AudioContext & AudioWorklet
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    await audioContext.audioWorklet.addModule('/static/audio-processor.js');
+    // Separate AudioContexts: 16kHz for mic capture, 24kHz for Gemini playback
+    micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    await micAudioContext.audioWorklet.addModule('/static/audio-processor.js');
 
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
     });
 
-    micSource = audioContext.createMediaStreamSource(micStream);
-    micProcessor = new AudioWorkletNode(audioContext, 'pcm-processor');
+    micSource = micAudioContext.createMediaStreamSource(micStream);
+    micProcessor = new AudioWorkletNode(micAudioContext, 'pcm-processor');
 
     // Client-side noise gate: high-pass filter removes low-frequency hum/rumble
-    const highPassFilter = audioContext.createBiquadFilter();
+    const highPassFilter = micAudioContext.createBiquadFilter();
     highPassFilter.type = 'highpass';
     highPassFilter.frequency.value = 85;  // Cut frequencies below 85Hz (fans, AC, hum)
     highPassFilter.Q.value = 0.7;
 
     // Gain compensation — ensure filtered audio isn't too quiet
-    const gainNode = audioContext.createGain();
+    const gainNode = micAudioContext.createGain();
     gainNode.gain.value = 1.1;
 
     // Setup WebSocket
@@ -492,10 +501,20 @@ async function handleWebSocketMessage(event) {
         break;
 
       case 'tts_audio':
-        // Decode base64 WAV chunk and play it
+        // Decode raw 24kHz 16-bit PCM chunk directly using the dedicated playback context
         try {
-          const arrayBuffer = base64ToArrayBuffer(data.data);
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          if (!playbackContext) break;
+          let pcm16Buffer = base64ToArrayBuffer(data.data);
+          if (pcm16Buffer.byteLength % 2 !== 0) {
+            pcm16Buffer = pcm16Buffer.slice(0, pcm16Buffer.byteLength - 1);
+          }
+          if (pcm16Buffer.byteLength === 0) break;
+          const pcm16 = new Int16Array(pcm16Buffer);
+          const audioBuffer = playbackContext.createBuffer(1, pcm16.length, 24000);
+          const channelData = audioBuffer.getChannelData(0);
+          for (let i = 0; i < pcm16.length; i++) {
+            channelData[i] = pcm16[i] / 32768.0; // Convert Int16 to Float32
+          }
           playAudioChunk(audioBuffer);
         } catch (e) {
           console.error('Failed to play TTS chunk', e);
@@ -578,14 +597,15 @@ function base64ToArrayBuffer(base64) {
 }
 
 function playAudioChunk(audioBuffer) {
-  if (!audioContext) return;
+  if (!playbackContext) return;
 
-  const source = audioContext.createBufferSource();
+  const source = playbackContext.createBufferSource();
   source.buffer = audioBuffer;
-  source.connect(audioContext.destination);
+  source.connect(playbackContext.destination);
 
   // Schedule gapless playback
-  const currentTime = audioContext.currentTime;
+  const currentTime = playbackContext.currentTime;
+  // Only reset if playbackTime is completely behind currentTime
   if (playbackTime < currentTime) {
     playbackTime = currentTime;
   }

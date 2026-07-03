@@ -45,10 +45,10 @@ class TwilioHandler:
     # -------------------------------------------------------------------------
     def generate_stream_twiml(self, ws_url: str) -> str:
         """
-        Generate TwiML that starts a media stream and greets the caller.
+        Generate TwiML that connects a media stream.
 
-        The stream sends real-time audio to our WebSocket endpoint.
-        A long pause keeps the call alive while we process.
+        The stream sends real-time audio to our WebSocket endpoint
+        and allows us to send audio back.
 
         Args:
             ws_url: Full WebSocket URL (e.g. "wss://example.ngrok.app/audio-stream").
@@ -56,21 +56,13 @@ class TwilioHandler:
         Returns:
             TwiML XML string.
         """
+        from twilio.twiml.voice_response import Connect
         response = VoiceResponse()
 
-        # Start streaming audio to our WebSocket
-        start = Start()
-        start.stream(url=ws_url)
-        response.append(start)
-
-        # Greet the caller
-        response.say(
-            "Hello, how may I help you today?",
-            voice="alice",
-        )
-
-        # Keep the call alive while we process (up to 60 seconds)
-        response.pause(length=60)
+        # Connect the call entirely to our WebSocket for bi-directional audio
+        connect = Connect()
+        connect.stream(url=ws_url)
+        response.append(connect)
 
         twiml = str(response)
         logger.info(f"Generated stream TwiML: {twiml[:200]}...")
@@ -145,9 +137,14 @@ class TwilioHandler:
             Not yet wired into the main pipeline — available for future use.
         """
         import base64
+        import asyncio
         from app.audio_utils import pcm_to_mulaw
 
         try:
+            # Initialize a lock on the websocket if it doesn't exist
+            if not hasattr(websocket, "_send_lock"):
+                websocket._send_lock = asyncio.Lock()
+                
             mulaw_audio = pcm_to_mulaw(pcm_audio)
             payload = base64.b64encode(mulaw_audio).decode("ascii")
 
@@ -158,7 +155,13 @@ class TwilioHandler:
                     "payload": payload,
                 },
             }
-            await websocket.send_text(json.dumps(message))
+            
+            logger.info(f"Sending {len(payload)} bytes of audio to Twilio (streamSid: {stream_sid})")
+            
+            # Use the lock to prevent concurrent frame corruption
+            async with websocket._send_lock:
+                await websocket.send_text(json.dumps(message))
+                
             return True
         except Exception as e:
             logger.error(f"Failed to send audio to stream {stream_sid}: {e}")

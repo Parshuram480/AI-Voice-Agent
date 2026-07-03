@@ -70,3 +70,17 @@ def log_transcript(session_id: str, user_text: str, agent_text: str, latency_str
         f.write(f"{header}\n")
         f.write(f"user: \"{user_text}\"\n")
         f.write(f"agent: \"{agent_text}\"\n\n")
+
+HISTORIES_DIR = "histories"
+
+def log_history(session_id: str, state: dict) -> None:
+    """Save the conversation history state to a JSON file."""
+    if not os.path.exists(HISTORIES_DIR):
+        os.makedirs(HISTORIES_DIR, exist_ok=True)
+        
+    filepath = os.path.join(HISTORIES_DIR, f"{session_id}.json")
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(state.get("messages", []), f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to log history for {session_id}: {e}")

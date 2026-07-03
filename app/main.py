@@ -26,7 +26,7 @@ import audioop
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from app.api import create_api_router
@@ -156,17 +156,27 @@ async def startup():
     pipeline = VoicePipeline(groq_client, db_client, twilio_handler, agent_service, rephraser)
     logger.info("✓ Legacy voice pipeline initialized")
 
-    # Initialize streaming pipeline
-    streaming_pipeline = StreamingVoicePipeline(
-        groq_client,
-        db_client,
-        twilio_handler,
-        agent_service,
-        rephraser,
-        cartesia_client=cartesia_client,
-    )
-    logger.info("✓ Streaming voice pipeline initialized")
+    pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
+    
+    if pipeline_mode == "multimodal":
+        from app.gemini_live_client import GeminiLiveClient
+        from app.multimodal_pipeline import GeminiLivePipeline
+        gemini_client = GeminiLiveClient(verification_service, order_service)
+        streaming_pipeline = GeminiLivePipeline(gemini_client)
+        logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
+    else:
+        # Initialize streaming pipeline
+        streaming_pipeline = StreamingVoicePipeline(
+            groq_client,
+            db_client,
+            twilio_handler,
+            agent_service,
+            rephraser,
+            cartesia_client=cartesia_client,
+        )
+        logger.info("✓ Streaming voice pipeline initialized")
 
+    logger.info(f"  Pipeline Mode: {pipeline_mode}")
     logger.info(f"  Server host: {SERVER_HOST}")
     logger.info(f"  Listening on port: {SERVER_PORT}")
     logger.info("=" * 60)
@@ -210,15 +220,18 @@ async def index():
 
 # ---- Twilio Voice Webhook ----
 @app.post("/voice")
-async def voice_webhook():
+async def voice_webhook(request: Request):
     """
     Twilio voice webhook — called when a phone call comes in.
 
     Returns TwiML that starts a media stream and greets the caller.
     """
-    # Build the WebSocket URL based on server host
-    host = SERVER_HOST.replace("https://", "wss://").replace("http://", "ws://")
-    ws_url = f"{host}/audio-stream"
+    # Build the WebSocket URL dynamically based on the incoming request host
+    # If the request comes through ngrok (https), we use wss://
+    scheme = "wss" if request.url.scheme == "https" or "ngrok" in request.url.hostname else "ws"
+    ws_url = f"{scheme}://{request.url.hostname}/audio-stream"
+    if request.url.port and request.url.port not in (80, 443):
+        ws_url = f"{scheme}://{request.url.hostname}:{request.url.port}/audio-stream"
 
     twiml = twilio_handler.generate_stream_twiml(ws_url)
     logger.info(f"Voice webhook called — streaming to {ws_url}")
@@ -241,44 +254,56 @@ async def audio_stream(websocket: WebSocket):
     stream_sid = None
     call_sid = None
     audio_queue: asyncio.Queue = asyncio.Queue()
+    outbound_audio_queue: asyncio.Queue = asyncio.Queue()
     pipeline_task = None
     use_stream_audio_out = TWILIO_STREAM_AUDIO_OUT
     stream_audio_sent = False
+    outbound_task = None
 
-    async def _send_stream_audio(wav_bytes: bytes):
+    async def _outbound_audio_loop():
         nonlocal stream_audio_sent
-        if not stream_sid or not wav_bytes:
-            return
+        resample_state = None
+        while True:
+            wav_bytes = await outbound_audio_queue.get()
+            if wav_bytes is None:
+                break
+                
+            if not stream_sid:
+                continue
 
-        try:
-            pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
-            if not pcm_bytes:
-                return
+            try:
+                pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
+                if not pcm_bytes:
+                    continue
 
-            if sample_width != 2:
-                pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
-                sample_width = 2
+                if sample_width != 2:
+                    pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
+                    sample_width = 2
 
-            pcm_bytes = to_mono(pcm_bytes, sample_width=sample_width, channels=channels)
-            if sample_rate != 8000:
-                pcm_bytes = resample_pcm(
-                    pcm_bytes,
-                    sample_rate,
-                    8000,
-                    sample_width=sample_width,
-                    channels=1,
-                )
+                pcm_bytes = to_mono(pcm_bytes, sample_width=sample_width, channels=channels)
+                if sample_rate != 8000:
+                    # Maintain state across chunks to prevent static/clicks
+                    pcm_bytes, resample_state = audioop.ratecv(
+                        pcm_bytes,
+                        sample_width,
+                        1,
+                        sample_rate,
+                        8000,
+                        resample_state,
+                    )
 
-            ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
-            if ok:
-                stream_audio_sent = True
-        except Exception as e:
-            logger.error(f"Failed to stream audio to Twilio: {e}")
+                ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
+                if ok:
+                    stream_audio_sent = True
+            except Exception as e:
+                logger.error(f"CRITICAL ERROR in _outbound_audio_loop: {e}")
+                import traceback
+                traceback.print_exc()
 
     def on_tts_audio(audio_bytes: bytes):
         if not use_stream_audio_out:
             return
-        asyncio.create_task(_send_stream_audio(audio_bytes))
+        outbound_audio_queue.put_nowait(audio_bytes)
 
     try:
         while True:
@@ -293,6 +318,9 @@ async def audio_stream(websocket: WebSocket):
                 stream_sid = data.get("start", {}).get("streamSid")
                 call_sid = data.get("start", {}).get("callSid")
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
+
+                if use_stream_audio_out and not outbound_task:
+                    outbound_task = asyncio.create_task(_outbound_audio_loop())
 
                 # Launch the streaming pipeline in the background
                 pipeline_task = asyncio.create_task(
@@ -318,14 +346,17 @@ async def audio_stream(websocket: WebSocket):
                 logger.info("Twilio stream stopped")
                 # Signal end-of-audio to the pipeline
                 await audio_queue.put(_DONE)
+                outbound_audio_queue.put_nowait(None)
                 break
 
     except WebSocketDisconnect:
         logger.info("Twilio audio stream WebSocket disconnected")
         await audio_queue.put(_DONE)
+        outbound_audio_queue.put_nowait(None)
     except Exception as e:
         logger.exception(f"Twilio audio stream error: {e}")
         await audio_queue.put(_DONE)
+        outbound_audio_queue.put_nowait(None)
     finally:
         # Wait for the pipeline to complete
         if pipeline_task:
@@ -447,6 +478,7 @@ async def mic_stream(websocket: WebSocket):
             on_turn_done=on_turn_done,
             session_id=session_id,
             barge_in_event=barge_in_event,
+            langsmith_extra={"metadata": {"session_id": session_id, "thread_id": session_id}},
         )
     )
 
