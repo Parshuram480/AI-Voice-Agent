@@ -628,7 +628,8 @@ class AgentService:
                 logger.warning("GROQ_SUMMARY_API_KEY not set, skipping summarization.")
                 return
                 
-            summary_groq = GroqClient(api_key=summary_api_key)
+            # Force the summarizer to use Groq, even if main LLM is OpenAI
+            summary_groq = GroqClient(api_key=summary_api_key, provider="groq")
             
             # We want to summarize everything EXCEPT the last 3 messages
             messages_to_summarize = messages[:-3]

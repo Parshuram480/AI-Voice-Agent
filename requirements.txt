@@ -24,3 +24,4 @@ langgraph>=0.2.0
 
 google-genai==0.3.0
 langsmith
+openai

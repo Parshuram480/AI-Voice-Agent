@@ -14,50 +14,63 @@ from typing import AsyncGenerator, Optional, Any
 
 import httpx
 from groq import AsyncGroq
-
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
 # --- Environment Variables ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 
 
 class GroqClient:
     """
-    Async client for Groq's AI APIs.
-
+    Async client for AI APIs.
+    
     Provides three core capabilities:
-        1. speech_to_text  — Whisper-based transcription
-        2. chat_completion — LLM chat (Llama 3.1)
-        3. text_to_speech  — Orpheus TTS
+        1. speech_to_text  — Whisper-based transcription (Groq)
+        2. chat_completion — LLM chat (Groq or OpenAI based on LLM_PROVIDER)
+        3. text_to_speech  — Orpheus TTS (Groq)
     """
 
     # Default models — can be overridden per call
     STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
-    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+    
+    if LLM_PROVIDER == "openai":
+        LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    else:
+        LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+        
     TTS_MODEL = os.getenv("TTS_MODEL", "canopylabs/orpheus-v1-english")
     TTS_VOICE = os.getenv("TTS_VOICE", "hannah")
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
         """
-        Initialize the Groq client.
-
-        Args:
-            api_key: Groq API key. Falls back to GROQ_API_KEY.
+        Initialize the AI client.
         """
-        self._api_key = api_key or GROQ_API_KEY
-        if not self._api_key:
-            logger.warning("GROQ_API_KEY is not set — Groq API calls will fail.")
+        self._groq_api_key = api_key or GROQ_API_KEY
+        if not self._groq_api_key:
+            logger.warning("GROQ_API_KEY is not set — Groq API calls (STT/TTS) will fail.")
 
-        # Official SDK client (handles STT + LLM)
-        self._client = AsyncGroq(api_key=self._api_key)
+        self.provider = provider or LLM_PROVIDER
+        
+        # Official SDK client for Groq (STT/TTS)
+        self._client = AsyncGroq(api_key=self._groq_api_key)
+        
+        # LLM Client (OpenAI or Groq)
+        if self.provider == "openai":
+            if not OPENAI_API_KEY:
+                logger.warning("OPENAI_API_KEY is not set — OpenAI API calls will fail.")
+            self._llm_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        else:
+            self._llm_client = self._client
 
         # Separate httpx client for TTS (raw REST) with keep-alive + pool tuning
         self._http = httpx.AsyncClient(
             base_url="https://api.groq.com/openai/v1",
             headers={
-                "Authorization": f"Bearer {self._api_key}",
+                "Authorization": f"Bearer {self._groq_api_key}",
             },
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(
@@ -160,7 +173,7 @@ class GroqClient:
         if stream:
             return await self._chat_completion_stream(messages, model, temperature, max_tokens)
 
-        response = await self._client.chat.completions.create(
+        response = await self._llm_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -184,7 +197,7 @@ class GroqClient:
     ) -> str:
         """Stream chat completion and collect the full response."""
         chunks = []
-        stream = await self._client.chat.completions.create(
+        stream = await self._llm_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -220,7 +233,7 @@ class GroqClient:
         model = model or self.LLM_MODEL
         logger.info(f"LLM stream-tokens: {model}, {len(messages)} messages")
 
-        stream = await self._client.chat.completions.create(
+        stream = await self._llm_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -247,7 +260,7 @@ class GroqClient:
         model = model or self.LLM_MODEL
         logger.info(f"LLM stream-with-tools: {model}, {len(messages)} messages")
 
-        stream = await self._client.chat.completions.create(
+        stream = await self._llm_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -282,7 +295,7 @@ class GroqClient:
             if "Failed to call a function" in str(e):
                 logger.warning("Groq API strict validation failed. Retrying without tools to allow text reply...")
                 # Retry without tools
-                fallback_stream = await self._client.chat.completions.create(
+                fallback_stream = await self._llm_client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
