@@ -501,21 +501,30 @@ async function handleWebSocketMessage(event) {
         break;
 
       case 'tts_audio':
-        // Decode raw 24kHz 16-bit PCM chunk directly using the dedicated playback context
         try {
           if (!playbackContext) break;
-          let pcm16Buffer = base64ToArrayBuffer(data.data);
-          if (pcm16Buffer.byteLength % 2 !== 0) {
-            pcm16Buffer = pcm16Buffer.slice(0, pcm16Buffer.byteLength - 1);
+          const arrayBuffer = base64ToArrayBuffer(data.data);
+          
+          if (data.format === 'wav' || data.format === 'mp3') {
+             // Let the browser decode full WAV/MP3 files natively
+             const audioBuffer = await playbackContext.decodeAudioData(arrayBuffer);
+             playAudioChunk(audioBuffer);
+          } else {
+             // Raw PCM parsing (Gemini or Cartesia sub-second chunks without headers)
+             let pcm16Buffer = arrayBuffer;
+             if (pcm16Buffer.byteLength % 2 !== 0) {
+               pcm16Buffer = pcm16Buffer.slice(0, pcm16Buffer.byteLength - 1);
+             }
+             if (pcm16Buffer.byteLength === 0) break;
+             const pcm16 = new Int16Array(pcm16Buffer);
+             const sampleRate = data.sampleRate || 24000;
+             const audioBuffer = playbackContext.createBuffer(1, pcm16.length, sampleRate);
+             const channelData = audioBuffer.getChannelData(0);
+             for (let i = 0; i < pcm16.length; i++) {
+               channelData[i] = pcm16[i] / 32768.0; // Convert Int16 to Float32
+             }
+             playAudioChunk(audioBuffer);
           }
-          if (pcm16Buffer.byteLength === 0) break;
-          const pcm16 = new Int16Array(pcm16Buffer);
-          const audioBuffer = playbackContext.createBuffer(1, pcm16.length, 24000);
-          const channelData = audioBuffer.getChannelData(0);
-          for (let i = 0; i < pcm16.length; i++) {
-            channelData[i] = pcm16[i] / 32768.0; // Convert Int16 to Float32
-          }
-          playAudioChunk(audioBuffer);
         } catch (e) {
           console.error('Failed to play TTS chunk', e);
         }
@@ -607,7 +616,7 @@ function playAudioChunk(audioBuffer) {
   const currentTime = playbackContext.currentTime;
   // Only reset if playbackTime is completely behind currentTime
   if (playbackTime < currentTime) {
-    playbackTime = currentTime;
+    playbackTime = currentTime + 0.05; // 50ms jitter buffer for network lag
   }
 
   source.start(playbackTime);

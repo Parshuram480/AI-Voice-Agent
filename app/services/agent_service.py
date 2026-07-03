@@ -26,26 +26,29 @@ logger = logging.getLogger(__name__)
 
 SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
 
-AGENT_SYSTEM_PROMPT = """You are a helpful customer support voice agent for an order management system.
-Help callers check order status, delivery dates, and item summaries.
-Keep responses to 1-2 short sentences (spoken aloud over phone).
-Be warm, professional, direct. No markdown, emojis, or formatting.
+AGENT_SYSTEM_PROMPT = """You are a strict, professional customer support voice agent for an order management system.
+You can ONLY answer order-related queries. You must REFUSE to answer any general knowledge questions, chit-chat, or off-topic queries.
+Keep responses to 1-2 short sentences (spoken aloud over phone). No markdown, emojis, or formatting.
 
 CRITICAL RULES:
-- NEVER include raw JSON, xml tags, or function syntax in spoken text. Use tool_calls mechanism.
-- If user greets, greet back and ask how to help. Do NOT ask for name immediately.
-- To check orders, you need full name AND date of birth (DOB). Ask for name first, then DOB.
-- NEVER call `verify_user` without BOTH name and DOB.
-- If the user provides an incomplete date (e.g. "May 15th"), explicitly ask for the year.
-- Do NOT ask the user to say their DOB "in words". Accept numbers like "05/15/1990".
-- IMMEDIATELY call `verify_user` once you have both name and DOB. Do NOT ask the user to confirm their information.
-- If the user corrects their name (e.g. spelling), acknowledge the correction before proceeding.
-- If verification fails, politely ask them to try again.
-- Successful `verify_user` calls will automatically return the user's orders.
-- NEVER invent or hallucinate order data. Use tool results.
-- If the user asks for information you do not have (e.g., price, amount paid, payment method), explicitly state that you do not have access to that information. NEVER say "let me check that for you" or pretend to look it up.
-- Answer the user's specific query directly and accurately based on the conversation context and tool results.
-- Keep tone natural. Don't repeat full order summaries for follow-ups, answer specifically.
+1. OFF-TOPIC REJECTION: If the user asks general knowledge (e.g., "Who is the president?", "What is 2+2?"), politely refuse and state you can only help with orders.
+2. THIRD-PARTY REJECTION: You can only help the caller with their own account. If they ask to check a friend's status, refuse immediately.
+3. ALREADY VERIFIED USERS: If the system prompt indicates the user is "Verified Customer", DO NOT ask for their name or DOB again. Call `get_order_status` immediately.
+4. NEVER call `get_order_status` unless the user is already verified.
+5. NEVER include raw JSON, xml tags, or function syntax in spoken text. Use tool_calls mechanism.
+6. NEVER invent or hallucinate order data. Use tool results.
+
+VERIFICATION FLOW (For Unverified Users):
+Step 1: Ask for their full name.
+Step 2: Ask for their date of birth (DOB). (If they give an incomplete date, ask for the year).
+Step 3: CONFIRMATION. Once you have both name and DOB, you MUST ask: "So your name is [Name] and your date of birth is [DOB], is that correct?" 
+Step 4: Wait for the user to say Yes or No. 
+ - If Yes: Call `verify_user` tool immediately.
+ - If No: Ask them which part is incorrect (Name or DOB). 
+    - If Name is wrong, ask ONLY for the corrected Name. Do NOT ask for DOB again.
+    - If DOB is wrong, ask ONLY for the corrected DOB. Do NOT ask for Name again.
+    - After collecting the correction, repeat Step 3 (Confirmation).
+- NEVER call `verify_user` without explicit "Yes" confirmation from the user.
 """
 
 _TOOL_LEAK_PATTERNS = [
@@ -61,7 +64,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "verify_user",
-            "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call if DOB is missing.",
+            "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call this tool until the user has explicitly answered 'Yes' to confirm their Name and DOB.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -75,7 +78,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "Fetches latest orders for verified user.",
+            "description": "Fetches latest orders for verified user. CRITICAL: NEVER call this tool if the user is not verified yet.",
             "parameters": {
                 "type": "object", 
                 "properties": {
@@ -154,8 +157,8 @@ class AgentService:
             messages_to_send.append({
                 "role": "system",
                 "content": (
-                    f"Verified Customer: {state['customer'].get('full_name', 'Unknown')}\n"
-                    f"Call the `get_order_status` tool to answer order questions."
+                    f"CRITICAL STATE: You are ALREADY VERIFIED as {state['customer'].get('full_name', 'Unknown')}.\n"
+                    f"DO NOT ask for name or DOB. Use the `get_order_status` tool to answer their queries immediately."
                 )
             })
 
@@ -185,6 +188,13 @@ class AgentService:
         start_time = time.perf_counter()
         first_token_time = None
         
+        # --- Industry Standard Stream Interceptor ---
+        # We buffer the first few characters to detect if the LLM is leaking a tool call
+        # as raw text. If it is, we mute the stream to TTS to prevent hallucinated code from being spoken.
+        stream_open = False
+        mute_stream = False
+        held_text = ""
+        
         async for chunk_type, chunk_data in self._groq.chat_completion_stream_with_tools(**llm_kwargs):
             if not first_token_time:
                 first_token_time = time.perf_counter()
@@ -192,11 +202,40 @@ class AgentService:
             
             if chunk_type == "content":
                 reply_content += chunk_data
-                if on_llm_token:
-                    try:
-                        on_llm_token(chunk_data)
-                    except Exception as e:
-                        logger.debug(f"on_llm_token failed: {e}")
+                
+                if mute_stream:
+                    continue
+                    
+                if not stream_open:
+                    held_text += chunk_data
+                    # Check for leaked tool call signatures in the first few characters
+                    text_lower = held_text.lower().strip()
+                    
+                    # If it definitely starts like a tool call, mute the stream permanently
+                    if text_lower.startswith("function=") or text_lower.startswith("<function") or text_lower.startswith("<tool") or text_lower.startswith('{"name":') or text_lower.startswith('{"function"'):
+                        mute_stream = True
+                        continue
+                        
+                    # If it starts with an ambiguous character ('f', '<', '{'), buffer up to 15 chars to be sure
+                    if text_lower.startswith("f") or text_lower.startswith("<") or text_lower.startswith("{"):
+                        if len(text_lower) < 15:
+                            continue  # Keep buffering
+                            
+                    # If we reach here, it's either not starting with a suspicious prefix, 
+                    # or it broke the pattern (e.g. "for your order..."). Flush the buffer and open the stream.
+                    stream_open = True
+                    if on_llm_token and held_text:
+                        try:
+                            on_llm_token(held_text)
+                        except Exception as e:
+                            logger.debug(f"on_llm_token failed: {e}")
+                    held_text = ""
+                else:
+                    if on_llm_token:
+                        try:
+                            on_llm_token(chunk_data)
+                        except Exception as e:
+                            logger.debug(f"on_llm_token failed: {e}")
             elif chunk_type == "tool_calls":
                 tool_calls = chunk_data
 

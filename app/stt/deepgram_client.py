@@ -78,7 +78,7 @@ class DeepgramStreamingClient:
             except Exception as e:
                 logger.error(f"Failed to send audio to Deepgram: {e}")
 
-    async def get_transcript(self) -> str:
+    async def get_transcript(self, timeout: float = 2.0) -> str:
         if not self.ws or not self.running:
             return ""
             
@@ -89,15 +89,20 @@ class DeepgramStreamingClient:
         except Exception:
             pass
             
-        # Wait up to 200ms for Deepgram to process and flush the buffer
+        # Wait up to timeout for Deepgram to process and flush the buffer
         try:
-            await asyncio.wait_for(self.finalize_event.wait(), timeout=0.2)
+            await asyncio.wait_for(self.finalize_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            pass
+            logger.warning(f"Deepgram finalize timed out after {timeout}s")
             
         t = self.transcript_buffer.strip()
         self.transcript_buffer = ""
         return t
+
+    def clear_buffer(self):
+        """Clear any stray transcript buffer from previous timed-out utterances."""
+        self.transcript_buffer = ""
+        self.finalize_event.clear()
 
     async def close(self):
         self.running = False

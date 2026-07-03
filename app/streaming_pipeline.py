@@ -143,7 +143,14 @@ class StreamingVoicePipeline:
         on_turn_done: Optional[Callable] = None,
         session_id: Optional[str] = None,
         barge_in_event: Optional[asyncio.Event] = None,
+        **kwargs,
     ) -> dict:
+        cartesia_ws = None
+        if self.tts_provider == "cartesia" and self.cartesia:
+            cartesia_ws = await self.cartesia.client.tts.websocket()
+            await cartesia_ws.connect()
+            kwargs["cartesia_ws"] = cartesia_ws
+
         if self.deepgram:
             await self.deepgram.connect()
         try:
@@ -157,10 +164,13 @@ class StreamingVoicePipeline:
                 on_turn_done=on_turn_done,
                 session_id=session_id,
                 barge_in_event=barge_in_event,
+                **kwargs,
             )
         finally:
             if self.deepgram:
                 await self.deepgram.close()
+            if cartesia_ws:
+                await cartesia_ws.close()
 
     async def _process_continuous_internal(
         self,
@@ -174,6 +184,7 @@ class StreamingVoicePipeline:
         on_turn_done: Optional[Callable] = None,
         session_id: Optional[str] = None,
         barge_in_event: Optional[asyncio.Event] = None,
+        **kwargs,
     ) -> dict:
         """
         Run a continuous conversation loop with VAD-based turn detection.
@@ -231,7 +242,7 @@ class StreamingVoicePipeline:
             if not utterance_data:
                 break
                 
-            utterance_audio, vad_done_reason, vad_speech_ms = utterance_data
+            utterance_audio, vad_done_reason, vad_speech_ms, vad_silence_ms = utterance_data
             dg_task = None
 
             if vad_done_reason == "stream_ended":
@@ -295,12 +306,14 @@ class StreamingVoicePipeline:
                     utterance_id=utterance_id,
                     turn_index=turn_index,
                     speech_ms=vad_speech_ms,
+                    vad_silence_ms=vad_silence_ms,
                     dg_task=dg_task,
                     on_stt_text=on_stt_text,
                     on_llm_token=on_llm_token,
                     on_tts_audio=on_tts_audio,
                     on_stage=on_stage,
                     on_phase_change=_set_phase,
+                    cartesia_ws=kwargs.get("cartesia_ws"),
                 )
             )
 
@@ -418,7 +431,7 @@ class StreamingVoicePipeline:
         on_phase_change: Optional[Callable] = None,
         on_stage: Optional[Callable] = None,
         interruption_event: Optional[asyncio.Event] = None,
-    ) -> tuple[Optional[bytes], str, float]:
+    ) -> tuple[Optional[bytes], str, float, float]:
         """
         Listen to the audio_queue and collect frames for one utterance.
 
@@ -428,9 +441,10 @@ class StreamingVoicePipeline:
         3. When silence exceeds VAD_SILENCE_MS, finalize the utterance
 
         Returns:
-            (utterance_pcm_bytes, reason, speech_ms)
+            (utterance_pcm_bytes, reason, speech_ms, silence_ms)
             reason is one of: "silence", "max_duration", "stream_ended"
             speech_ms is the total milliseconds of detected speech energy
+            silence_ms is the actual silence duration that triggered endpointing
         """
         audio_buffer = bytearray()
         speech_started = False
@@ -474,14 +488,14 @@ class StreamingVoicePipeline:
                 if speech_started and len(audio_buffer) > 0:
                     silence_ms += 500
                     if silence_ms >= vad_silence_ms:
-                        return bytes(audio_buffer), "silence", speech_ms
+                        return bytes(audio_buffer), "silence", speech_ms, silence_ms
                 continue
 
             if item is _DONE:
                 # Stream ended
                 if speech_started and audio_buffer:
-                    return bytes(audio_buffer), "stream_ended", speech_ms
-                return None, "stream_ended", 0.0
+                    return bytes(audio_buffer), "stream_ended", speech_ms, silence_ms
+                return None, "stream_ended", 0.0, 0.0
 
             chunk = bytes(item)
             frame_gen.add_data(chunk)
@@ -502,6 +516,7 @@ class StreamingVoicePipeline:
                         audio_buffer.extend(frame)
                         
                         if self.deepgram:
+                            self.deepgram.clear_buffer()
                             await self.deepgram.send_audio(bytes(audio_buffer))
                         
                         if interruption_event:
@@ -569,7 +584,7 @@ class StreamingVoicePipeline:
                                 audio_buffer.extend(frame_gen.buffer)
                                 if self.deepgram: await self.deepgram.send_audio(bytes(frame_gen.buffer))
                                 
-                            return bytes(audio_buffer), "silence", speech_ms
+                            return bytes(audio_buffer), "silence", speech_ms, silence_ms
                         else:
                             # False alarm (short click/pop), reset VAD state
                             if self.deepgram:
@@ -604,7 +619,7 @@ class StreamingVoicePipeline:
                             audio_buffer.extend(frame_gen.buffer)
                             if self.deepgram: await self.deepgram.send_audio(bytes(frame_gen.buffer))
                             
-                        return bytes(audio_buffer), "max_duration", speech_ms
+                        return bytes(audio_buffer), "max_duration", speech_ms, silence_ms
 
     # =====================================================================
     #  Process a single utterance through STT → LLM → TTS
@@ -617,12 +632,14 @@ class StreamingVoicePipeline:
         utterance_id: str,
         turn_index: int,
         speech_ms: float = 0.0,
+        vad_silence_ms: float = 0.0,
         dg_task: Optional[asyncio.Task] = None,
         on_stt_text: Optional[Callable] = None,
         on_llm_token: Optional[Callable] = None,
         on_tts_audio: Optional[Callable] = None,
         on_stage: Optional[Callable] = None,
         on_phase_change: Optional[Callable] = None,
+        cartesia_ws: Optional[Any] = None,
     ) -> dict:
         """
         Process a single finalized utterance through the full pipeline.
@@ -831,7 +848,7 @@ class StreamingVoicePipeline:
                     sentence = await tts_queue.get()
                     if sentence is None:
                         break
-                    await self._tts_sentence(sentence, result, timings, t0, _stage, on_tts_audio)
+                    await self._tts_sentence(sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws)
                     tts_queue.task_done()
 
             tts_consumer_task = None
@@ -928,14 +945,14 @@ class StreamingVoicePipeline:
                                 if sentence:
                                     # TTS each sentence as it completes
                                     await self._tts_sentence(
-                                        sentence, result, timings, t0, _stage, on_tts_audio
+                                        sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
                                     )
                             token_buffer = [sentences[-1]]
 
                     remaining = "".join(token_buffer).strip()
                     if remaining:
                         await self._tts_sentence(
-                            remaining, result, timings, t0, _stage, on_tts_audio
+                            remaining, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
                         )
 
                     full_reply = "".join(full_reply_parts).strip()
@@ -949,7 +966,7 @@ class StreamingVoicePipeline:
                     for sentence in _split_sentences(reply_text):
                         if sentence.strip():
                             await self._tts_sentence(
-                                sentence.strip(), result, timings, t0, _stage, on_tts_audio
+                                sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
                             )
             elif not stream_direct:
                 _stage("llm", "done", "Deterministic response")
@@ -957,7 +974,7 @@ class StreamingVoicePipeline:
                 for sentence in _split_sentences(reply_text):
                     if sentence.strip():
                         await self._tts_sentence(
-                            sentence.strip(), result, timings, t0, _stage, on_tts_audio
+                            sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
                         )
             else:
                 _stage("llm", "done", "Streamed direct response")
@@ -981,20 +998,44 @@ class StreamingVoicePipeline:
                         logger.debug(f"Background output save failed: {e}")
                 asyncio.create_task(_save_output_bg(filepath, combined_audio))
 
+            # ── Correct TTFA (Time To First Audio) calculation ──
+            # 
+            # The user's perceived latency is:
+            #   TTFA = VAD silence wait + time from processing start to first audio byte
+            #
+            # t0 is set at the START of _process_single_utterance (after VAD finishes).
+            # tts_first_audio is measured relative to t0, so it already includes:
+            #   STT flush + LLM-to-first-sentence + TTS-to-first-chunk
+            # These overlap partially (Deepgram streams while speaking, TTS starts
+            # before LLM finishes), so summing individual durations would OVERCOUNT.
+            #
+            # For the BREAKDOWN, we show non-overlapping segments:
+            #   STT: stt_duration (time to get transcript after VAD)
+            #   LLM: time from stt_end to tts_start (LLM processing until first sentence)  
+            #   TTS: tts_first_audio - tts_start (Cartesia processing for first sentence)
+            
+            # Use actual VAD silence from the endpointing detector, not the env config
+            vad_wait = vad_silence_ms  # actual measured silence, not the configured threshold
+            
             stt_ms = timings.get("stt_duration", 0.0) * 1000
-            llm_ms = timings.get("conversation_duration", 0.0) * 1000
+            
+            # LLM latency = time from STT completion to when TTS starts on the first sentence
+            # This captures the actual LLM processing time (including tool calls, multi-LLM)
+            stt_end = timings.get("stt_end", 0.0)
             tts_start = timings.get("tts_start", 0.0)
+            if tts_start and stt_end:
+                llm_ms = (tts_start - stt_end) * 1000
+            else:
+                llm_ms = timings.get("conversation_duration", 0.0) * 1000
+            
+            # TTS latency = time from TTS start to first audio chunk
             tts_first = timings.get("tts_first_audio", timings.get("tts_end", timings.get("total", 0.0)))
             tts_ms = (tts_first - tts_start) * 1000 if tts_start else 0.0
             
-            vad_wait_str = os.getenv("VAD_SILENCE_MS", "800")
-            try:
-                vad_wait = float(vad_wait_str)
-            except ValueError:
-                vad_wait = 800.0
-                
-            # Ensure the Total is exactly equal to the sum of all components as requested (Time to First Audio)
-            total_ms = vad_wait + stt_ms + llm_ms + tts_ms
+            # Total TTFA = VAD silence + tts_first_audio (which includes STT + LLM + TTS from t0)
+            # This is the TRUE wall-clock latency the user perceives
+            tts_first_from_t0 = timings.get("tts_first_audio", timings.get("total", 0.0))
+            total_ms = vad_wait + (tts_first_from_t0 * 1000)
             
             # Inject exact TTFA calculations into timings for the frontend UI
             timings["vad_wait_ms"] = vad_wait
@@ -1013,7 +1054,7 @@ class StreamingVoicePipeline:
                 timings=timings,
             )
             
-            latency_str = f"Total: {total_ms:.0f}ms [VAD Wait: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st Word): {tts_ms:.0f}ms]"
+            latency_str = f"Total: {total_ms:.0f}ms [VAD: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st): {tts_ms:.0f}ms]"
             log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
 
             return result
@@ -1034,6 +1075,7 @@ class StreamingVoicePipeline:
         t0: float,
         stage_cb: Callable,
         on_audio: Optional[Callable],
+        cartesia_ws: Optional[Any] = None,
     ):
         """Synthesize a single sentence and deliver via callback."""
         if not sentence or not sentence.strip():
@@ -1065,7 +1107,28 @@ class StreamingVoicePipeline:
             try:
                 first = True
                 
-                if self.tts_provider == "cartesia" and self.cartesia:
+                if self.tts_provider == "cartesia" and cartesia_ws:
+                    voice = os.getenv("CARTESIA_VOICE_ID", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc")
+                    ws_stream = await cartesia_ws.send(
+                        model_id="sonic-3",
+                        transcript=sentence,
+                        voice={"mode": "id", "id": voice},
+                        output_format={
+                            "container": "raw", 
+                            "encoding": "pcm_s16le", 
+                            "sample_rate": 24000
+                        },
+                        stream=True,
+                    )
+                    # We wrap the output generator so it yields bytes like the others
+                    async def ws_gen():
+                        async for output in ws_stream:
+                            if hasattr(output, "audio") and output.audio:
+                                yield output.audio
+                            elif isinstance(output, dict) and "audio" in output:
+                                yield output["audio"]
+                    stream_gen = ws_gen()
+                elif self.tts_provider == "cartesia" and self.cartesia:
                     stream_gen = self.cartesia.text_to_speech_streaming(sentence)
                 else:
                     stream_gen = self.groq.text_to_speech_streaming(sentence)
@@ -1081,8 +1144,7 @@ class StreamingVoicePipeline:
                     # Stream Cartesia PCM chunks progressively to frontend for sub-second latency
                     if on_audio and self.tts_provider == "cartesia":
                         try:
-                            from app.audio_utils import build_wav
-                            on_audio(build_wav(chunk, sample_rate=16000))
+                            on_audio(chunk)
                         except Exception:
                             pass
                 
@@ -1090,7 +1152,7 @@ class StreamingVoicePipeline:
                 
                 if self.tts_provider == "cartesia" and self.cartesia:
                     from app.audio_utils import build_wav
-                    audio_chunk = build_wav(audio_chunk, sample_rate=16000)
+                    audio_chunk = build_wav(audio_chunk, sample_rate=24000)
                     
                 self.tts_cache.put(sentence, audio_chunk)
                 
@@ -1114,8 +1176,7 @@ class StreamingVoicePipeline:
         stage_cb("tts", "done", f"Cache stats: {self.tts_cache.stats}")
 
     # =====================================================================
-    #  LEGACY: Single-utterance streaming pipeline (unchanged API)
-    # =====================================================================
+    #  LEGACY: Single-utterance streaming pipeline (unchanged API
     async def process_stream(
         self,
         audio_queue: asyncio.Queue,
@@ -1128,95 +1189,40 @@ class StreamingVoicePipeline:
         session_id: Optional[str] = None,
     ) -> dict:
         """
-        Run the full streaming pipeline (single utterance — legacy mode).
-
-        Kept for backward compatibility with Twilio and /api/mic endpoints.
+        Entry point for Twilio phone calls (and legacy process_stream callers).
+        Bridges single-utterance stream requests into the continuous conversational loop.
         """
-        timings: dict[str, float] = {}
-        t0 = time.perf_counter()
-
-        stt_to_llm: asyncio.Queue = asyncio.Queue()
-        llm_to_tts: asyncio.Queue = asyncio.Queue()
-        tts_output: asyncio.Queue = asyncio.Queue()
-
         resolved_session_id = session_id or call_sid or str(uuid.uuid4())[:8]
-
-        result: dict[str, Any] = {
-            "session_id": resolved_session_id,
-            "transcript": "",
-            "intent": "unknown",
-            "customer": None,
-            "orders": [],
-            "reply_text": "",
-            "audio_bytes": b"",
-            "audio_url": "",
-            "audio_path": "",
-            "state": "",
-            "verified": False,
-            "stages": [],
-            "timings": timings,
-        }
-
-        def _stage(name: str, status: str, detail: str = ""):
-            result["stages"].append({
-                "stage": name, "status": status,
-                "detail": detail, "ts": datetime.now(UTC).isoformat(),
-            })
-            if on_stage:
-                try:
-                    on_stage(name, status, detail)
-                except Exception:
-                    pass
-
-        stt_task = asyncio.create_task(
-            self._stt_worker(audio_queue, stt_to_llm, result, timings, _stage, on_stt_text)
-        )
-        llm_task = asyncio.create_task(
-            self._llm_worker(
-                stt_to_llm, llm_to_tts, result, timings, _stage, on_llm_token,
-                resolved_session_id,
-            )
-        )
-        tts_task = asyncio.create_task(
-            self._tts_worker(llm_to_tts, tts_output, result, timings, _stage, on_tts_audio)
-        )
-
-        await asyncio.gather(stt_task, llm_task, tts_task)
-
-        audio_parts = []
-        while not tts_output.empty():
-            item = tts_output.get_nowait()
-            if item is not _DONE and isinstance(item, bytes):
-                audio_parts.append(item)
-
-        if audio_parts:
-            combined_audio = b"".join(audio_parts)
-            result["audio_bytes"] = combined_audio
-
-            file_id = call_sid or str(uuid.uuid4())[:8]
-            filename = f"output_{file_id}_{int(datetime.now(UTC).timestamp())}.wav"
-            filepath = AUDIO_CACHE_DIR / filename
-            filepath.write_bytes(combined_audio)
-
-            audio_url = f"{SERVER_HOST}/audio/{filename}"
-            result["audio_url"] = audio_url
-            result["audio_path"] = str(filepath)
-            logger.info(f"Combined audio saved: {filepath} ({len(combined_audio)} bytes)")
-
-            if call_sid and update_call_with_audio:
-                await self.twilio.update_call_with_audio(call_sid, audio_url)
-
-        timings["total"] = round(time.perf_counter() - t0, 4)
-        log_event(
-            "streaming_pipeline_complete",
+        _buffer = bytearray()
+        
+        def wrapped_tts(audio_chunk: bytes):
+            if not on_tts_audio:
+                return
+                
+            if self.tts_provider == "cartesia":
+                # Cartesia sends raw 24kHz PCM chunks without WAV headers.
+                # Twilio's main.py loop expects valid WAV headers.
+                _buffer.extend(audio_chunk)
+                
+                # Buffer size of 2400 bytes = 50ms of audio (16-bit mono 24kHz)
+                while len(_buffer) >= 2400:
+                    chunk = bytes(_buffer[:2400])
+                    del _buffer[:2400]
+                    wav_bytes = build_wav(chunk, sample_rate=24000)
+                    on_tts_audio(wav_bytes)
+            else:
+                # Groq TTS provides complete WAV files directly.
+                on_tts_audio(audio_chunk)
+                
+        return await self.process_continuous(
+            audio_queue=audio_queue,
+            on_stt_text=on_stt_text,
+            on_llm_token=on_llm_token,
+            on_tts_audio=wrapped_tts if on_tts_audio else None,
+            on_stage=on_stage,
             session_id=resolved_session_id,
-            intent=result.get("intent"),
-            state=result.get("state"),
-            verified=result.get("verified"),
-            timings=timings,
+            langsmith_extra={"metadata": {"session_id": resolved_session_id, "thread_id": resolved_session_id}},
         )
-        logger.info(f"Pipeline complete — timings: {timings}")
-        return result
 
     # =====================================================================
     #  Compatibility wrapper — process a complete audio buffer
@@ -1265,295 +1271,48 @@ class StreamingVoicePipeline:
         )
 
     # =====================================================================
-    #  Worker 1: STT — consume audio chunks, produce transcript (LEGACY)
+    #  Compatibility wrapper — process a complete audio buffer
     # =====================================================================
-    async def _stt_worker(
+    async def process_audio_streaming(
         self,
-        audio_queue: asyncio.Queue,
-        output_queue: asyncio.Queue,
-        result: dict,
-        timings: dict,
-        stage_cb: Callable,
-        on_text: Optional[Callable],
-    ):
+        audio_bytes: bytes,
+        call_sid: Optional[str] = None,
+        is_mulaw: bool = True,
+        on_stt_text: Optional[Callable] = None,
+        on_llm_token: Optional[Callable] = None,
+        on_tts_audio: Optional[Callable] = None,
+        on_stage: Optional[Callable] = None,
+        update_call_with_audio: bool = True,
+        session_id: Optional[str] = None,
+    ) -> dict:
         """
-        Consume PCM audio chunks from *audio_queue*.
-        Fires "early STT" on the first ~1.5s of speech for a head-start,
-        then a final STT on the complete utterance.
-        Pushes the final transcript text to *output_queue*.
+        Process a complete audio buffer through the streaming pipeline.
+
+        Compatibility wrapper for callers that already have the full audio
+        (e.g., legacy /api/call endpoint).
         """
-        stage_cb("stt", "running", "Waiting for audio…")
-        audio_buffer = bytearray()
-        early_stt_fired = False
-        early_transcript = ""
-        has_speech = False
-        silence_counter = 0
-        t_start = time.perf_counter()
+        audio_queue: asyncio.Queue = asyncio.Queue()
 
-        early_bytes = int(16000 * 2 * STT_EARLY_CHUNK_SECONDS)
-        silence_chunks_for_eos = int(SILENCE_DURATION_MS / 20)
+        if is_mulaw:
+            pcm_data = mulaw_to_pcm(audio_bytes)
+            pcm_data = resample_to_16khz(pcm_data)
+        else:
+            pcm_data = audio_bytes
 
-        try:
-            while True:
-                item = await audio_queue.get()
-                if item is _DONE:
-                    break
+        # Feed the whole audio into the queue
+        await audio_queue.put(pcm_data)
+        await audio_queue.put(_DONE)
 
-                chunk = bytes(item)
-                audio_buffer.extend(chunk)
-
-                if detect_silence(chunk, SILENCE_THRESHOLD):
-                    silence_counter += 1
-                else:
-                    silence_counter = 0
-                    has_speech = True
-
-                if has_speech and not early_stt_fired and len(audio_buffer) >= early_bytes:
-                    early_stt_fired = True
-                    timings["stt_early_start"] = round(time.perf_counter() - t_start, 4)
-
-                    early_pcm = bytes(audio_buffer[:early_bytes])
-                    early_pcm = trim_trailing_silence(early_pcm)
-                    wav_bytes = build_wav(early_pcm, sample_rate=16000)
-
-                    try:
-                        early_transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
-                        timings["stt_early_end"] = round(time.perf_counter() - t_start, 4)
-                        logger.info(f"Early STT: '{early_transcript}'")
-
-                        if early_transcript and on_text:
-                            try:
-                                on_text(early_transcript)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.warning(f"Early STT failed: {e}")
-
-                if has_speech and silence_counter >= silence_chunks_for_eos:
-                    logger.info("VAD: end-of-speech detected during streaming")
-                    break
-
-            # Save input audio
-            if audio_buffer:
-                input_filename = f"input_{str(uuid.uuid4())[:8]}_{int(datetime.now(UTC).timestamp())}.wav"
-                input_filepath = AUDIO_CACHE_DIR / input_filename
-                wav_bytes_full = build_wav(bytes(audio_buffer), sample_rate=16000)
-                input_filepath.write_bytes(wav_bytes_full)
-                input_audio_url = f"{SERVER_HOST}/audio/{input_filename}"
-                result["input_audio_url"] = input_audio_url
-
-            # Final STT on the complete audio
-            if has_speech and len(audio_buffer) > 3200:
-                timings["stt_final_start"] = round(time.perf_counter() - t_start, 4)
-                stage_cb("stt", "running", "Final transcription…")
-
-                final_pcm = trim_trailing_silence(bytes(audio_buffer))
-                wav_bytes = build_wav(final_pcm, sample_rate=16000)
-
-                try:
-                    final_transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
-                    timings["stt_final_end"] = round(time.perf_counter() - t_start, 4)
-
-                    transcript = final_transcript if len(final_transcript) >= len(early_transcript) else early_transcript
-                    result["transcript"] = transcript
-                    stage_cb("stt", "done", transcript)
-                    logger.info(f"Final STT: '{transcript}'")
-
-                    if on_text:
-                        try:
-                            on_text(transcript)
-                        except Exception:
-                            pass
-
-                    await output_queue.put(transcript)
-
-                except Exception as e:
-                    logger.error(f"Final STT failed: {e}")
-                    if early_transcript:
-                        result["transcript"] = early_transcript
-                        await output_queue.put(early_transcript)
-                    stage_cb("stt", "failed", str(e))
-            elif early_transcript:
-                result["transcript"] = early_transcript
-                await output_queue.put(early_transcript)
-                stage_cb("stt", "done", early_transcript)
-            else:
-                stage_cb("stt", "done", "No speech detected")
-
-        except Exception as e:
-            logger.exception(f"STT worker error: {e}")
-            stage_cb("stt", "failed", str(e))
-        finally:
-            await output_queue.put(_DONE)
-
-    # =====================================================================
-    #  Worker 2: LLM — consume transcript, produce sentence chunks (LEGACY)
-    # =====================================================================
-    async def _llm_worker(
-        self,
-        input_queue: asyncio.Queue,
-        output_queue: asyncio.Queue,
-        result: dict,
-        timings: dict,
-        stage_cb: Callable,
-        on_token: Optional[Callable],
-        session_id: str,
-    ):
-        """
-        Consume transcript text from *input_queue*.
-        Run intent detection + DB lookup, then stream LLM tokens.
-        Buffer tokens into sentences and push each sentence to *output_queue*.
-        """
-        t_start = time.perf_counter()
-
-        try:
-            transcript = await input_queue.get()
-            if transcript is _DONE or not transcript:
-                stage_cb("llm", "done", "No transcript to process")
-                return
-
-            stage_cb("conversation", "running", "Routing intent and slots")
-            conversation = await self.agent.handle_user_text(session_id, transcript)
-            result["intent"] = conversation.intent
-            result["reply_text"] = conversation.reply_text
-            result["state"] = conversation.state
-            result["verified"] = conversation.verified
-            result["customer"] = _serialize_customer(conversation.customer)
-            result["orders"] = conversation.orders
-            timings.update(conversation.timings)
-            stage_cb("conversation", "done", f"intent={conversation.intent}, state={conversation.state}")
-
-            reply_text = conversation.reply_text
-            if not reply_text:
-                reply_text = "I'm sorry, I couldn't process that. Please try again."
-                result["reply_text"] = reply_text
-
-            if self.rephraser and self.rephraser.enabled:
-                stage_cb("llm", "running", "Rephrasing response…")
-                timings["llm_start"] = round(time.perf_counter() - t_start, 4)
-                first_token_received = False
-                token_buffer = []
-                full_reply_parts = []
-
-                try:
-                    async for token in self.rephraser.stream_rephrase(reply_text):
-                        if not first_token_received:
-                            timings["llm_first_token"] = round(time.perf_counter() - t_start, 4)
-                            first_token_received = True
-
-                        token_buffer.append(token)
-                        full_reply_parts.append(token)
-
-                        if on_token:
-                            try:
-                                on_token(token)
-                            except Exception:
-                                pass
-
-                        current_text = "".join(token_buffer)
-                        sentences = _split_sentences(current_text)
-
-                        if len(sentences) > 1:
-                            for sentence in sentences[:-1]:
-                                sentence = sentence.strip()
-                                if sentence:
-                                    await output_queue.put(sentence)
-                            token_buffer = [sentences[-1]]
-
-                    remaining = "".join(token_buffer).strip()
-                    if remaining:
-                        await output_queue.put(remaining)
-
-                    full_reply = "".join(full_reply_parts).strip()
-                    result["reply_text"] = full_reply or reply_text
-                    timings["llm_end"] = round(time.perf_counter() - t_start, 4)
-                    stage_cb("llm", "done", result["reply_text"][:80])
-                except Exception as e:
-                    logger.error(f"LLM rephrase failed: {e}")
-                    await output_queue.put(reply_text)
-                    stage_cb("llm", "failed", "Rephrase failed")
-            else:
-                stage_cb("llm", "done", "Deterministic response")
-                sentences = _split_sentences(reply_text)
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if sentence:
-                        await output_queue.put(sentence)
-                result["reply_text"] = reply_text
-
-        except Exception as e:
-            logger.exception(f"LLM worker error: {e}")
-            stage_cb("llm", "failed", str(e))
-            fallback = "I'm sorry, I'm not able to help with that yet. Please ask about your orders or delivery status."
-            result["reply_text"] = fallback
-            await output_queue.put(fallback)
-        finally:
-            await output_queue.put(_DONE)
-
-    # =====================================================================
-    #  Worker 3: TTS — consume sentences, produce audio (LEGACY)
-    # =====================================================================
-    async def _tts_worker(
-        self,
-        input_queue: asyncio.Queue,
-        output_queue: asyncio.Queue,
-        result: dict,
-        timings: dict,
-        stage_cb: Callable,
-        on_audio: Optional[Callable],
-    ):
-        """
-        Consume sentence strings from *input_queue*.
-        Check cache first, then call TTS for each sentence.
-        Push audio bytes to *output_queue*.
-        """
-        t_start = time.perf_counter()
-        first_audio_sent = False
-
-        try:
-            while True:
-                sentence = await input_queue.get()
-                if sentence is _DONE:
-                    break
-
-                if not sentence or not sentence.strip():
-                    continue
-
-                stage_cb("tts", "running", f"Synthesizing: '{sentence[:50]}…'")
-
-                cached = self.tts_cache.get(sentence)
-                if cached:
-                    logger.info(f"TTS cache hit: '{sentence[:40]}…'")
-                    audio_chunk = cached
-                else:
-                    try:
-                        audio_chunk = await self.groq.text_to_speech(sentence)
-                        self.tts_cache.put(sentence, audio_chunk)
-                    except Exception as e:
-                        logger.error(f"TTS failed for sentence: {e}")
-                        continue
-
-                if not first_audio_sent:
-                    timings["tts_first_audio"] = round(time.perf_counter() - t_start, 4)
-                    first_audio_sent = True
-
-                await output_queue.put(audio_chunk)
-
-                if on_audio:
-                    try:
-                        on_audio(audio_chunk)
-                    except Exception:
-                        pass
-
-            timings["tts_end"] = round(time.perf_counter() - t_start, 4)
-            stage_cb("tts", "done", f"Cache stats: {self.tts_cache.stats}")
-
-        except Exception as e:
-            logger.exception(f"TTS worker error: {e}")
-            stage_cb("tts", "failed", str(e))
-        finally:
-            await output_queue.put(_DONE)
-
+        return await self.process_stream(
+            audio_queue=audio_queue,
+            call_sid=call_sid,
+            on_stt_text=on_stt_text,
+            on_llm_token=on_llm_token,
+            on_tts_audio=on_tts_audio,
+            on_stage=on_stage,
+            update_call_with_audio=update_call_with_audio,
+            session_id=session_id,
+        )
 # =============================================================================
 # Utility functions
 # =============================================================================

@@ -404,43 +404,70 @@ async def mic_stream(websocket: WebSocket):
     ws_open = True
     barge_in_event = asyncio.Event()
 
-    async def safe_send(msg: dict):
+    ws_send_queue: asyncio.Queue = asyncio.Queue()
+
+    async def ws_sender():
         nonlocal ws_open
-        if ws_open:
+        while ws_open:
+            msg = await ws_send_queue.get()
+            if msg is None:
+                break
             try:
-                await websocket.send_json(msg)
+                if ws_open:
+                    await websocket.send_json(msg)
             except Exception:
                 ws_open = False
+            finally:
+                ws_send_queue.task_done()
+
+    sender_task = asyncio.create_task(ws_sender())
+
+    def safe_send_sync(msg: dict):
+        if ws_open:
+            ws_send_queue.put_nowait(msg)
+
+    async def safe_send(msg: dict):
+        safe_send_sync(msg)
 
     # Callbacks for the streaming pipeline
     audio_chunk_index = 0
 
     def on_stt_text(text: str):
-        asyncio.create_task(safe_send({"type": "stt", "text": text}))
+        safe_send_sync({"type": "stt", "text": text})
 
     def on_llm_token(token: str):
-        asyncio.create_task(safe_send({"type": "llm_token", "token": token}))
+        safe_send_sync({"type": "llm_token", "token": token})
 
     def on_tts_audio(audio_bytes: bytes):
         nonlocal audio_chunk_index
         b64 = base64.b64encode(audio_bytes).decode("ascii")
-        asyncio.create_task(safe_send({
+        sample_rate = 24000
+        
+        audio_format = "pcm"
+        if audio_bytes.startswith(b"RIFF"):
+            audio_format = "wav"
+        elif audio_bytes.startswith(b"ID3") or audio_bytes.startswith(b"\xff\xfb"):
+            audio_format = "mp3"
+
+        safe_send_sync({
             "type": "tts_audio",
             "data": b64,
             "index": audio_chunk_index,
-        }))
+            "sampleRate": sample_rate,
+            "format": audio_format,
+        })
         audio_chunk_index += 1
 
     def on_stage(stage: str, status: str, detail: str = ""):
-        asyncio.create_task(safe_send({
+        safe_send_sync({
             "type": "stage",
             "stage": stage,
             "status": status,
             "detail": detail,
-        }))
+        })
 
     def on_phase_change(phase: str):
-        asyncio.create_task(safe_send({"type": "phase", "phase": phase}))
+        safe_send_sync({"type": "phase", "phase": phase})
 
     def on_turn_done(result: dict):
         nonlocal audio_chunk_index
@@ -451,14 +478,14 @@ async def mic_stream(websocket: WebSocket):
             k: v for k, v in result.items()
             if k != "audio_bytes"
         }
-        asyncio.create_task(safe_send({
+        safe_send_sync({
             "type": "timing",
             "timings": result.get("timings", {}),
-        }))
-        asyncio.create_task(safe_send({
+        })
+        safe_send_sync({
             "type": "turn_done",
             "result": send_result,
-        }))
+        })
 
     # Session ID management
     session_id = websocket.query_params.get("session_id")

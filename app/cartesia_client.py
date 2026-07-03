@@ -34,7 +34,7 @@ class CartesiaClient:
             output_format={
                 "container": "raw",
                 "encoding": "pcm_s16le",
-                "sample_rate": 16000,
+                "sample_rate": 24000,
             },
         )
         
@@ -44,7 +44,7 @@ class CartesiaClient:
                 
         audio_bytes = b"".join(audio_chunks)
         from app.audio_utils import build_wav
-        wav_bytes = build_wav(audio_bytes, sample_rate=16000)
+        wav_bytes = build_wav(audio_bytes, sample_rate=24000)
         logger.info(f"Cartesia TTS result: {len(wav_bytes)} bytes (WAV)")
         return wav_bytes
 
@@ -66,7 +66,7 @@ class CartesiaClient:
             output_format={
                 "container": "raw",
                 "encoding": "pcm_s16le",
-                "sample_rate": 16000,
+                "sample_rate": 24000,
             },
         )
         
