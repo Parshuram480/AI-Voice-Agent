@@ -22,11 +22,16 @@ def test_openai_key():
     }
     
     try:
-        # Hit the /v1/models endpoint which just lists models (good for verifying auth)
-        response = requests.get("https://api.openai.com/v1/models", headers=headers)
+        # Hit the /v1/chat/completions endpoint to ask a normal question
+        data = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "Hello, how are you today?"}]
+        }
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data)
         
         if response.status_code == 200:
             print("✅ Success! The OpenAI API key is valid and working.")
+            print("Response:", response.json()["choices"][0]["message"]["content"])
         else:
             print(f"❌ Failed! API returned status code {response.status_code}.")
             print(f"Error details: {response.text}")

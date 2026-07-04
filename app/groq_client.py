@@ -38,7 +38,7 @@ class GroqClient:
     STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
     
     if LLM_PROVIDER == "openai":
-        LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
     else:
         LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
         
