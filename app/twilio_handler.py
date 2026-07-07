@@ -166,3 +166,27 @@ class TwilioHandler:
         except Exception as e:
             logger.error(f"Failed to send audio to stream {stream_sid}: {e}")
             return False
+
+    async def clear_stream(self, websocket, stream_sid: str) -> bool:
+        """
+        Send a clear event to Twilio to immediately stop playing buffered audio.
+        This is used for barge-in interruptions.
+        """
+        import json
+        import asyncio
+        try:
+            if not hasattr(websocket, "_send_lock"):
+                websocket._send_lock = asyncio.Lock()
+            
+            message = {
+                "event": "clear",
+                "streamSid": stream_sid
+            }
+            logger.info(f"Sending clear command to Twilio (streamSid: {stream_sid})")
+            
+            async with websocket._send_lock:
+                await websocket.send_text(json.dumps(message))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send clear to stream {stream_sid}: {e}")
+            return False

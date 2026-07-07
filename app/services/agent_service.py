@@ -20,6 +20,7 @@ from app.models.session import SessionState
 from app.services.order_service import OrderService
 from app.services.verification_service import VerificationService
 from app.session.manager import SessionManager
+from app.logging.logger import log_llm_metrics
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ class AgentState(TypedDict):
     orders: list[dict]
     reply_text: str
     summary: Optional[str]
+    turn_metrics: dict
 
 class AgentService:
     """Primary orchestration layer for LLM-driven dialog using LangGraph."""
@@ -150,6 +152,10 @@ class AgentService:
         return sanitized
 
     async def _agent_node(self, state: AgentState, config: RunnableConfig) -> dict:
+        turn_metrics = state.get("turn_metrics", {})
+        if "timing_prompt_assembly_start" not in turn_metrics:
+            turn_metrics["timing_prompt_assembly_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         dynamic_prompt = f"{AGENT_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
@@ -168,9 +174,9 @@ class AgentService:
                 "role": "system",
                 "content": f"Here is a brief summary of the conversation so far: {state['summary']}"
             })
-            messages_to_send.extend(state["messages"][-3:])
+            messages_to_send.extend(state["messages"][-4:])
         else:
-            messages_to_send.extend(state["messages"][-20:])
+            messages_to_send.extend(state["messages"][-4:])
 
         use_tools = True
         llm_kwargs = dict(
@@ -181,6 +187,7 @@ class AgentService:
             llm_kwargs["tools"] = AGENT_TOOLS
             llm_kwargs["tool_choice"] = "auto"
 
+        turn_metrics["timing_serialization_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         on_llm_token = config.get("configurable", {}).get("on_llm_token")
         
         reply_content = ""
@@ -188,6 +195,31 @@ class AgentService:
         
         start_time = time.perf_counter()
         first_token_time = None
+        
+        if "timing_prompt_assembly_end" not in turn_metrics:
+            turn_metrics["timing_prompt_assembly_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        else:
+            turn_metrics["timing_second_llm_send"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            
+        # --- LLM Metrics Tracking Variables ---
+        llm_usage = None
+        streaming_started_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        history_tokens = 0
+        summary_tokens = 0
+        current_user_tokens = 0
+        
+        # Estimate token lengths (roughly 4 chars = 1 token for basic counting)
+        for msg in messages_to_send:
+            content_len = len(str(msg.get("content", ""))) // 4
+            if msg.get("role") == "system":
+                summary_tokens += content_len
+            elif msg == messages_to_send[-1] and msg.get("role") == "user":
+                current_user_tokens += content_len
+            else:
+                history_tokens += content_len
+        
+        turn_metrics["timing_serialization_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        # ----------------------------------------
         
         # --- Industry Standard Stream Interceptor ---
         # We buffer the first few characters to detect if the LLM is leaking a tool call
@@ -197,9 +229,23 @@ class AgentService:
         held_text = ""
         
         async for chunk_type, chunk_data in self._groq.chat_completion_stream_with_tools(**llm_kwargs):
+            if chunk_type == "timing":
+                if chunk_data["event"] not in turn_metrics:
+                    turn_metrics[chunk_data["event"]] = chunk_data["time"]
+                continue
+                
+            if chunk_type == "usage":
+                llm_usage = chunk_data
+                continue
+                
             if not first_token_time:
                 first_token_time = time.perf_counter()
                 logger.info(f"LLM TTFT internally measured: {round(first_token_time - start_time, 4)}s")
+                tok_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                if "timing_first_token" not in turn_metrics:
+                    turn_metrics["timing_first_token"] = tok_time
+                else:
+                    turn_metrics["timing_second_first_token"] = tok_time
             
             if chunk_type == "content":
                 reply_content += chunk_data
@@ -240,7 +286,9 @@ class AgentService:
             elif chunk_type == "tool_calls":
                 tool_calls = chunk_data
 
-        logger.info(f"LLM Stream Finished. Total stream time: {round(time.perf_counter() - start_time, 4)}s")
+        streaming_finished_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        total_time = round(time.perf_counter() - start_time, 4)
+        logger.info(f"LLM Stream Finished. Total stream time: {total_time}s")
 
         # CRITICAL FIX: Detect when LLM outputs tool-call syntax as TEXT 
         # instead of using the structured tool_calls API.
@@ -264,7 +312,42 @@ class AgentService:
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
 
-        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_content)}
+        # Compile and log metrics
+        ttft = round(first_token_time - start_time, 4) if first_token_time else 0.0
+        generation_time = round(time.perf_counter() - first_token_time, 4) if first_token_time else total_time
+        
+        prompt_tokens = getattr(llm_usage, 'prompt_tokens', 0) if llm_usage else (history_tokens + summary_tokens + current_user_tokens)
+        completion_tokens = getattr(llm_usage, 'completion_tokens', 0) if llm_usage else (len(reply_content) // 4)
+        
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        
+        # Check if it is the second LLM call (i.e. we are recovering from a tool call)
+        is_second_llm = "No"
+        if len(state.get("messages", [])) > 0 and state["messages"][-1].get("role") == "tool":
+            is_second_llm = "Yes"
+            
+        tool_called_name = tool_calls[0]["function"]["name"] if tool_calls else "None"
+        
+        
+        metrics = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "ttft": ttft,
+            "generation_time": generation_time,
+            "total_time": total_time,
+            "streaming_started": streaming_started_str,
+            "streaming_finished": streaming_finished_str,
+            "tool_called": tool_called_name,
+            "second_llm": is_second_llm,
+            "history_tokens": history_tokens,
+            "summary_tokens": summary_tokens,
+            "current_user_tokens": current_user_tokens
+        }
+        
+        # Merge metrics into turn_metrics
+        turn_metrics.update(metrics)
+
+        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_content), "turn_metrics": turn_metrics}
 
     @staticmethod
     def _rescue_leaked_tool_calls(text: str) -> list[dict]:
@@ -374,8 +457,11 @@ class AgentService:
         return all(part in combined_user_text for part in name_parts)
 
     async def _verify_tool_node(self, state: AgentState) -> dict:
+        turn_metrics = state.get("turn_metrics", {})
+        turn_metrics["timing_tool_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
         last_msg = state["messages"][-1]
-        updates = {"messages": []}
+        updates = {"messages": [], "turn_metrics": turn_metrics}
         
         for tc in last_msg.get("tool_calls", []):
             if tc["function"]["name"] == "verify_user":
@@ -513,6 +599,8 @@ class AgentService:
                     "name": tc["function"]["name"],
                     "content": result_str
                 })
+        
+        turn_metrics["timing_tool_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         return updates
 
     async def handle_user_text(
@@ -521,10 +609,17 @@ class AgentService:
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
 
+        turn_metrics = {}
+        turn_metrics["timing_memory_retrieval_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
         # Get or create the session state (for compatibility with legacy SessionManager)
         session = await self._sessions.get_or_create(session_id)
         
+        turn_metrics["timing_memory_retrieval_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
         config = {"configurable": {"thread_id": session_id, "on_llm_token": on_llm_token}}
+        
+        turn_metrics["timing_state_update_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         # Initialize graph state if empty
         graph_state = await self._graph.aget_state(config)
@@ -538,7 +633,13 @@ class AgentService:
                 "orders": session.orders if hasattr(session, "orders") else [],
                 "messages": [],
                 "summary": None,
+                "turn_metrics": turn_metrics,
             })
+        else:
+            await self._graph.aupdate_state(config, {"turn_metrics": turn_metrics})
+            
+        turn_metrics["timing_state_update_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        turn_metrics["timing_langgraph_invoke"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         user_msg = {"role": "user", "content": user_text}
         
@@ -596,6 +697,10 @@ class AgentService:
         # Trigger background summarization
         asyncio.create_task(self._summarize_session_async(session_id))
 
+        final_turn_metrics = state_values.get("turn_metrics", {})
+        # Merge local timings (e.g. langgraph_invoke) that were added after aupdate_state
+        final_turn_metrics.update(turn_metrics)
+
         return ConversationResult(
             session_id=session.session_id,
             intent="llm_agent",
@@ -606,6 +711,7 @@ class AgentService:
             customer=state_values.get("customer"),
             orders=state_values.get("orders", []),
             timings=timings,
+            turn_metrics=final_turn_metrics,
         )
 
     async def _summarize_session_async(self, session_id: str):

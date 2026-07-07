@@ -236,6 +236,7 @@ class StreamingVoicePipeline:
             utterance_id=f"{resolved_session_id}-t0",
             on_phase_change=_set_phase,
             on_stage=on_stage,
+            **kwargs,
         )
 
         while not session_ended:
@@ -274,6 +275,7 @@ class StreamingVoicePipeline:
                     utterance_id=f"{resolved_session_id}-t{turn_index}",
                     on_phase_change=_set_phase,
                     on_stage=on_stage,
+                    **kwargs,
                 )
                 continue
 
@@ -327,6 +329,7 @@ class StreamingVoicePipeline:
                     on_phase_change=_set_phase,
                     on_stage=on_stage,
                     interruption_event=interruption_event,
+                    **kwargs,
                 )
             )
 
@@ -360,6 +363,12 @@ class StreamingVoicePipeline:
                     await process_task
                 except asyncio.CancelledError:
                     pass
+
+                # NEW: Barge-in handling for Twilio
+                twilio_ws = kwargs.get("twilio_ws")
+                stream_sid = kwargs.get("stream_sid")
+                if twilio_ws and stream_sid and self.twilio:
+                    await self.twilio.clear_stream(twilio_ws, stream_sid)
 
                 if barge_in_event and barge_in_event.is_set():
                     barge_in_event.clear()
@@ -431,6 +440,7 @@ class StreamingVoicePipeline:
         on_phase_change: Optional[Callable] = None,
         on_stage: Optional[Callable] = None,
         interruption_event: Optional[asyncio.Event] = None,
+        **kwargs,
     ) -> tuple[Optional[bytes], str, float, float]:
         """
         Listen to the audio_queue and collect frames for one utterance.
@@ -521,6 +531,16 @@ class StreamingVoicePipeline:
                         
                         if interruption_event:
                             interruption_event.set()
+                            
+                        # INSTANT BARGE-IN FIX:
+                        # Even if the pipeline isn't actively waiting for `interruption_event`
+                        # because TTS generation finished early, Twilio might still be playing audio.
+                        # We must blindly clear the Twilio stream the exact millisecond speech is detected.
+                        twilio_ws = kwargs.get("twilio_ws")
+                        stream_sid = kwargs.get("stream_sid")
+                        if twilio_ws and stream_sid and self.twilio:
+                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
+
                         if on_phase_change:
                             on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
                         log_pipeline_event(
@@ -648,6 +668,7 @@ class StreamingVoicePipeline:
         Returns a result dict with transcript, intent, reply, timings, etc.
         """
         timings: dict[str, float] = {}
+        timings["timing_user_finished"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         t0 = time.perf_counter()
 
         result: dict[str, Any] = {
@@ -735,6 +756,8 @@ class StreamingVoicePipeline:
                     transcript=transcript[:100],
                     engine=stt_engine_used,
                 )
+
+                timings["timing_stt_final_transcript"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
                 if on_stt_text:
                     try:
@@ -855,6 +878,7 @@ class StreamingVoicePipeline:
             if stream_direct:
                 tts_consumer_task = asyncio.create_task(_tts_consumer())
 
+            timings["timing_queue_wait_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             try:
                 conversation = await self.agent.handle_user_text(session_id, transcript, on_llm_token=_handle_llm_token)
                 
@@ -872,6 +896,10 @@ class StreamingVoicePipeline:
                 result["orders"] = conversation.orders
                 result["should_end"] = conversation.should_end
                 timings.update(conversation.timings)
+                
+                # Merge the LLM/LangGraph turn_metrics directly into our timings dict
+                turn_metrics = getattr(conversation, "turn_metrics", {})
+                timings.update(turn_metrics)
                 
                 # Record conversation duration BEFORE awaiting TTS to prevent audio generation time from inflating LLM time
                 timings["conversation_end"] = round(time.perf_counter() - t0, 4)
@@ -1056,6 +1084,11 @@ class StreamingVoicePipeline:
             
             latency_str = f"Total: {total_ms:.0f}ms [VAD: {vad_wait:.0f}ms | STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms | TTS(1st): {tts_ms:.0f}ms]"
             log_transcript(session_id, result["transcript"], result["reply_text"], latency_str)
+            
+            # Log the complete turn metrics to the metrics file
+            from app.logging.logger import log_llm_metrics
+            if "timing_langgraph_invoke" in timings:
+                log_llm_metrics(session_id, timings)
 
             return result
         except asyncio.CancelledError:
@@ -1085,6 +1118,7 @@ class StreamingVoicePipeline:
 
         if "tts_start" not in timings:
             timings["tts_start"] = round(time.perf_counter() - t0, 4)
+            timings["timing_first_text_to_cartesia"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
         cached = self.tts_cache.get(sentence)
         if cached:
@@ -1137,12 +1171,15 @@ class StreamingVoicePipeline:
                     if first:
                         if "tts_first_audio" not in timings:
                             timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+                            timings["timing_first_audio_from_cartesia"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                         first = False
                         
                     chunks.append(chunk)
 
                     # Stream Cartesia PCM chunks progressively to frontend for sub-second latency
                     if on_audio and self.tts_provider == "cartesia":
+                        if "timing_first_packet_to_twilio" not in timings:
+                            timings["timing_first_packet_to_twilio"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                         try:
                             on_audio(chunk)
                         except Exception:
@@ -1187,6 +1224,7 @@ class StreamingVoicePipeline:
         call_sid: Optional[str] = None,
         update_call_with_audio: bool = True,
         session_id: Optional[str] = None,
+        **kwargs
     ) -> dict:
         """
         Entry point for Twilio phone calls (and legacy process_stream callers).
@@ -1222,6 +1260,7 @@ class StreamingVoicePipeline:
             on_stage=on_stage,
             session_id=resolved_session_id,
             langsmith_extra={"metadata": {"session_id": resolved_session_id, "thread_id": resolved_session_id}},
+            **kwargs
         )
 
     # =====================================================================

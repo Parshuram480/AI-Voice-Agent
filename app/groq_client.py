@@ -7,9 +7,12 @@ and falls back to raw httpx for TTS (which may not yet be in the SDK).
 All methods are async for maximum pipeline concurrency.
 """
 
-import io
+import json
 import logging
+import asyncio
 import os
+import io
+from datetime import datetime
 from typing import AsyncGenerator, Optional, Any
 
 import httpx
@@ -260,18 +263,46 @@ class GroqClient:
         model = model or self.LLM_MODEL
         logger.info(f"LLM stream-with-tools: {model}, {len(messages)} messages")
 
-        stream = await self._llm_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-            **kwargs
-        )
+        http_sent_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        yield ("timing", {"event": "timing_http_sent", "time": http_sent_time})
+
+        try:
+            stream = await self._llm_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+                **kwargs
+            )
+        except TypeError as e:
+            if 'stream_options' in str(e):
+                logger.warning("SDK does not support stream_options. Retrying without it.")
+                stream = await self._llm_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    **kwargs
+                )
+            else:
+                raise e
         
         tool_calls = []
+        first_chunk_received = False
         try:
             async for chunk in stream:
+                if not first_chunk_received:
+                    first_byte_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    yield ("timing", {"event": "timing_first_byte", "time": first_byte_time})
+                    first_chunk_received = True
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    yield ("usage", chunk.usage)
+                    
+                if not chunk.choices: continue
                 delta = chunk.choices[0].delta
                 if not delta: continue
                 

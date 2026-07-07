@@ -17,3 +17,4 @@ class ConversationResult:
     customer: Optional[dict]
     orders: list[dict]
     timings: dict[str, float]
+    turn_metrics: dict

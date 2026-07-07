@@ -18,7 +18,7 @@ class OrderService:
         self._order_repo = order_repo
 
     @traceable(name="get_orders")
-    async def get_orders(self, customer_id: int) -> list[dict]:
+    async def get_orders(self, customer_id: int) -> dict:
         orders = await self._order_repo.get_all_for_customer(customer_id)
         # Convert datetime objects to strings for JSON serialization (fixes UI and LangSmith crashes)
         from datetime import date, datetime
@@ -26,7 +26,18 @@ class OrderService:
             for k, v in o.items():
                 if isinstance(v, (datetime, date)):
                     o[k] = v.isoformat()
-        return orders
+        
+        total = len(orders)
+        if total > 2:
+            return {
+                "total_orders": total,
+                "recent_orders": orders[:2],
+                "note": "Only showing the 2 most recent orders to save space."
+            }
+        return {
+            "total_orders": total,
+            "recent_orders": orders
+        }
 
     async def get_latest_order(self, customer_id: int) -> dict | None:
         order = await self._order_repo.get_latest_for_customer(customer_id)

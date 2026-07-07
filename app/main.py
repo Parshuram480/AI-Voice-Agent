@@ -330,6 +330,8 @@ async def audio_stream(websocket: WebSocket):
                         on_tts_audio=on_tts_audio if use_stream_audio_out else None,
                         update_call_with_audio=not use_stream_audio_out,
                         session_id=call_sid,
+                        twilio_ws=websocket,
+                        stream_sid=stream_sid,
                     )
                 )
 
