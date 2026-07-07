@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from google.genai import types
 
-from app.audio_utils import build_wav
+from app.audio_utils import build_wav, FrameGenerator, VoiceActivityDetector
 from app.gemini_live_client import GeminiLiveClient
 from app.logging.logger import log_pipeline_event, log_transcript, log_history
 
@@ -50,6 +50,7 @@ class GeminiLivePipeline:
         on_tts_audio: Optional[Callable] = None,
         update_call_with_audio: bool = False,
         session_id: Optional[str] = None,
+        **kwargs,
     ) -> dict:
         """
         Entry point for Twilio phone calls.
@@ -79,6 +80,7 @@ class GeminiLivePipeline:
             on_tts_audio=wrapped_tts if on_tts_audio else None,
             session_id=session_id or call_sid,
             langsmith_extra={"metadata": {"session_id": session_id or call_sid, "thread_id": session_id or call_sid}},
+            **kwargs,
         )
 
     @traceable(run_type="chain", name="Gemini Multimodal Session", tags=["multimodal", "gemini-live"], process_inputs=_safe_inputs)
@@ -95,6 +97,9 @@ class GeminiLivePipeline:
         session_id: Optional[str] = None,
         barge_in_event: Optional[asyncio.Event] = None,
         langsmith_extra: Optional[dict] = None,
+        twilio_ws=None,
+        stream_sid=None,
+        **kwargs,
     ) -> dict:
         """
         Run the continuous multimodal conversation loop.
@@ -131,8 +136,25 @@ class GeminiLivePipeline:
             async with self.client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
-                # --- TASK 1: Sender (Read from Mic queue -> send to Gemini) ---
+                # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
                 async def sender_task():
+                    import os
+                    use_silero = os.getenv("USE_SILERO_VAD", "true").lower() == "true"
+                    silero_threshold = float(os.getenv("SILERO_THRESHOLD", "0.5"))
+                    
+                    vad = VoiceActivityDetector(
+                        aggressiveness=3,
+                        sample_rate=16000,
+                        fallback_threshold=500,
+                        use_silero=use_silero,
+                        silero_threshold=silero_threshold,
+                    )
+                    frame_gen = FrameGenerator(frame_duration_ms=30, sample_rate=16000, sample_width=2)
+                    
+                    speech_active = False
+                    consecutive_silence_ms = 0
+                    vad_silence_threshold = 500  # ms to consider speech "done" to allow another barge-in
+                    
                     while True:
                         try:
                             chunk = await audio_queue.get()
@@ -140,7 +162,7 @@ class GeminiLivePipeline:
                                 logger.info("Sender task received non-bytes object (_DONE)")
                                 break
                             
-                            # Gemini 3.1+ explicitly deprecated mediaChunks. Send raw JSON payload to the WS directly.
+                            # Send to Gemini
                             msg = {
                                 "realtimeInput": {
                                     "audio": {
@@ -150,6 +172,27 @@ class GeminiLivePipeline:
                                 }
                             }
                             await session._ws.send(json.dumps(msg))
+                            
+                            # Local VAD logic for instant Twilio barge-in
+                            if twilio_ws and stream_sid:
+                                frame_gen.add_data(chunk)
+                                for frame in frame_gen.get_frames():
+                                    is_speech = vad.is_speech(frame)
+                                    if is_speech:
+                                        if not speech_active:
+                                            # INSTANT BARGE IN DETECTED!
+                                            logger.info(f"[{resolved_session_id}] GeminiLive local VAD detected barge-in! Clearing Twilio.")
+                                            clear_payload = {"event": "clear", "streamSid": stream_sid}
+                                            # Fire and forget clear command
+                                            asyncio.create_task(twilio_ws.send_json(clear_payload))
+                                            speech_active = True
+                                        consecutive_silence_ms = 0
+                                    else:
+                                        if speech_active:
+                                            consecutive_silence_ms += 30
+                                            if consecutive_silence_ms >= vad_silence_threshold:
+                                                speech_active = False  # Reset so we can detect the next interruption
+                            
                         except Exception as e:
                             logger.error(f"Sender task error: {e}")
                             break
