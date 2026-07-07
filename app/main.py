@@ -176,6 +176,23 @@ async def startup():
         )
         logger.info("✓ Streaming voice pipeline initialized")
 
+        # Pre-warm filler TTS cache so first-turn filler is instant (no cold-start)
+        if streaming_pipeline._fillers:
+            try:
+                tts_provider = os.getenv("TTS_PROVIDER", "groq").lower()
+                if tts_provider == "cartesia" and cartesia_client:
+                    async def _filler_tts(text: str) -> bytes:
+                        return await cartesia_client.text_to_speech(text)
+                else:
+                    async def _filler_tts(text: str) -> bytes:
+                        return await groq_client.text_to_speech(text)
+                await streaming_pipeline._fillers.prewarm(
+                    streaming_pipeline.tts_cache, _filler_tts
+                )
+                logger.info("✓ Filler TTS cache pre-warmed")
+            except Exception as e:
+                logger.warning(f"Filler pre-warm failed (non-fatal): {e}")
+
     logger.info(f"  Pipeline Mode: {pipeline_mode}")
     logger.info(f"  Server host: {SERVER_HOST}")
     logger.info(f"  Listening on port: {SERVER_PORT}")
@@ -491,6 +508,7 @@ async def mic_stream(websocket: WebSocket):
     session_id = websocket.query_params.get("session_id")
     if not session_id:
         session_id = f"mic-{uuid.uuid4().hex[:8]}"
+    client_sample_rate = int(websocket.query_params.get("sample_rate", "16000"))
     await safe_send({"type": "session", "session_id": session_id})
 
     # Launch the continuous conversation pipeline in background
@@ -518,7 +536,11 @@ async def mic_stream(websocket: WebSocket):
 
             # Binary frames = raw PCM audio
             if "bytes" in message and message["bytes"]:
-                await audio_queue.put(message["bytes"])
+                chunk = message["bytes"]
+                if client_sample_rate != 16000:
+                    from app.audio_utils import resample_pcm
+                    chunk = resample_pcm(chunk, in_rate=client_sample_rate, out_rate=16000)
+                await audio_queue.put(chunk)
 
             # Text frames = control messages
             elif "text" in message and message["text"]:

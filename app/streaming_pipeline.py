@@ -33,6 +33,8 @@ from app.audio_utils import (
     compute_rms,
     VoiceActivityDetector,
     FrameGenerator,
+    PreSpeechBuffer,
+    filter_disfluencies,
 )
 from app.database import DatabaseClient
 from app.groq_client import GroqClient
@@ -46,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 # --- Environment Variables ---
 MAX_UTTERANCE_MS = int(os.getenv("MAX_UTTERANCE_MS", "30000"))
-SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "1500"))
-VAD_SILENCE_MS = int(os.getenv("VAD_SILENCE_MS", "800"))
+SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "300"))
+VAD_SILENCE_MS = int(os.getenv("VAD_SILENCE_MS", "300"))
 SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))
 TTS_CACHE_SIZE = int(os.getenv("TTS_CACHE_SIZE", "100"))
 STT_EARLY_CHUNK_SECONDS = float(os.getenv("STT_EARLY_CHUNK_SECONDS", "1.0"))
@@ -56,6 +58,10 @@ SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")
 VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "3"))
 USE_SILERO_VAD = os.getenv("USE_SILERO_VAD", "false").lower() in ("1", "true", "yes", "on")
 SILERO_THRESHOLD = float(os.getenv("SILERO_THRESHOLD", "0.5"))
+# Pre-speech lookback: ms of audio kept BEFORE VAD fires (avoids clipping utterance onset)
+PRE_SPEECH_LOOKBACK_MS = int(os.getenv("PRE_SPEECH_LOOKBACK_MS", "120"))
+# LLM stall timeout: if no token arrives within this many seconds after filler, play a hold phrase
+LLM_STALL_TIMEOUT_S = float(os.getenv("LLM_STALL_TIMEOUT_S", "4.0"))
 
 USE_FILLER_WORDS = os.getenv("USE_FILLER_WORDS", "true").lower() in ("1", "true", "yes", "on")
 
@@ -122,7 +128,15 @@ class StreamingVoicePipeline:
         else:
             self.deepgram = None
 
-
+        # Session-scoped VAD — created once and reset() between utterances.
+        # This avoids the ~50ms Silero model re-init cost on every turn.
+        self._session_vad = VoiceActivityDetector(
+            aggressiveness=VAD_AGGRESSIVENESS,
+            sample_rate=16000,
+            fallback_threshold=SILENCE_THRESHOLD,
+            use_silero=USE_SILERO_VAD,
+            silero_threshold=SILERO_THRESHOLD,
+        )
 
         # Filler words manager
         from app.fillers import FillerManager
@@ -463,14 +477,19 @@ class StreamingVoicePipeline:
         # Max utterance in bytes (16kHz, 16-bit mono = 32000 bytes/sec)
         max_utterance_bytes = int(MAX_UTTERANCE_MS / 1000 * 16000 * 2)
 
-        # WebRTC VAD works on exact 30ms frames
+        # Reuse the session-scoped VAD instance (avoids ~50ms Silero re-init per turn)
+        vad = self._session_vad
+        vad.reset()
+
+        # VAD works on exact 30ms frames
         frame_gen = FrameGenerator(frame_duration_ms=30, sample_rate=sample_rate, sample_width=sample_width)
-        vad = VoiceActivityDetector(
-            aggressiveness=VAD_AGGRESSIVENESS,
+
+        # Pre-speech ring buffer: retains the last PRE_SPEECH_LOOKBACK_MS of audio
+        # so we can prepend it when VAD fires, preventing first-phoneme clipping.
+        pre_speech_buf = PreSpeechBuffer(
+            lookback_ms=PRE_SPEECH_LOOKBACK_MS,
             sample_rate=sample_rate,
-            fallback_threshold=SILENCE_THRESHOLD,
-            use_silero=USE_SILERO_VAD,
-            silero_threshold=SILERO_THRESHOLD,
+            sample_width=sample_width,
         )
 
         if on_stage:
@@ -509,16 +528,22 @@ class StreamingVoicePipeline:
                 is_silence = not is_speech_frame
 
                 if not speech_started:
+                    # Always push silent frames into the pre-speech buffer
+                    pre_speech_buf.push(frame)
                     if not is_silence:
+                        # Speech onset detected — prepend ring buffer to utterance
+                        prefix = pre_speech_buf.get_prefix()
                         speech_started = True
                         speech_ms = chunk_ms
                         silence_ms = 0.0
+                        audio_buffer.extend(prefix)  # prepend lookback audio
                         audio_buffer.extend(frame)
-                        
+                        pre_speech_buf.clear()
+
                         if self.deepgram:
                             self.deepgram.clear_buffer()
                             await self.deepgram.send_audio(bytes(audio_buffer))
-                        
+
                         if interruption_event:
                             interruption_event.set()
                         if on_phase_change:
@@ -534,7 +559,7 @@ class StreamingVoicePipeline:
                                 on_stage("vad", "running", "Speech detected")
                             except Exception:
                                 pass
-                    # else: still silence before speech, discard
+                    # else: still silence before speech, keep buffering in pre_speech_buf
                 else:
                     audio_buffer.extend(frame)
                     if self.deepgram:
@@ -818,6 +843,12 @@ class StreamingVoicePipeline:
             _stage("conversation", "running", "Routing intent and slots")
             timings["conversation_start"] = round(time.perf_counter() - t0, 4)
 
+            # Filter disfluencies from transcript before it reaches the LLM.
+            # The raw transcript is preserved in result["transcript"] for UI display.
+            llm_transcript = filter_disfluencies(transcript)
+            if llm_transcript != transcript:
+                logger.debug(f"[{utterance_id}] Disfluency filter: '{transcript}' -> '{llm_transcript}'")
+
             tts_queue = asyncio.Queue()
             token_buffer = []
             
@@ -856,7 +887,7 @@ class StreamingVoicePipeline:
                 tts_consumer_task = asyncio.create_task(_tts_consumer())
 
             try:
-                conversation = await self.agent.handle_user_text(session_id, transcript, on_llm_token=_handle_llm_token)
+                conversation = await self.agent.handle_user_text(session_id, llm_transcript, on_llm_token=_handle_llm_token)
                 
                 if stream_direct:
                     remaining = "".join(token_buffer).strip()
@@ -1320,12 +1351,53 @@ class StreamingVoicePipeline:
 
 def _split_sentences(text: str) -> list[str]:
     """
-    Split text on sentence boundaries (.!?) for incremental TTS.
+    Split text on sentence boundaries for incremental TTS.
 
-    Returns a list where the last element may be an incomplete sentence.
+    Uses nltk.sent_tokenize when available — it correctly handles most
+    abbreviations. Common telephony abbreviations (No., Dr., Mr., etc.)
+    are temporarily masked before tokenization and restored afterward
+    to avoid premature sentence splits.
+
+    Returns a list where the last element may be an incomplete sentence
+    (i.e., still receiving LLM tokens).
     """
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    return parts if parts else [text]
+    try:
+        import nltk
+        # Mask known abbreviations that punkt may split incorrectly
+        _ABBR = [
+            ("No. ", "No__ABBR__ "),
+            ("Dr. ", "Dr__ABBR__ "),
+            ("Mr. ", "Mr__ABBR__ "),
+            ("Mrs. ", "Mrs__ABBR__ "),
+            ("Ms. ", "Ms__ABBR__ "),
+            ("Sr. ", "Sr__ABBR__ "),
+            ("Jr. ", "Jr__ABBR__ "),
+            ("vs. ", "vs__ABBR__ "),
+            ("approx. ", "approx__ABBR__ "),
+            ("est. ", "est__ABBR__ "),
+        ]
+        masked = text
+        for abbr, placeholder in _ABBR:
+            masked = masked.replace(abbr, placeholder)
+
+        try:
+            parts = nltk.sent_tokenize(masked)
+        except LookupError:
+            nltk.download("punkt_tab", quiet=True)
+            parts = nltk.sent_tokenize(masked)
+
+        # Restore abbreviations
+        restored = []
+        for part in parts:
+            for abbr, placeholder in _ABBR:
+                part = part.replace(placeholder, abbr)
+            restored.append(part)
+        return restored if restored else [text]
+
+    except ImportError:
+        # nltk not available — fall back to punctuation regex
+        parts = re.split(r'(?<=[.!?])\s+', text)
+        return parts if parts else [text]
 
 
 def _serialize_customer(customer: Optional[dict]) -> Optional[dict]:

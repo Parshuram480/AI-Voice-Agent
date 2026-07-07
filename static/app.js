@@ -356,11 +356,12 @@ async function startSession() {
       sessionId = `mic-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(16).slice(2, 10)}`;
       localStorage.setItem('voice_session_id', sessionId);
     }
-    const wsUrl = `${wsProto}//${location.host}/ws/mic-stream?session_id=${encodeURIComponent(sessionId)}`;
+    const sampleRate = micAudioContext.sampleRate || 16000;
+    const wsUrl = `${wsProto}//${location.host}/ws/mic-stream?session_id=${encodeURIComponent(sessionId)}&sample_rate=${sampleRate}`;
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      addLog('system', 'Conversation session started. Speak naturally…');
+      addLog('system', `Conversation session started (Audio: ${sampleRate}Hz)`);
 
       // Stream audio continuously through noise filter chain
       micProcessor.port.onmessage = (event) => {

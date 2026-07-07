@@ -2,14 +2,18 @@
 Audio utility functions for the voice-agent pipeline.
 
 Handles:
-- ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¼-law (Twilio) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ linear PCM conversion
-- Resampling 8 kHz ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ 16 kHz for Groq Whisper
+- mu-law (Twilio) -> linear PCM conversion
+- Resampling 8 kHz -> 16 kHz for Groq Whisper (scipy polyphase, audioop fallback)
 - Building WAV byte buffers from raw PCM
 - End-of-speech silence detection
+- Pre-speech ring buffer to avoid clipping utterance onset
+- Disfluency filtering before LLM input
 """
 
 import audioop
+import collections
 import io
+import re
 import struct
 import wave
 import logging
@@ -25,9 +29,9 @@ except ImportError:
 
 def mulaw_to_pcm(mulaw_bytes: bytes) -> bytes:
     """
-    Decode ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¼-law encoded audio (from Twilio Media Streams) to 16-bit linear PCM.
+    Decode mu-law encoded audio (from Twilio Media Streams) to 16-bit linear PCM.
 
-    Twilio sends audio as 8-bit ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¼-law, 8 kHz, mono.
+    Twilio sends audio as 8-bit mu-law, 8 kHz, mono.
     Returns raw 16-bit signed PCM bytes.
     """
     return audioop.ulaw2lin(mulaw_bytes, 2)  # 2 = 16-bit samples
@@ -35,21 +39,31 @@ def mulaw_to_pcm(mulaw_bytes: bytes) -> bytes:
 
 def resample_to_16khz(pcm_8khz: bytes) -> bytes:
     """
-    Upsample 8 kHz mono PCM ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ 16 kHz mono PCM.
+    Upsample 8 kHz mono PCM -> 16 kHz mono PCM.
 
     Groq Whisper expects 16 kHz input for optimal accuracy.
-    Uses audioop.ratecv for sample-rate conversion.
+    Prefers scipy polyphase resampler (anti-aliased, higher quality);
+    falls back to audioop.ratecv if scipy is not installed.
     """
-    # ratecv params: (fragment, width, nchannels, inrate, outrate, state)
-    converted, _ = audioop.ratecv(
-        pcm_8khz,
-        2,       # sample width: 16-bit
-        1,       # mono
-        8000,    # input rate
-        16000,   # output rate
-        None,    # no previous state
-    )
-    return converted
+    try:
+        import numpy as np
+        from scipy.signal import resample_poly
+        # Convert bytes -> int16 array -> float32, resample, convert back
+        samples = np.frombuffer(pcm_8khz, dtype=np.int16).astype(np.float32)
+        resampled = resample_poly(samples, up=2, down=1)  # 8k -> 16k
+        resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+        return resampled.tobytes()
+    except ImportError:
+        # scipy not available — fall back to audioop linear interpolation
+        converted, _ = audioop.ratecv(
+            pcm_8khz,
+            2,       # sample width: 16-bit
+            1,       # mono
+            8000,    # input rate
+            16000,   # output rate
+            None,    # no previous state
+        )
+        return converted
 
 
 def build_wav(pcm_data: bytes, sample_rate: int = 16000, sample_width: int = 2, channels: int = 1) -> bytes:
@@ -362,4 +376,101 @@ class VoiceActivityDetector:
         if self._silero:
             self._silero.reset()
 
+
+# =============================================================================
+# Pre-speech ring buffer
+# =============================================================================
+
+class PreSpeechBuffer:
+    """
+    Rolling ring buffer that retains the last N milliseconds of audio
+    *before* VAD triggers speech onset.
+
+    Problem it solves: VAD fires on frame N, but speech actually started
+    on frame N-3. Without a lookback buffer the first ~90ms of every
+    utterance is silently discarded, clipping the opening phoneme.
+
+    Usage::
+
+        buf = PreSpeechBuffer(lookback_ms=120)
+        # feed every incoming frame — even before speech starts
+        buf.push(frame)
+        # when VAD fires, prepend the ring buffer to the utterance
+        prefix = buf.get_prefix()
+        utterance = prefix + current_frame
+    """
+
+    def __init__(
+        self,
+        lookback_ms: int = 120,
+        sample_rate: int = 16000,
+        sample_width: int = 2,
+    ):
+        """
+        Args:
+            lookback_ms:  How many milliseconds to retain before speech onset.
+            sample_rate:  PCM sample rate in Hz.
+            sample_width: Bytes per sample (2 for 16-bit).
+        """
+        self._bytes_per_ms = sample_rate * sample_width / 1000.0
+        self._max_bytes = int(lookback_ms * self._bytes_per_ms)
+        self._ring: collections.deque[bytes] = collections.deque()
+        self._stored_bytes = 0
+
+    def push(self, frame: bytes) -> None:
+        """Add a PCM frame to the ring buffer, evicting old frames as needed."""
+        self._ring.append(frame)
+        self._stored_bytes += len(frame)
+        # Evict oldest frames until we are within the lookback window
+        while self._stored_bytes > self._max_bytes and self._ring:
+            evicted = self._ring.popleft()
+            self._stored_bytes -= len(evicted)
+
+    def get_prefix(self) -> bytes:
+        """Return all buffered frames concatenated as a single bytes object."""
+        return b"".join(self._ring)
+
+    def clear(self) -> None:
+        """Reset the ring buffer (call when a new listening window starts)."""
+        self._ring.clear()
+        self._stored_bytes = 0
+
+
+# =============================================================================
+# Disfluency filter
+# =============================================================================
+
+# Common spoken disfluencies that add noise to LLM prompts.
+_DISFLUENCY_PATTERN = re.compile(
+    r"\b(um+|uh+|er+|ah+|hmm+|hm+|mhm|uh-huh|you know|i mean|like,?|so,?|right,?|well,?)\b",
+    re.IGNORECASE,
+)
+
+
+def filter_disfluencies(text: str) -> str:
+    """
+    Remove common spoken disfluencies from a transcript before it reaches
+    the LLM, improving intent classification accuracy.
+
+    Examples::
+
+        "Um, I want to check, uh, my order status"
+        -> "I want to check my order status"
+
+    Args:
+        text: Raw transcript string from STT.
+
+    Returns:
+        Cleaned transcript with disfluencies removed and whitespace normalised.
+    """
+    cleaned = _DISFLUENCY_PATTERN.sub("", text)
+    # Remove doubled/orphaned commas left behind (e.g. ", ," -> ",")
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    # Remove commas immediately before/after spaces with no adjacent word
+    cleaned = re.sub(r"\s*,\s*(?=\s|$)", " ", cleaned)
+    # Collapse multiple spaces and strip leading/trailing whitespace
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    # Remove any leading punctuation artifacts
+    cleaned = re.sub(r"^[,;.\s]+", "", cleaned).strip()
+    return cleaned or text  # never return empty — fall back to original
 

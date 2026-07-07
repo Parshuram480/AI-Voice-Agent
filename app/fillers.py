@@ -116,3 +116,41 @@ class FillerManager:
     def stats(self) -> dict:
         """Return usage statistics for debugging."""
         return dict(self._usage_counts)
+
+    def all_phrases(self) -> list[str]:
+        """Return every unique filler phrase across all pools."""
+        seen = set()
+        phrases = []
+        for pool in FILLER_POOLS.values():
+            for p in pool:
+                if p not in seen:
+                    seen.add(p)
+                    phrases.append(p)
+        return phrases
+
+    async def prewarm(self, tts_cache, tts_fn) -> None:
+        """
+        Pre-synthesize all filler phrases and populate *tts_cache*.
+
+        Call once at server startup so the very first filler of a session
+        is served from cache without paying the TTS round-trip cost.
+
+        Args:
+            tts_cache: A ResponseCache instance (has .get() / .put()).
+            tts_fn:    An async callable ``tts_fn(text) -> bytes`` that
+                       returns WAV/PCM audio for the given phrase.
+        """
+        import asyncio
+        phrases = self.all_phrases()
+        logger.info(f"FillerManager: pre-warming {len(phrases)} filler phrases…")
+        for phrase in phrases:
+            if tts_cache.get(phrase):
+                continue  # already cached
+            try:
+                audio = await tts_fn(phrase)
+                if audio:
+                    tts_cache.put(phrase, audio)
+                    logger.debug(f"  cached filler: '{phrase}' ({len(audio)} bytes)")
+            except Exception as e:
+                logger.warning(f"  filler pre-warm failed for '{phrase}': {e}")
+        logger.info("FillerManager: filler pre-warm complete.")

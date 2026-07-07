@@ -25,3 +25,11 @@ langgraph>=0.2.0
 google-genai==0.3.0
 langsmith
 openai
+
+# Audio quality: anti-aliased resampler (8kHz -> 16kHz), falls back to audioop if absent
+scipy>=1.11.0
+numpy>=1.24.0
+
+# Sentence splitting: handles abbreviations correctly for TTS pipelining
+# falls back to regex if absent
+nltk>=3.8.0
