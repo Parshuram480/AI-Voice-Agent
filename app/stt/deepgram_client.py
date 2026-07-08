@@ -99,6 +99,39 @@ class DeepgramStreamingClient:
         self.transcript_buffer = ""
         return t
 
+    def peek_buffer(self) -> str:
+        """Read the current transcript buffer WITHOUT clearing it."""
+        return self.transcript_buffer.strip()
+
+    async def flush_and_read(self, timeout: float = 0.5) -> str:
+        """
+        Quick finalize + read for continuation scenarios.
+        
+        Sends a Finalize command and waits briefly for Deepgram to flush.
+        Returns whatever text has accumulated and clears the buffer.
+        Uses a shorter timeout than get_transcript() since we're in a
+        time-sensitive continuation path.
+        """
+        if not self.ws or not self.running:
+            t = self.transcript_buffer.strip()
+            self.transcript_buffer = ""
+            return t
+
+        self.finalize_event.clear()
+        try:
+            await self.ws.send(json.dumps({"type": "Finalize"}))
+        except Exception:
+            pass
+
+        try:
+            await asyncio.wait_for(self.finalize_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass  # Use whatever we have — don't block the continuation path
+
+        t = self.transcript_buffer.strip()
+        self.transcript_buffer = ""
+        return t
+
     def clear_buffer(self):
         """Clear any stray transcript buffer from previous timed-out utterances."""
         self.transcript_buffer = ""

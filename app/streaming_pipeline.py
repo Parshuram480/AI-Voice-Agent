@@ -228,8 +228,13 @@ class StreamingVoicePipeline:
         _set_phase(ConversationPhase.LISTENING)
         log_pipeline_event("session_start", session_id=resolved_session_id)
 
+        pending_text_context = ""
+
         # We start with listening for the first utterance
         _set_phase(ConversationPhase.LISTENING)
+        if self.deepgram:
+            self.deepgram.clear_buffer()
+            
         utterance_data = await self._vad_collect_utterance(
             audio_queue,
             session_id=resolved_session_id,
@@ -240,6 +245,10 @@ class StreamingVoicePipeline:
         )
 
         while not session_ended:
+            # Clear Deepgram buffer for completely new turns (but preserve it for continuations)
+            if not pending_text_context and self.deepgram:
+                self.deepgram.clear_buffer()
+
             if not utterance_data:
                 break
                 
@@ -279,6 +288,11 @@ class StreamingVoicePipeline:
                 )
                 continue
 
+            prepend_text = ""
+            if pending_text_context:
+                prepend_text = pending_text_context
+                pending_text_context = ""
+
             # We have a valid utterance. Advance the turn index.
             turn_index += 1
             utterance_id = f"{resolved_session_id}-t{turn_index}"
@@ -301,6 +315,7 @@ class StreamingVoicePipeline:
             )
 
             # Create the processing task
+            turn_state = {"agent_responded_time": 0.0}
             process_task = asyncio.create_task(
                 self._process_single_utterance(
                     utterance_audio,
@@ -316,6 +331,8 @@ class StreamingVoicePipeline:
                     on_stage=on_stage,
                     on_phase_change=_set_phase,
                     cartesia_ws=kwargs.get("cartesia_ws"),
+                    turn_state=turn_state,
+                    prepend_text=prepend_text,
                 )
             )
 
@@ -359,16 +376,49 @@ class StreamingVoicePipeline:
                 
                 # Cancel the currently processing/speaking turn
                 process_task.cancel()
+                cancelled_result = {}
                 try:
-                    await process_task
+                    # If STT finished before cancellation, this returns the result dict
+                    cancelled_result = await process_task
                 except asyncio.CancelledError:
                     pass
 
-                # NEW: Barge-in handling for Twilio
-                twilio_ws = kwargs.get("twilio_ws")
-                stream_sid = kwargs.get("stream_sid")
-                if twilio_ws and stream_sid and self.twilio:
-                    await self.twilio.clear_stream(twilio_ws, stream_sid)
+                agent_responded_time = turn_state.get("agent_responded_time", 0.0)
+                # If agent hasn't responded, or responded less than 500ms ago (network latency buffer),
+                # the user hasn't heard it yet, so it's a continuation, not a true barge-in.
+                if not agent_responded_time or (time.perf_counter() - agent_responded_time < 0.5):
+                    # User interrupted before agent actually responded -> Continuation
+                    # 1. Did STT already finish? Use the transcript we already extracted.
+                    cancelled_text = ""
+                    if isinstance(cancelled_result, dict):
+                        cancelled_text = cancelled_result.get("transcript", "")
+                        
+                    # 2. If STT didn't finish, ask Deepgram for whatever is in the live buffer.
+                    if not cancelled_text and self.deepgram:
+                        cancelled_text = await self.deepgram.flush_and_read(timeout=0.3)
+                        
+                    if cancelled_text:
+                        # Append to any existing pending text (for chained continuations)
+                        if pending_text_context:
+                            pending_text_context = pending_text_context + " " + cancelled_text
+                        else:
+                            pending_text_context = cancelled_text
+                    log_pipeline_event(
+                        "user_continuation_detected",
+                        session_id=resolved_session_id,
+                        utterance_id=utterance_id,
+                        turn_index=turn_index,
+                        saved_text=cancelled_text[:80] if cancelled_text else "(no text yet)",
+                    )
+                else:
+                    # True barge-in during TTS
+                    if self.deepgram:
+                        self.deepgram.clear_buffer()
+                    # NEW: Barge-in handling for Twilio
+                    twilio_ws = kwargs.get("twilio_ws")
+                    stream_sid = kwargs.get("stream_sid")
+                    if twilio_ws and stream_sid and self.twilio:
+                        await self.twilio.clear_stream(twilio_ws, stream_sid)
 
                 if barge_in_event and barge_in_event.is_set():
                     barge_in_event.clear()
@@ -526,7 +576,6 @@ class StreamingVoicePipeline:
                         audio_buffer.extend(frame)
                         
                         if self.deepgram:
-                            self.deepgram.clear_buffer()
                             await self.deepgram.send_audio(bytes(audio_buffer))
                         
                         if interruption_event:
@@ -660,6 +709,8 @@ class StreamingVoicePipeline:
         on_stage: Optional[Callable] = None,
         on_phase_change: Optional[Callable] = None,
         cartesia_ws: Optional[Any] = None,
+        turn_state: Optional[dict] = None,
+        prepend_text: str = "",
     ) -> dict:
         """
         Process a single finalized utterance through the full pipeline.
@@ -740,6 +791,16 @@ class StreamingVoicePipeline:
                     transcript = await self.deepgram.get_transcript()
                 else:
                     transcript = await self.groq.speech_to_text(wav_bytes, ext="wav")
+
+                # Text-based continuation: prepend saved text from interrupted turns
+                if prepend_text and transcript and transcript.strip():
+                    transcript = prepend_text + " " + transcript
+                    stt_engine_used = f"{self.stt_provider}+continued"
+                    logger.info(f"[{utterance_id}] Continuation merged: '{prepend_text}' + '{transcript}'")
+                elif prepend_text and (not transcript or not transcript.strip()):
+                    # New turn had no speech, but we have pending text from previous turn
+                    transcript = prepend_text
+                    stt_engine_used = f"{self.stt_provider}+continued"
 
                 timings["stt_end"] = round(time.perf_counter() - t0, 4)
                 timings["stt_duration"] = round(timings["stt_end"] - timings["stt_start"], 4)
@@ -871,7 +932,7 @@ class StreamingVoicePipeline:
                     sentence = await tts_queue.get()
                     if sentence is None:
                         break
-                    await self._tts_sentence(sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws)
+                    await self._tts_sentence(sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws, turn_state=turn_state)
                     tts_queue.task_done()
 
             tts_consumer_task = None
@@ -973,14 +1034,14 @@ class StreamingVoicePipeline:
                                 if sentence:
                                     # TTS each sentence as it completes
                                     await self._tts_sentence(
-                                        sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
+                                        sentence, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws, turn_state=turn_state
                                     )
                             token_buffer = [sentences[-1]]
 
                     remaining = "".join(token_buffer).strip()
                     if remaining:
                         await self._tts_sentence(
-                            remaining, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
+                            remaining, result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws, turn_state=turn_state
                         )
 
                     full_reply = "".join(full_reply_parts).strip()
@@ -994,7 +1055,7 @@ class StreamingVoicePipeline:
                     for sentence in _split_sentences(reply_text):
                         if sentence.strip():
                             await self._tts_sentence(
-                                sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
+                                sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws, turn_state=turn_state
                             )
             elif not stream_direct:
                 _stage("llm", "done", "Deterministic response")
@@ -1002,7 +1063,7 @@ class StreamingVoicePipeline:
                 for sentence in _split_sentences(reply_text):
                     if sentence.strip():
                         await self._tts_sentence(
-                            sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws
+                            sentence.strip(), result, timings, t0, _stage, on_tts_audio, cartesia_ws=cartesia_ws, turn_state=turn_state
                         )
             else:
                 _stage("llm", "done", "Streamed direct response")
@@ -1109,6 +1170,7 @@ class StreamingVoicePipeline:
         stage_cb: Callable,
         on_audio: Optional[Callable],
         cartesia_ws: Optional[Any] = None,
+        turn_state: Optional[dict] = None,
     ):
         """Synthesize a single sentence and deliver via callback."""
         if not sentence or not sentence.strip():
@@ -1125,6 +1187,9 @@ class StreamingVoicePipeline:
             logger.info(f"TTS cache hit: '{sentence[:40]}…'")
             if "tts_first_audio" not in timings:
                 timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
+            
+            if turn_state is not None and not turn_state.get("agent_responded_time"):
+                turn_state["agent_responded_time"] = time.perf_counter()
 
             if result.get("audio_bytes"):
                 result["audio_bytes"] = result["audio_bytes"] + cached
@@ -1172,6 +1237,8 @@ class StreamingVoicePipeline:
                         if "tts_first_audio" not in timings:
                             timings["tts_first_audio"] = round(time.perf_counter() - t0, 4)
                             timings["timing_first_audio_from_cartesia"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        if turn_state is not None and not turn_state.get("agent_responded_time"):
+                            turn_state["agent_responded_time"] = time.perf_counter()
                         first = False
                         
                     chunks.append(chunk)
