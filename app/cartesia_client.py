@@ -28,7 +28,7 @@ class CartesiaClient:
         
         audio_chunks = []
         audio_stream = await self.client.tts.sse(
-            model_id="sonic-3",
+            model_id="sonic-3.5",
             transcript=text,
             voice={"mode": "id", "id": voice},
             output_format={
@@ -60,7 +60,7 @@ class CartesiaClient:
         logger.info(f"Cartesia TTS stream: {len(text)} chars with {voice}")
         
         audio_stream = await self.client.tts.sse(
-            model_id="sonic-3",
+            model_id="sonic-3.5",
             transcript=text,
             voice={"mode": "id", "id": voice},
             output_format={

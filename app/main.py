@@ -86,7 +86,8 @@ def _get_streaming_pipeline() -> StreamingVoicePipeline:
 app.include_router(create_api_router(_get_pipeline, _get_streaming_pipeline))
 
 # Shared service instances (initialized on startup)
-groq_client: GroqClient = None  # type: ignore
+groq_client_1: GroqClient = None  # type: ignore
+groq_client_2: GroqClient = None  # type: ignore
 cartesia_client = None
 db_client: DatabaseClient = None  # type: ignore
 twilio_handler: TwilioHandler = None  # type: ignore
@@ -102,19 +103,27 @@ rephraser: LLMRephraser = None  # type: ignore
 @app.on_event("startup")
 async def startup():
     """Initialize all services on server startup."""
-    global groq_client, cartesia_client, db_client, twilio_handler, pipeline, streaming_pipeline
+    global groq_client_1, groq_client_2, cartesia_client, db_client, twilio_handler, pipeline, streaming_pipeline
     global session_manager, agent_service, rephraser
 
     logger.info("=" * 60)
     logger.info("  Voice Agent v2 — Streaming Pipeline — Starting up")
     logger.info("=" * 60)
 
-    # Initialize Groq client
-    groq_client = GroqClient()
-    logger.info("✓ Groq client initialized")
+    # Initialize Groq clients
+    groq_client_1 = GroqClient(
+        api_key=os.getenv("GROQ_LLM1_API_KEY") or os.getenv("GROQ_API_KEY"),
+        default_model=os.getenv("LLM1_MODEL")
+    )
+    groq_client_2 = GroqClient(
+        api_key=os.getenv("GROQ_LLM2_API_KEY") or os.getenv("GROQ_API_KEY"),
+        default_model=os.getenv("LLM2_MODEL")
+    )
+    logger.info("✓ Groq clients initialized")
 
     # Warm up Groq connections (pre-establish TLS)
-    await groq_client.warmup()
+    await groq_client_1.warmup()
+    await groq_client_2.warmup()
     logger.info("✓ Groq connections warmed up")
 
     # Initialize Cartesia client if configured
@@ -145,15 +154,16 @@ async def startup():
     order_service = OrderService(order_repo)
     agent_service = AgentService(
         session_manager=session_manager,
-        groq_client=groq_client,
+        groq_client_1=groq_client_1,
+        groq_client_2=groq_client_2,
         verification_service=verification_service,
         order_service=order_service,
     )
-    rephraser = LLMRephraser(groq_client)
+    rephraser = LLMRephraser(groq_client_1)
     logger.info("✓ Conversation orchestration initialized")
 
     # Initialize legacy pipeline (for text simulation)
-    pipeline = VoicePipeline(groq_client, db_client, twilio_handler, agent_service, rephraser)
+    pipeline = VoicePipeline(groq_client_1, db_client, twilio_handler, agent_service, rephraser)
     logger.info("✓ Legacy voice pipeline initialized")
 
     pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
@@ -167,7 +177,7 @@ async def startup():
     else:
         # Initialize streaming pipeline
         streaming_pipeline = StreamingVoicePipeline(
-            groq_client,
+            groq_client_1,
             db_client,
             twilio_handler,
             agent_service,
@@ -186,8 +196,10 @@ async def startup():
 async def shutdown():
     """Clean up resources on server shutdown."""
     logger.info("Shutting down...")
-    if groq_client:
-        await groq_client.close()
+    if groq_client_1:
+        await groq_client_1.close()
+    if groq_client_2:
+        await groq_client_2.close()
     if db_client:
         await db_client.close()
     logger.info("Shutdown complete.")

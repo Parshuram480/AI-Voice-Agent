@@ -27,30 +27,43 @@ logger = logging.getLogger(__name__)
 
 SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "10"))
 
-AGENT_SYSTEM_PROMPT = """You are a strict, professional customer support voice agent for an order management system.
-You can ONLY answer order-related queries. You must REFUSE to answer any general knowledge questions, chit-chat, or off-topic queries.
-However, you MUST politely respond to standard conversational greetings (e.g. "Hello", "Hi") and audio checks (e.g. "Can you hear me?", "Am I audible?").
-Keep responses to 1-2 short sentences (spoken aloud over phone). No markdown, emojis, or formatting.
+LLM1_SYSTEM_PROMPT = """You are the first point of contact for an order system. Speak in 1-2 short sentences. No markdown, no emojis, no symbols. This is spoken over the phone.
 
-CRITICAL RULES:
-1. OFF-TOPIC REJECTION: If the user asks general knowledge (e.g., "Who is the president?", "What is 2+2?"), politely refuse and state you can only help with orders. (Note: standard greetings and audio checks are NOT off-topic).
-2. THIRD-PARTY REJECTION: You can only help the caller with their own account. If they ask to check a friend's status, refuse immediately.
-3. ALREADY VERIFIED USERS: If the system prompt indicates the user is "Verified Customer", DO NOT ask for their name or DOB again. Call `get_order_status` immediately.
-4. NEVER call `get_order_status` unless the user is already verified.
-5. NEVER include raw JSON, xml tags, or function syntax in spoken text. Use tool_calls mechanism.
-6. NEVER invent or hallucinate order data. Use tool results.
+TOPICS YOU ALLOW:
+- Greetings like "Hello" or "Hi" — reply politely and briefly.
+- Audio checks like "Can you hear me?" — reply "Yes, I can hear you."
+- Any requests about order status, tracking, or delivery.
 
-VERIFICATION FLOW (For Unverified Users):
-Step 1: Ask for their full name.
-Step 2: Ask for their date of birth (DOB). (If they give an incomplete date, ask for the year).
-Step 3: CONFIRMATION. Once you have both name and DOB, you MUST ask: "So your name is [Name] and your date of birth is [DOB], is that correct?" 
-Step 4: Wait for the user to say Yes or No. 
- - If Yes: Call `verify_user` tool immediately.
- - If No: Ask them which part is incorrect (Name or DOB). 
-    - If Name is wrong, ask ONLY for the corrected Name. Do NOT ask for DOB again.
-    - If DOB is wrong, ask ONLY for the corrected DOB. Do NOT ask for Name again.
-    - After collecting the correction, repeat Step 3 (Confirmation).
-- NEVER call `verify_user` without explicit "Yes" confirmation from the user.
+TOPICS YOU REFUSE:
+- General knowledge questions (weather, math, news, facts, people, etc). Say: "I can only help with order related questions."
+- Requests to check someone else's order (a friend, spouse, coworker, etc). Say: "I can only help with your own account."
+- NOTE: If the user says something like "tell me what is my orders status", DO NOT refuse them. Simply follow the VERIFICATION STEPS.
+
+TOOL RULES:
+- Never write JSON, tags, or function names out loud. Only use the tool_calls mechanism.
+- Never guess or make up order details (like costs or prices). If a detail isn't in the tool output, say you don't have that information.
+- Only call get_order_status if the user is verified.
+
+VERIFICATION STEPS (only for unverified users, do these in order):
+1. Ask: "Can I have your full name please?"
+2. Ask: "Can I have your date of birth please?"
+3. Once you have both name and date of birth, say: "So your name is [name] and your date of birth is [date], is that correct?"
+4. Wait for their confirmation.
+   - If they say Yes (or confirm it is correct): call verify_user now.
+   - If they say No, or say that something is wrong (e.g. "My name is wrong"): ask "Which one is wrong, your name or your date of birth?"
+     - If they say the name is wrong, ask only for the correct name.
+     - If they say the date of birth is wrong, ask only for the correct date of birth.
+     - After getting the correction, go back to step 3.
+- Never call verify_user unless the user has explicitly confirmed BOTH pieces of info in step 3.
+"""
+
+LLM2_SYSTEM_PROMPT = """You are a helpful customer support agent for an order system. 
+You are speaking over the phone. Speak in 1-2 short sentences. No markdown, no emojis, no symbols.
+You have just received information from a backend tool (e.g. order status or verification result).
+Your job is to read the tool output and formulate a polite, conversational reply to the user based on the tool result.
+If the tool says verification failed, explain why politely and ask for their information again.
+If the tool provides order details, summarize them briefly and politely.
+DO NOT invent information. DO NOT write JSON or tags out loud.
 """
 
 _TOOL_LEAK_PATTERNS = [
@@ -109,12 +122,14 @@ class AgentService:
     def __init__(
         self,
         session_manager: SessionManager,
-        groq_client: GroqClient,
+        groq_client_1: GroqClient,
+        groq_client_2: GroqClient,
         verification_service: VerificationService,
         order_service: OrderService,
     ) -> None:
         self._sessions = session_manager
-        self._groq = groq_client
+        self._groq_1 = groq_client_1
+        self._groq_2 = groq_client_2
         self._verification = verification_service
         self._orders = order_service
         self._memory = MemorySaver()
@@ -123,19 +138,21 @@ class AgentService:
     def _build_graph(self):
         graph = StateGraph(AgentState)
         
-        graph.add_node("agent", self._agent_node)
+        graph.add_node("llm1", self._llm1_node)
         graph.add_node("verify_tool", self._verify_tool_node)
+        graph.add_node("llm2", self._llm2_node)
         
-        graph.add_edge(START, "agent")
+        graph.add_edge(START, "llm1")
         
-        def route_agent(state: AgentState):
+        def route_llm1(state: AgentState):
             last_msg = state["messages"][-1]
             if last_msg["role"] == "assistant" and "tool_calls" in last_msg and last_msg["tool_calls"]:
                 return "verify_tool"
             return END
             
-        graph.add_conditional_edges("agent", route_agent, {"verify_tool": "verify_tool", END: END})
-        graph.add_edge("verify_tool", "agent")
+        graph.add_conditional_edges("llm1", route_llm1, {"verify_tool": "verify_tool", END: END})
+        graph.add_edge("verify_tool", "llm2")
+        graph.add_edge("llm2", END)
         
         return graph.compile(checkpointer=self._memory)
 
@@ -151,13 +168,13 @@ class AgentService:
             return "Let me look into that for you."
         return sanitized
 
-    async def _agent_node(self, state: AgentState, config: RunnableConfig) -> dict:
+    async def _llm1_node(self, state: AgentState, config: RunnableConfig) -> dict:
         turn_metrics = state.get("turn_metrics", {})
         if "timing_prompt_assembly_start" not in turn_metrics:
             turn_metrics["timing_prompt_assembly_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dynamic_prompt = f"{AGENT_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        dynamic_prompt = f"{LLM1_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -165,7 +182,8 @@ class AgentService:
                 "role": "system",
                 "content": (
                     f"CRITICAL STATE: You are ALREADY VERIFIED as {state['customer'].get('full_name', 'Unknown')}.\n"
-                    f"DO NOT ask for name or DOB. Use the `get_order_status` tool to answer their queries immediately."
+                    f"DO NOT ask for name or DOB. Use the `get_order_status` tool to answer their queries immediately.\n"
+                    f"IMPORTANT: If the user asks for specific order details (like order number or tracking) and you don't have them in your immediate context, you MUST call the `get_order_status` tool again to retrieve them. NEVER say you don't have the information or ask the user for their order number."
                 )
             })
 
@@ -174,9 +192,9 @@ class AgentService:
                 "role": "system",
                 "content": f"Here is a brief summary of the conversation so far: {state['summary']}"
             })
-            messages_to_send.extend(state["messages"][-4:])
+            messages_to_send.extend(state["messages"][-8:])
         else:
-            messages_to_send.extend(state["messages"][-4:])
+            messages_to_send.extend(state["messages"][-8:])
 
         use_tools = True
         llm_kwargs = dict(
@@ -228,7 +246,7 @@ class AgentService:
         mute_stream = False
         held_text = ""
         
-        async for chunk_type, chunk_data in self._groq.chat_completion_stream_with_tools(**llm_kwargs):
+        async for chunk_type, chunk_data in self._groq_1.chat_completion_stream_with_tools(**llm_kwargs):
             if chunk_type == "timing":
                 if chunk_data["event"] not in turn_metrics:
                     turn_metrics[chunk_data["event"]] = chunk_data["time"]
@@ -330,24 +348,216 @@ class AgentService:
         
         
         metrics = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
+            "llm1_prompt_tokens": prompt_tokens,
+            "llm1_completion_tokens": completion_tokens,
+            "llm1_ttft": ttft,
+            "llm1_generation_time": generation_time,
+            "llm1_total_time": total_time,
+            "tool_called": tool_called_name,
             "ttft": ttft,
             "generation_time": generation_time,
-            "total_time": total_time,
-            "streaming_started": streaming_started_str,
-            "streaming_finished": streaming_finished_str,
-            "tool_called": tool_called_name,
-            "second_llm": is_second_llm,
-            "history_tokens": history_tokens,
-            "summary_tokens": summary_tokens,
-            "current_user_tokens": current_user_tokens
+            "total_time": total_time
         }
         
         # Merge metrics into turn_metrics
         turn_metrics.update(metrics)
 
         return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_content), "turn_metrics": turn_metrics}
+
+    async def _llm2_node(self, state: AgentState, config: RunnableConfig) -> dict:
+        turn_metrics = state.get("turn_metrics", {})
+        if "timing_prompt_assembly_start" not in turn_metrics:
+            turn_metrics["timing_prompt_assembly_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        dynamic_prompt = f"{LLM2_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        messages_to_send = [{"role": "system", "content": dynamic_prompt}]
+
+        if state.get("verified") and state.get("customer"):
+            messages_to_send.append({
+                "role": "system",
+                "content": (
+                    f"CRITICAL STATE: You are ALREADY VERIFIED as {state['customer'].get('full_name', 'Unknown')}.\n"
+                    f"DO NOT ask for name or DOB. Use the `get_order_status` tool to answer their queries immediately."
+                )
+            })
+
+        if state.get("summary"):
+            messages_to_send.append({
+                "role": "system",
+                "content": f"Here is a brief summary of the conversation so far: {state['summary']}"
+            })
+            messages_to_send.extend(state["messages"][-8:])
+        else:
+            messages_to_send.extend(state["messages"][-8:])
+
+        use_tools = False
+        llm_kwargs = dict(
+            messages=messages_to_send,
+            temperature=0.3,
+        )
+        if use_tools:
+            llm_kwargs["tools"] = AGENT_TOOLS
+            llm_kwargs["tool_choice"] = "auto"
+
+        turn_metrics["timing_serialization_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        on_llm_token = config.get("configurable", {}).get("on_llm_token")
+        
+        reply_content = ""
+        tool_calls = []
+        
+        start_time = time.perf_counter()
+        first_token_time = None
+        
+        if "timing_prompt_assembly_end" not in turn_metrics:
+            turn_metrics["timing_prompt_assembly_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        else:
+            turn_metrics["timing_second_llm_send"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            
+        # --- LLM Metrics Tracking Variables ---
+        llm_usage = None
+        streaming_started_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        history_tokens = 0
+        summary_tokens = 0
+        current_user_tokens = 0
+        
+        # Estimate token lengths (roughly 4 chars = 1 token for basic counting)
+        for msg in messages_to_send:
+            content_len = len(str(msg.get("content", ""))) // 4
+            if msg.get("role") == "system":
+                summary_tokens += content_len
+            elif msg == messages_to_send[-1] and msg.get("role") == "user":
+                current_user_tokens += content_len
+            else:
+                history_tokens += content_len
+        
+        turn_metrics["timing_serialization_end"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        # ----------------------------------------
+        
+        # --- Industry Standard Stream Interceptor ---
+        # We buffer the first few characters to detect if the LLM is leaking a tool call
+        # as raw text. If it is, we mute the stream to TTS to prevent hallucinated code from being spoken.
+        stream_open = False
+        mute_stream = False
+        held_text = ""
+        
+        async for chunk_type, chunk_data in self._groq_2.chat_completion_stream_with_tools(**llm_kwargs):
+            if chunk_type == "timing":
+                if chunk_data["event"] not in turn_metrics:
+                    turn_metrics[chunk_data["event"]] = chunk_data["time"]
+                continue
+                
+            if chunk_type == "usage":
+                llm_usage = chunk_data
+                continue
+                
+            if not first_token_time:
+                first_token_time = time.perf_counter()
+                logger.info(f"LLM TTFT internally measured: {round(first_token_time - start_time, 4)}s")
+                tok_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                if "timing_first_token" not in turn_metrics:
+                    turn_metrics["timing_first_token"] = tok_time
+                else:
+                    turn_metrics["timing_second_first_token"] = tok_time
+            
+            if chunk_type == "content":
+                reply_content += chunk_data
+                
+                if mute_stream:
+                    continue
+                    
+                if not stream_open:
+                    held_text += chunk_data
+                    # Check for leaked tool call signatures in the first few characters
+                    text_lower = held_text.lower().strip()
+                    
+                    # If it definitely starts like a tool call, mute the stream permanently
+                    if text_lower.startswith("function=") or text_lower.startswith("<function") or text_lower.startswith("<tool") or text_lower.startswith('{"name":') or text_lower.startswith('{"function"'):
+                        mute_stream = True
+                        continue
+                        
+                    # If it starts with an ambiguous character ('f', '<', '{'), buffer up to 15 chars to be sure
+                    if text_lower.startswith("f") or text_lower.startswith("<") or text_lower.startswith("{"):
+                        if len(text_lower) < 15:
+                            continue  # Keep buffering
+                            
+                    # If we reach here, it's either not starting with a suspicious prefix, 
+                    # or it broke the pattern (e.g. "for your order..."). Flush the buffer and open the stream.
+                    stream_open = True
+                    if on_llm_token and held_text:
+                        try:
+                            on_llm_token(held_text)
+                        except Exception as e:
+                            logger.debug(f"on_llm_token failed: {e}")
+                    held_text = ""
+                else:
+                    if on_llm_token:
+                        try:
+                            on_llm_token(chunk_data)
+                        except Exception as e:
+                            logger.debug(f"on_llm_token failed: {e}")
+            elif chunk_type == "tool_calls":
+                tool_calls = chunk_data
+
+        streaming_finished_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        total_time = round(time.perf_counter() - start_time, 4)
+        logger.info(f"LLM Stream Finished. Total stream time: {total_time}s")
+
+        # CRITICAL FIX: Detect when LLM outputs tool-call syntax as TEXT 
+        # instead of using the structured tool_calls API.
+        # The llama-3.1-8b model sometimes does this, outputting patterns like:
+        #   function=verify_user>{"name": "...", "dob": "..."}
+        #   <function=get_order_status></function>
+        # We parse these and convert them into proper tool_calls.
+        if not tool_calls and reply_content:
+            rescued_calls = self._rescue_leaked_tool_calls(reply_content)
+            if rescued_calls:
+                tool_calls = rescued_calls
+                logger.warning(
+                    f"Rescued {len(rescued_calls)} leaked tool call(s) from LLM text output: "
+                    f"{[tc['function']['name'] for tc in rescued_calls]}"
+                )
+                reply_content = ""  # Clear the leaked text
+
+        assistant_msg = {"role": "assistant"}
+        if reply_content:
+            assistant_msg["content"] = reply_content
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+
+        # Compile and log metrics
+        ttft = round(first_token_time - start_time, 4) if first_token_time else 0.0
+        generation_time = round(time.perf_counter() - first_token_time, 4) if first_token_time else total_time
+        
+        prompt_tokens = getattr(llm_usage, 'prompt_tokens', 0) if llm_usage else (history_tokens + summary_tokens + current_user_tokens)
+        completion_tokens = getattr(llm_usage, 'completion_tokens', 0) if llm_usage else (len(reply_content) // 4)
+        
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        
+        # Check if it is the second LLM call (i.e. we are recovering from a tool call)
+        is_second_llm = "No"
+        if len(state.get("messages", [])) > 0 and state["messages"][-1].get("role") == "tool":
+            is_second_llm = "Yes"
+            
+        tool_called_name = tool_calls[0]["function"]["name"] if tool_calls else "None"
+        
+        
+        metrics = {
+            "llm2_prompt_tokens": prompt_tokens,
+            "llm2_completion_tokens": completion_tokens,
+            "llm2_ttft": ttft,
+            "llm2_generation_time": generation_time,
+            "llm2_total_time": total_time,
+            "ttft": ttft,
+            "generation_time": generation_time,
+            "total_time": total_time
+        }
+        
+        # Merge metrics into turn_metrics
+        turn_metrics.update(metrics)
+
+        return {"messages": [assistant_msg], "reply_text": self._sanitize_reply_text(reply_content), "turn_metrics": turn_metrics}
+
 
     @staticmethod
     def _rescue_leaked_tool_calls(text: str) -> list[dict]:
@@ -544,13 +754,19 @@ class AgentService:
                             "error": "SECURITY_VIOLATION",
                             "message": f"CRITICAL ERROR: This session is permanently locked to {existing_name}. You CANNOT verify {name}. You MUST explicitly tell the user: 'I can only provide information for {existing_name}.' Do NOT call any other tools."
                         })
-                        updates["messages"].append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "name": tc["function"]["name"],
-                            "content": result_str
+                    else:
+                        result_str = json.dumps({
+                            "verified": True,
+                            "message": f"You are already verified as {existing_name}. You do not need to verify again. You MUST explicitly tell the user they are already verified."
                         })
-                        continue
+                    
+                    updates["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "content": result_str
+                    })
+                    continue
                 
                 verification = await self._verification.verify(name, dob)
                 if verification.verified and verification.customer:
@@ -668,7 +884,7 @@ class AgentService:
         session.add_turn("assistant", reply_text, SESSION_MAX_TURNS)
         await self._sessions.update(session)
         
-        # --- Save history to folder (background — non-blocking) ---
+        # --- Save history to folder (background â€” non-blocking) ---
         async def _save_history_bg():
             try:
                 history_dir = os.path.join(os.getcwd(), "histories")
@@ -737,8 +953,8 @@ class AgentService:
             # Force the summarizer to use Groq, even if main LLM is OpenAI
             summary_groq = GroqClient(api_key=summary_api_key, provider="groq")
             
-            # We want to summarize everything EXCEPT the last 3 messages
-            messages_to_summarize = messages[:-3]
+            # We want to summarize everything EXCEPT the last 7 messages
+            messages_to_summarize = messages[:-7]
             
             text_to_summarize = ""
             for msg in messages_to_summarize:
@@ -755,7 +971,7 @@ class AgentService:
                 return
                 
             prompt = [
-                {"role": "system", "content": "You are a concise summarizer. Summarize the following conversation in at most 15 words. Focus on user intent, verified status, and key details (like names, orders). Be extremely concise."},
+                {"role": "system", "content": "Summarize the conversation. You MUST retain ALL specific order IDs (e.g., ORD-...), dates, tracking numbers, and verified names exactly as they appeared. Do not omit any IDs. Keep it under 50 words if possible."},
                 {"role": "user", "content": f"Conversation:\n{text_to_summarize}"}
             ]
             
@@ -763,7 +979,7 @@ class AgentService:
                 messages=prompt,
                 model=summary_model,
                 temperature=0.1,
-                max_tokens=30,
+                max_tokens=150,
                 stage="summarizer"
             )
             

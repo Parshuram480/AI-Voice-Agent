@@ -137,6 +137,10 @@ class DeepgramStreamingClient:
         self.transcript_buffer = ""
         self.finalize_event.clear()
 
+    def has_content(self) -> bool:
+        """Check if the buffer currently has any transcribed text."""
+        return bool(self.transcript_buffer.strip())
+
     async def close(self):
         self.running = False
         if self.keepalive_task:

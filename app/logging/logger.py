@@ -87,6 +87,23 @@ def log_history(session_id: str, state: dict) -> None:
 
 METRICS_DIR = "metrics"
 
+
+def _calculate_total_ttft(metrics: dict) -> str:
+    from datetime import datetime
+    try:
+        if 'timing_tool_start' in metrics and 'timing_tool_end' in metrics:
+            start = datetime.strptime(metrics['timing_tool_start'], "%H:%M:%S.%f")
+            end = datetime.strptime(metrics['timing_tool_end'], "%H:%M:%S.%f")
+            tool_dur = (end - start).total_seconds()
+            
+            llm1_tot = float(metrics.get('llm1_total_time', 0.0))
+            llm2_ttft = float(metrics.get('llm2_ttft', 0.0))
+            return f"{(llm1_tot + tool_dur + llm2_ttft):.4f}"
+        else:
+            return f"{float(metrics.get('llm1_ttft', 0.0)):.4f}"
+    except Exception as e:
+        return f"ERROR ({e})"
+
 def log_llm_metrics(session_id: str, metrics: dict) -> None:
     """Log LLM metrics to a session-specific file."""
     if not os.path.exists(METRICS_DIR):
@@ -107,21 +124,25 @@ def log_llm_metrics(session_id: str, metrics: dict) -> None:
         f"State Update End:            {metrics.get('timing_state_update_end', 'N/A')}",
         f"Serialization Start:         {metrics.get('timing_serialization_start', 'N/A')}",
         f"Serialization End:           {metrics.get('timing_serialization_end', 'N/A')}",
+        f"Calculated E2E TTFT (LLM1+Tool+LLM2): {_calculate_total_ttft(metrics)}s",
+        f"Actual Total Server Latency (Inc. VAD, STT, TTS): {metrics.get('ttfa_total_ms', 'N/A')}ms",
         "=========================",
-        "LLM CALL",
+        "LLM 1 (ROUTING)",
         "=========================",
-        f"Prompt Tokens: {metrics.get('prompt_tokens', 0)}",
-        f"Completion Tokens: {metrics.get('completion_tokens', 0)}",
-        f"TTFT: {metrics.get('ttft', '0.0')}s",
-        f"Generation Time: {metrics.get('generation_time', '0.0')}s",
-        f"Total: {metrics.get('total_time', '0.0')}s",
-        f"Streaming Started: {metrics.get('streaming_started', 'N/A')}",
-        f"Streaming Finished: {metrics.get('streaming_finished', 'N/A')}",
+        f"Prompt Tokens: {metrics.get('llm1_prompt_tokens', 0)}",
+        f"Completion Tokens: {metrics.get('llm1_completion_tokens', 0)}",
+        f"TTFT: {metrics.get('llm1_ttft', '0.0')}s",
+        f"Generation Time: {metrics.get('llm1_generation_time', '0.0')}s",
+        f"Total Time: {metrics.get('llm1_total_time', '0.0')}s",
         f"Tool Called: {metrics.get('tool_called', 'None')}",
-        f"Second LLM: {metrics.get('second_llm', 'No')}",
-        f"History Tokens: {metrics.get('history_tokens', 0)}",
-        f"Summary Tokens: {metrics.get('summary_tokens', 0)}",
-        f"Current User Tokens: {metrics.get('current_user_tokens', 0)}",
+        "=========================",
+        "LLM 2 (SYNTHESIS)",
+        "=========================",
+        f"Prompt Tokens: {metrics.get('llm2_prompt_tokens', 0)}",
+        f"Completion Tokens: {metrics.get('llm2_completion_tokens', 0)}",
+        f"TTFT: {metrics.get('llm2_ttft', '0.0')}s",
+        f"Generation Time: {metrics.get('llm2_generation_time', '0.0')}s",
+        f"Total Time: {metrics.get('llm2_total_time', '0.0')}s",
         "",
         f"User finished:               {metrics.get('timing_user_finished', 'N/A')}",
         "",

@@ -28,7 +28,7 @@ async def test_ws_tts():
     # 1. Send the request via the open websocket (exactly how streaming_pipeline.py does it)
     voice = os.getenv("CARTESIA_VOICE_ID", "5ee9feff-1265-424a-9d7f-8e4d431a12c7")
     ws_stream = await ws.send(
-        model_id="sonic-3",
+        model_id="sonic-3.5",
         transcript=sentence,
         voice={"mode": "id", "id": voice},
         output_format={
@@ -68,7 +68,7 @@ async def test_ws_tts():
     
     t1 = time.time()
     ws_stream2 = await ws.send(
-        model_id="sonic-3",
+        model_id="sonic-3.5",
         transcript=sentence2,
         voice={"mode": "id", "id": voice},
         output_format={

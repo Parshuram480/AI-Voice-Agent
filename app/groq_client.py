@@ -41,14 +41,14 @@ class GroqClient:
     STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
     
     if LLM_PROVIDER == "openai":
-        LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+        DEFAULT_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
     else:
-        LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+        DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
         
     TTS_MODEL = os.getenv("TTS_MODEL", "canopylabs/orpheus-v1-english")
     TTS_VOICE = os.getenv("TTS_VOICE", "hannah")
 
-    def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None, default_model: Optional[str] = None):
         """
         Initialize the AI client.
         """
@@ -57,6 +57,7 @@ class GroqClient:
             logger.warning("GROQ_API_KEY is not set — Groq API calls (STT/TTS) will fail.")
 
         self.provider = provider or LLM_PROVIDER
+        self.llm_model = default_model or self.DEFAULT_LLM_MODEL
         
         # Official SDK client for Groq (STT/TTS)
         self._client = AsyncGroq(api_key=self._groq_api_key)
@@ -169,7 +170,7 @@ class GroqClient:
         Returns:
             The assistant's reply as a string, or the full response object if return_full_response is True.
         """
-        model = model or self.LLM_MODEL
+        model = model or self.llm_model
         stage_info = f" [{stage}]" if stage else ""
         logger.info(f"LLM{stage_info}: Calling {model} with {len(messages)} messages")
 
@@ -233,7 +234,7 @@ class GroqClient:
         Yields:
             Token strings, one at a time.
         """
-        model = model or self.LLM_MODEL
+        model = model or self.llm_model
         logger.info(f"LLM stream-tokens: {model}, {len(messages)} messages")
 
         stream = await self._llm_client.chat.completions.create(
@@ -260,7 +261,7 @@ class GroqClient:
         Stream chat completion yielding (type, data).
         type can be 'content' (yields strings) or 'tool_calls' (yields final tool calls list).
         """
-        model = model or self.LLM_MODEL
+        model = model or self.llm_model
         logger.info(f"LLM stream-with-tools: {model}, {len(messages)} messages")
 
         http_sent_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
