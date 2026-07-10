@@ -505,6 +505,7 @@ class StreamingVoicePipeline:
         """
         audio_buffer = bytearray()
         speech_started = False
+        barge_in_triggered = False
         silence_ms = 0.0
         speech_ms = 0.0
         t_start = time.perf_counter()
@@ -583,18 +584,6 @@ class StreamingVoicePipeline:
                         if self.deepgram:
                             await self.deepgram.send_audio(bytes(audio_buffer))
                         
-                        if interruption_event:
-                            interruption_event.set()
-                            
-                        # INSTANT BARGE-IN FIX:
-                        # Even if the pipeline isn't actively waiting for `interruption_event`
-                        # because TTS generation finished early, Twilio might still be playing audio.
-                        # We must blindly clear the Twilio stream the exact millisecond speech is detected.
-                        twilio_ws = kwargs.get("twilio_ws")
-                        stream_sid = kwargs.get("stream_sid")
-                        if twilio_ws and stream_sid and self.twilio:
-                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
-
                         if on_phase_change:
                             on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
                         log_pipeline_event(
@@ -621,6 +610,15 @@ class StreamingVoicePipeline:
                     else:
                         silence_ms = 0.0
                         speech_ms += chunk_ms
+
+                    if speech_started and not barge_in_triggered and speech_ms >= min_speech_ms:
+                        barge_in_triggered = True
+                        if interruption_event:
+                            interruption_event.set()
+                        twilio_ws = kwargs.get("twilio_ws")
+                        stream_sid = kwargs.get("stream_sid")
+                        if twilio_ws and stream_sid and self.twilio:
+                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
 
                     now = time.perf_counter()
                     if now - last_vad_log >= 1.0:
@@ -666,6 +664,7 @@ class StreamingVoicePipeline:
                             if self.deepgram:
                                 _ = await self.deepgram.get_transcript()
                             speech_started = False
+                            barge_in_triggered = False
                             speech_ms = 0.0
                             silence_ms = 0.0
                             audio_buffer.clear()

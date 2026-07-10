@@ -152,6 +152,7 @@ class GeminiLivePipeline:
                     frame_gen = FrameGenerator(frame_duration_ms=30, sample_rate=16000, sample_width=2)
                     
                     speech_active = False
+                    consecutive_speech_ms = 0
                     consecutive_silence_ms = 0
                     vad_silence_threshold = 500  # ms to consider speech "done" to allow another barge-in
                     
@@ -173,21 +174,22 @@ class GeminiLivePipeline:
                             }
                             await session._ws.send(json.dumps(msg))
                             
-                            # Local VAD logic for instant Twilio barge-in
+                            # Local VAD logic for Twilio barge-in (requires 250ms speech debounce)
                             if twilio_ws and stream_sid:
                                 frame_gen.add_data(chunk)
                                 for frame in frame_gen.get_frames():
                                     is_speech = vad.is_speech(frame)
                                     if is_speech:
-                                        if not speech_active:
-                                            # INSTANT BARGE IN DETECTED!
+                                        consecutive_speech_ms += 30
+                                        consecutive_silence_ms = 0
+                                        if not speech_active and consecutive_speech_ms >= 250:
+                                            # BARGE IN DETECTED!
                                             logger.info(f"[{resolved_session_id}] GeminiLive local VAD detected barge-in! Clearing Twilio.")
                                             clear_payload = {"event": "clear", "streamSid": stream_sid}
-                                            # Fire and forget clear command
                                             asyncio.create_task(twilio_ws.send_json(clear_payload))
                                             speech_active = True
-                                        consecutive_silence_ms = 0
                                     else:
+                                        consecutive_speech_ms = 0
                                         if speech_active:
                                             consecutive_silence_ms += 30
                                             if consecutive_silence_ms >= vad_silence_threshold:
