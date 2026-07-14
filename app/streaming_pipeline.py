@@ -664,7 +664,7 @@ class StreamingVoicePipeline:
                         else:
                             # False alarm (short click/pop), reset VAD state
                             if self.deepgram:
-                                _ = await self.deepgram.get_transcript()
+                                _ = await self.deepgram.flush_and_read(timeout=0.1)
                             speech_started = False
                             speech_ms = 0.0
                             silence_ms = 0.0

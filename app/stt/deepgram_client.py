@@ -16,7 +16,7 @@ class DeepgramStreamingClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         # For 16kHz, 16-bit mono PCM (which is what VAD outputs)
-        self.url = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&model=nova-3&smart_format=true"
+        self.url = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&model=nova-2&smart_format=true"
         self.ws = None
         self.running = False
         self.transcript_buffer = ""
@@ -60,6 +60,12 @@ class DeepgramStreamingClient:
                     # Deepgram usually sends speech_final or is_final on flush
                     # Let's check for anything that looks like a flush or endpoint
                     if data.get("from_finalize") or data.get("speech_final") or data.get("is_final"):
+                        self.finalize_event.set()
+                    # If it's a completely empty result after Finalize, it might not have those flags, 
+                    # but it's a Results object with no alternatives. 
+                    elif not alternatives and data.get("type") == "Results":
+                        # We don't know for sure it's from Finalize, but an empty result
+                        # is a good hint we should unblock.
                         self.finalize_event.set()
                         
                 elif data.get("type") == "Metadata":
