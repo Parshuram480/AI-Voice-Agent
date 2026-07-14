@@ -229,6 +229,36 @@ class StreamingVoicePipeline:
         _set_phase(ConversationPhase.LISTENING)
         log_pipeline_event("session_start", session_id=resolved_session_id)
 
+        # --- Speak initial introduction when call session starts ---
+        if on_tts_audio:
+            try:
+                intro_sentence = (
+                    "Hello! I'm your customer support voice agent for order management. "
+                    "I can help you check your order status or track packages. How can I assist you today?"
+                )
+                logger.info(f"[{resolved_session_id}] Speaking initial introduction: '{intro_sentence}'")
+                _set_phase(ConversationPhase.SPEAKING)
+                if on_stage:
+                    on_stage("tts", "running", "Speaking introduction...")
+
+                dummy_result = {"audio_bytes": None}
+                dummy_timings = {}
+                t0 = time.perf_counter()
+
+                await self._tts_sentence(
+                    intro_sentence,
+                    dummy_result,
+                    dummy_timings,
+                    t0,
+                    on_stage or (lambda *args: None),
+                    on_tts_audio,
+                    cartesia_ws=kwargs.get("cartesia_ws"),
+                )
+            except Exception as intro_err:
+                logger.warning(f"[{resolved_session_id}] Failed to speak initial introduction: {intro_err}")
+            finally:
+                _set_phase(ConversationPhase.LISTENING)
+
         pending_text_context = ""
 
         # We start with listening for the first utterance

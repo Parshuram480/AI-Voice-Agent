@@ -136,6 +136,17 @@ class GeminiLivePipeline:
             async with self.client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
+                # Automatically trigger Gemini Live to introduce itself out loud when call session starts
+                try:
+                    intro_prompt = (
+                        "Hello! Please introduce yourself right now out loud in 1-2 short sentences. "
+                        "State that you are the customer support agent for order management and can help check order status or track packages. "
+                        "Ask how you can help today."
+                    )
+                    await session.send(input=intro_prompt, end_of_turn=True)
+                except Exception as intro_err:
+                    logger.warning(f"Failed to send intro prompt to Gemini Live: {intro_err}")
+                
                 # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
                 async def sender_task():
                     import os
