@@ -19,6 +19,7 @@ from app.logging.logger import log_event
 from app.services.agent_service import AgentService
 from app.twilio_handler import TwilioHandler
 from app.audio_utils import build_wav, resample_to_16khz, mulaw_to_pcm
+from app.channels.base import ChannelAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class VoicePipeline:
         audio_bytes: bytes,
         call_sid: Optional[str] = None,
         is_mulaw: bool = True,
+        channel_adapter: Optional[ChannelAdapter] = None,
     ) -> dict:
         """
         Run the full pipeline on raw audio input.
@@ -285,8 +287,10 @@ class VoicePipeline:
 
             logger.info(f"TTS audio saved: {filepath} ({len(audio_bytes)} bytes)")
 
-            # If this is a real Twilio call, redirect it to play the audio
-            if call_sid:
+            # If this is a real call, redirect it to play the audio via channel adapter
+            if channel_adapter:
+                await channel_adapter.send_audio_url(audio_url)
+            elif call_sid and self.twilio:
                 await self.twilio.update_call_with_audio(call_sid, audio_url)
 
         except Exception as e:

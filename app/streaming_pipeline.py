@@ -23,6 +23,7 @@ from datetime import datetime, UTC
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
+from app.channels.base import ChannelAdapter
 
 from app.audio_utils import (
     build_wav,
@@ -411,11 +412,15 @@ class StreamingVoicePipeline:
                 else:
                     # True barge-in during TTS (audio has been sent)
 
-                    # NEW: Barge-in handling for Twilio
-                    twilio_ws = kwargs.get("twilio_ws")
-                    stream_sid = kwargs.get("stream_sid")
-                    if twilio_ws and stream_sid and self.twilio:
-                        await self.twilio.clear_stream(twilio_ws, stream_sid)
+                    # NEW: Barge-in handling using ChannelAdapter or Twilio fallback
+                    channel_adapter = kwargs.get("channel_adapter")
+                    if channel_adapter:
+                        await channel_adapter.send_clear()
+                    else:
+                        twilio_ws = kwargs.get("twilio_ws")
+                        stream_sid = kwargs.get("stream_sid")
+                        if twilio_ws and stream_sid and self.twilio:
+                            await self.twilio.clear_stream(twilio_ws, stream_sid)
 
                 if barge_in_event and barge_in_event.is_set():
                     barge_in_event.clear()
@@ -615,10 +620,14 @@ class StreamingVoicePipeline:
                         barge_in_triggered = True
                         if interruption_event:
                             interruption_event.set()
-                        twilio_ws = kwargs.get("twilio_ws")
-                        stream_sid = kwargs.get("stream_sid")
-                        if twilio_ws and stream_sid and self.twilio:
-                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
+                        channel_adapter = kwargs.get("channel_adapter")
+                        if channel_adapter:
+                            asyncio.create_task(channel_adapter.send_clear())
+                        else:
+                            twilio_ws = kwargs.get("twilio_ws")
+                            stream_sid = kwargs.get("stream_sid")
+                            if twilio_ws and stream_sid and self.twilio:
+                                asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
 
                     now = time.perf_counter()
                     if now - last_vad_log >= 1.0:

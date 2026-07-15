@@ -12,6 +12,7 @@ Endpoints:
 """
 
 import asyncio
+from typing import Optional
 import base64
 import json
 import logging
@@ -33,6 +34,7 @@ from app.api import create_api_router
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.twilio_handler import TwilioHandler
+from app.channels.twilio_adapter import TwilioChannelAdapter
 from app.pipeline import VoicePipeline
 from app.streaming_pipeline import StreamingVoicePipeline, _DONE
 from app.intents import IntentRouter, SlotFiller
@@ -191,6 +193,12 @@ async def startup():
     logger.info(f"  Listening on port: {SERVER_PORT}")
     logger.info("=" * 60)
 
+    # Start LiveKit worker in background if credentials are set
+    if os.getenv("LIVEKIT_URL") and os.getenv("LIVEKIT_API_KEY") and os.getenv("LIVEKIT_API_SECRET"):
+        from app.livekit_agent import start_livekit_worker
+        asyncio.create_task(start_livekit_worker())
+        logger.info("✓ LiveKit agent worker started in background")
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -217,6 +225,53 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 # =============================================================================
 # Routes
 # =============================================================================
+
+# ---- LiveKit Token Endpoint ----
+@app.get("/api/livekit/token")
+async def livekit_token(session_id: Optional[str] = None):
+    """
+    Generate an access token for a LiveKit WebRTC room session.
+    """
+    from livekit import api
+    
+    room_name = session_id or f"room-{uuid.uuid4().hex[:8]}"
+    identity = f"user-{uuid.uuid4().hex[:6]}"
+    
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    livekit_url = os.getenv("LIVEKIT_URL")
+    
+    if not all([api_key, api_secret, livekit_url]):
+        return Response(
+            content=json.dumps({"error": "LiveKit credentials not configured"}),
+            status_code=500,
+            media_type="application/json"
+        )
+        
+    try:
+        token = api.AccessToken(api_key, api_secret) \
+            .with_identity(identity) \
+            .with_name(identity) \
+            .with_grants(api.VideoGrants(
+                room_join=True,
+                room=room_name,
+            ))
+        
+        jwt_token = token.to_jwt()
+        return {
+            "token": jwt_token,
+            "url": livekit_url,
+            "room": room_name,
+            "identity": identity
+        }
+    except Exception as e:
+        logger.exception("Failed to generate LiveKit token")
+        return Response(
+            content=json.dumps({"error": str(e)}),
+            status_code=500,
+            media_type="application/json"
+        )
+
 
 # ---- Local Testing UI ----
 @app.get("/", response_class=HTMLResponse)
@@ -266,56 +321,17 @@ async def audio_stream(websocket: WebSocket):
     stream_sid = None
     call_sid = None
     audio_queue: asyncio.Queue = asyncio.Queue()
-    outbound_audio_queue: asyncio.Queue = asyncio.Queue()
     pipeline_task = None
     use_stream_audio_out = TWILIO_STREAM_AUDIO_OUT
     stream_audio_sent = False
-    outbound_task = None
-
-    async def _outbound_audio_loop():
-        nonlocal stream_audio_sent
-        resample_state = None
-        while True:
-            wav_bytes = await outbound_audio_queue.get()
-            if wav_bytes is None:
-                break
-                
-            if not stream_sid:
-                continue
-
-            try:
-                pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
-                if not pcm_bytes:
-                    continue
-
-                if sample_width != 2:
-                    pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
-                    sample_width = 2
-
-                pcm_bytes = to_mono(pcm_bytes, sample_width=sample_width, channels=channels)
-                if sample_rate != 8000:
-                    # Maintain state across chunks to prevent static/clicks
-                    pcm_bytes, resample_state = audioop.ratecv(
-                        pcm_bytes,
-                        sample_width,
-                        1,
-                        sample_rate,
-                        8000,
-                        resample_state,
-                    )
-
-                ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
-                if ok:
-                    stream_audio_sent = True
-            except Exception as e:
-                logger.error(f"CRITICAL ERROR in _outbound_audio_loop: {e}")
-                import traceback
-                traceback.print_exc()
+    twilio_adapter = None
 
     def on_tts_audio(audio_bytes: bytes):
-        if not use_stream_audio_out:
+        nonlocal stream_audio_sent
+        if not use_stream_audio_out or not twilio_adapter:
             return
-        outbound_audio_queue.put_nowait(audio_bytes)
+        asyncio.create_task(twilio_adapter.send_audio(audio_bytes))
+        stream_audio_sent = True
 
     try:
         while True:
@@ -331,8 +347,13 @@ async def audio_stream(websocket: WebSocket):
                 call_sid = data.get("start", {}).get("callSid")
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
 
-                if use_stream_audio_out and not outbound_task:
-                    outbound_task = asyncio.create_task(_outbound_audio_loop())
+                # Instantiate adapter
+                twilio_adapter = TwilioChannelAdapter(
+                    twilio_handler=twilio_handler,
+                    websocket=websocket,
+                    stream_sid=stream_sid,
+                    call_sid=call_sid
+                )
 
                 # Launch the streaming pipeline in the background
                 pipeline_task = asyncio.create_task(
@@ -342,8 +363,7 @@ async def audio_stream(websocket: WebSocket):
                         on_tts_audio=on_tts_audio if use_stream_audio_out else None,
                         update_call_with_audio=not use_stream_audio_out,
                         session_id=call_sid,
-                        twilio_ws=websocket,
-                        stream_sid=stream_sid,
+                        channel_adapter=twilio_adapter,
                     )
                 )
 
@@ -360,17 +380,14 @@ async def audio_stream(websocket: WebSocket):
                 logger.info("Twilio stream stopped")
                 # Signal end-of-audio to the pipeline
                 await audio_queue.put(_DONE)
-                outbound_audio_queue.put_nowait(None)
                 break
 
     except WebSocketDisconnect:
         logger.info("Twilio audio stream WebSocket disconnected")
         await audio_queue.put(_DONE)
-        outbound_audio_queue.put_nowait(None)
     except Exception as e:
         logger.exception(f"Twilio audio stream error: {e}")
         await audio_queue.put(_DONE)
-        outbound_audio_queue.put_nowait(None)
     finally:
         # Wait for the pipeline to complete
         if pipeline_task:

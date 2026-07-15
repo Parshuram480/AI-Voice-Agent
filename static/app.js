@@ -17,6 +17,9 @@
 const btnMic = document.getElementById('btn-mic');
 const btnEndSession = document.getElementById('btn-end-session');
 const btnSessionReset = document.getElementById('btn-session-reset');
+const btnStartWebRTC = document.getElementById('btn-start-webrtc');
+
+let livekitRoom = null;
 
 const statusBadge = document.getElementById('status-badge');
 const stagesContainer = document.getElementById('stages-container');
@@ -318,6 +321,10 @@ btnMic.addEventListener('click', async () => {
   await startSession();
 });
 
+btnStartWebRTC.addEventListener('click', async () => {
+  await startWebRTCSession();
+});
+
 btnEndSession.addEventListener('click', () => {
   endSession();
 });
@@ -325,6 +332,81 @@ btnEndSession.addEventListener('click', () => {
 btnSessionReset.addEventListener('click', () => {
   resetSession();
 });
+
+async function startWebRTCSession() {
+  try {
+    addLog('system', 'Generating WebRTC token...');
+    const sessId = sessionId || `room-${Math.random().toString(16).slice(2, 10)}`;
+    
+    const resp = await fetch(`/api/livekit/token?session_id=${encodeURIComponent(sessId)}`);
+    if (!resp.ok) {
+      const errJson = await resp.json();
+      throw new Error(errJson.error || 'Failed to fetch token');
+    }
+    
+    const data = await resp.json();
+    const token = data.token;
+    const wsUrl = data.url;
+    const roomName = data.room;
+    
+    addLog('system', `Connecting to LiveKit Room: ${roomName}...`);
+    
+    const lkSDK = window.LivekitClient || window.LiveKitClient;
+    if (!lkSDK) {
+      throw new Error('LiveKit Client SDK not loaded');
+    }
+    const { Room, RoomEvent, Track } = lkSDK;
+    livekitRoom = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+    });
+    
+    livekitRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        addLog('system', 'Agent audio track subscribed. Attaching player...');
+        const element = track.attach();
+        document.body.appendChild(element);
+      }
+    });
+    
+    livekitRoom.on(RoomEvent.Disconnected, (reason) => {
+      addLog('system', `Disconnected from WebRTC room: ${reason}`);
+      endWebRTCSession();
+    });
+    
+    await livekitRoom.connect(wsUrl, token);
+    addLog('system', 'Connected to WebRTC room! Publishing mic track...');
+    
+    await livekitRoom.localParticipant.setMicrophoneEnabled(true);
+    addLog('system', 'Microphone track published! Speak naturally...');
+    
+    isSessionActive = true;
+    btnStartWebRTC.disabled = true;
+    btnEndSession.disabled = false;
+    btnMic.disabled = true;
+    setStatus('active', 'WebRTC Session');
+    setPhase('LISTENING');
+    
+  } catch (err) {
+    addLog('error', `WebRTC error: ${err.message}`);
+    setStatus('error', 'WebRTC Error');
+    endWebRTCSession();
+  }
+}
+
+async function endWebRTCSession() {
+  if (livekitRoom) {
+    addLog('system', 'Disconnecting WebRTC room...');
+    await livekitRoom.disconnect();
+    livekitRoom = null;
+  }
+  isSessionActive = false;
+  btnStartWebRTC.disabled = false;
+  btnEndSession.disabled = true;
+  btnMic.disabled = false;
+  setStatus('idle', 'Session ended');
+  setPhase('ENDED');
+}
 
 async function startSession() {
   try {
@@ -413,6 +495,10 @@ async function startSession() {
 }
 
 function endSession() {
+  if (livekitRoom) {
+    endWebRTCSession();
+    return;
+  }
   if (!isSessionActive) return;
 
   isSessionActive = false;

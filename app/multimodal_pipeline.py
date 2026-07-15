@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Callable, Optional
+from app.channels.base import ChannelAdapter
 
 from google.genai import types
 
@@ -174,8 +175,9 @@ class GeminiLivePipeline:
                             }
                             await session._ws.send(json.dumps(msg))
                             
-                            # Local VAD logic for Twilio barge-in (requires 250ms speech debounce)
-                            if twilio_ws and stream_sid:
+                            # Local VAD logic for barge-in (requires 250ms speech debounce)
+                            channel_adapter = kwargs.get("channel_adapter")
+                            if channel_adapter or (twilio_ws and stream_sid):
                                 frame_gen.add_data(chunk)
                                 for frame in frame_gen.get_frames():
                                     is_speech = vad.is_speech(frame)
@@ -184,9 +186,12 @@ class GeminiLivePipeline:
                                         consecutive_silence_ms = 0
                                         if not speech_active and consecutive_speech_ms >= 250:
                                             # BARGE IN DETECTED!
-                                            logger.info(f"[{resolved_session_id}] GeminiLive local VAD detected barge-in! Clearing Twilio.")
-                                            clear_payload = {"event": "clear", "streamSid": stream_sid}
-                                            asyncio.create_task(twilio_ws.send_json(clear_payload))
+                                            logger.info(f"[{resolved_session_id}] GeminiLive local VAD detected barge-in!")
+                                            if channel_adapter:
+                                                asyncio.create_task(channel_adapter.send_clear())
+                                            else:
+                                                clear_payload = {"event": "clear", "streamSid": stream_sid}
+                                                asyncio.create_task(twilio_ws.send_json(clear_payload))
                                             speech_active = True
                                     else:
                                         consecutive_speech_ms = 0
