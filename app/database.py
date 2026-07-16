@@ -35,6 +35,9 @@ except ImportError:
 # =============================================================================
 # In-memory fallback data (mirrors sql/init.sql sample data)
 # =============================================================================
+_FALLBACK_CALL_LOGS = []
+
+
 _FALLBACK_CUSTOMERS = [
     {
         "id": 1,
@@ -403,3 +406,66 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"DB error in soft_delete_order: {e}")
             return False
+
+    # -------------------------------------------------------------------------
+    # Call Logs
+    # -------------------------------------------------------------------------
+    async def save_call_log(self, log_data: dict) -> bool:
+        """
+        Save call analytics and history.
+        """
+        if self._use_fallback:
+            _FALLBACK_CALL_LOGS.append(log_data)
+            return True
+
+        query = """
+            INSERT INTO call_logs (
+                session_id, user_id, pipeline_mode, history, summary, intent,
+                total_input_tokens, total_output_tokens, total_input_output_tokens,
+                summary_input_tokens, summary_output_tokens, summary_input_output_tokens,
+                total_tokens, average_latency
+            ) VALUES (
+                $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+            )
+            ON CONFLICT (session_id) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                pipeline_mode = EXCLUDED.pipeline_mode,
+                history = EXCLUDED.history,
+                summary = EXCLUDED.summary,
+                intent = EXCLUDED.intent,
+                total_input_tokens = EXCLUDED.total_input_tokens,
+                total_output_tokens = EXCLUDED.total_output_tokens,
+                total_input_output_tokens = EXCLUDED.total_input_output_tokens,
+                summary_input_tokens = EXCLUDED.summary_input_tokens,
+                summary_output_tokens = EXCLUDED.summary_output_tokens,
+                summary_input_output_tokens = EXCLUDED.summary_input_output_tokens,
+                total_tokens = EXCLUDED.total_tokens,
+                average_latency = EXCLUDED.average_latency;
+        """
+        try:
+            import json
+            history_json = json.dumps(log_data.get("history", []))
+            
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    query,
+                    log_data.get("session_id"),
+                    log_data.get("user_id"),
+                    log_data.get("pipeline_mode"),
+                    history_json,
+                    log_data.get("summary"),
+                    log_data.get("intent"),
+                    log_data.get("total_input_tokens", 0),
+                    log_data.get("total_output_tokens", 0),
+                    log_data.get("total_input_output_tokens", 0),
+                    log_data.get("summary_input_tokens", 0),
+                    log_data.get("summary_output_tokens", 0),
+                    log_data.get("summary_input_output_tokens", 0),
+                    log_data.get("total_tokens", 0),
+                    log_data.get("average_latency", 0.0)
+                )
+            return True
+        except Exception as e:
+            logger.error(f"DB error in save_call_log: {e}")
+            return False
+

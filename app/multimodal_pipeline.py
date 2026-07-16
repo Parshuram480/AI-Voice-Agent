@@ -13,6 +13,8 @@ from typing import Any, Callable, Optional
 from google.genai import types
 
 from app.audio_utils import build_wav, FrameGenerator, VoiceActivityDetector
+from app.database import DatabaseClient
+from app.services.analytics_service import AnalyticsService
 from app.gemini_live_client import GeminiLiveClient
 from app.logging.logger import log_pipeline_event, log_transcript, log_history
 
@@ -40,8 +42,9 @@ class GeminiLivePipeline:
     Multimodal pipeline using Gemini Live API.
     Replaces StreamingVoicePipeline when PIPELINE_MODE=multimodal.
     """
-    def __init__(self, gemini_client: GeminiLiveClient):
+    def __init__(self, gemini_client: GeminiLiveClient, db_client: DatabaseClient):
         self.client = gemini_client
+        self.analytics = AnalyticsService(db_client)
 
     async def process_stream(
         self,
@@ -108,6 +111,10 @@ class GeminiLivePipeline:
         resolved_session_id = session_id or f"mic-{int(time.time())}"
         turn_index = 1
         all_timings: list[dict] = []
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+        user_finished_speaking_time = None
         
         # State for tools
         state = {
@@ -194,6 +201,8 @@ class GeminiLivePipeline:
                                             consecutive_silence_ms += 30
                                             if consecutive_silence_ms >= vad_silence_threshold:
                                                 speech_active = False  # Reset so we can detect the next interruption
+                                                nonlocal user_finished_speaking_time
+                                                user_finished_speaking_time = time.perf_counter()
                             
                         except Exception as e:
                             logger.error(f"Sender task error: {e}")
@@ -219,8 +228,32 @@ class GeminiLivePipeline:
                         
                         async for response in _receive_loop():
                             
+                            # Intercept Usage Metadata natively from Gemini Live stream
+                            if getattr(response, "usage_metadata", None):
+                                nonlocal total_input_tokens, total_output_tokens
+                                um = response.usage_metadata
+                                _in = getattr(um, "prompt_token_count", 0) or 0
+                                _out = getattr(um, "response_token_count", 0) or 0
+                                if _in > 0:
+                                    total_input_tokens += _in
+                                if _out > 0:
+                                    total_output_tokens += _out
+                                logger.info(f"[{resolved_session_id}] UsageMetadata: in={total_input_tokens}, out={total_output_tokens}")
+                            
                             # 1. Handle Server Content (Transcripts and Audio)
                             if response.server_content is not None:
+                                
+                                # Capture native input transcription (what user said)
+                                if getattr(response.server_content, "input_transcription", None):
+                                    t_text = response.server_content.input_transcription.text
+                                    if t_text:
+                                        current_user_text += t_text
+                                
+                                # Capture native output transcription (what agent said)
+                                if getattr(response.server_content, "output_transcription", None):
+                                    t_text = response.server_content.output_transcription.text
+                                    if t_text:
+                                        current_agent_text += t_text
                                 
                                 # A. Check for Turn Complete (End of agent's utterance)
                                 if response.server_content.turn_complete:
@@ -309,7 +342,12 @@ class GeminiLivePipeline:
                                         if part.inline_data:
                                             if not is_speaking:
                                                 # First audio byte arrived
-                                                gemini_first_audio_ms = (time.perf_counter() - turn_start_time) * 1000
+                                                nonlocal user_finished_speaking_time
+                                                if user_finished_speaking_time:
+                                                    gemini_first_audio_ms = (time.perf_counter() - user_finished_speaking_time) * 1000
+                                                    user_finished_speaking_time = None
+                                                else:
+                                                    gemini_first_audio_ms = (time.perf_counter() - turn_start_time) * 1000
                                                 is_speaking = True
                                                 _set_phase("SPEAKING")
                                                 
@@ -360,9 +398,13 @@ class GeminiLivePipeline:
                 sender = asyncio.create_task(sender_task())
                 receiver = asyncio.create_task(receiver_task())
                 
-                # If a barge-in event is triggered, we can't easily interrupt Gemini's current WSS stream
-                # without cancelling the session. But we can monitor the queue closure.
-                await asyncio.gather(sender, receiver)
+                done, pending = await asyncio.wait(
+                    [sender, receiver],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                for task in pending:
+                    task.cancel()
                 
         except Exception as e:
             logger.error(f"Multimodal pipeline failed: {e}")
@@ -372,5 +414,35 @@ class GeminiLivePipeline:
             
             # Save final history
             log_history(resolved_session_id, state)
+            
+
+                    
+            avg_latency = 0.0
+            valid_latency_turns = 0
+            if all_timings:
+                total_latency = 0.0
+                for t in all_timings:
+                    latency = t.get("ttfa_total_ms", 0.0)
+                    if latency > 0:
+                        total_latency += latency / 1000.0
+                        valid_latency_turns += 1
+                
+                avg_latency = round(total_latency / valid_latency_turns, 2) if valid_latency_turns > 0 else 0.0
+                
+            user_id = state.get("customer", {}).get("id") if state.get("customer") else None
+            
+            history = state.get("messages", [])
+            
+            asyncio.create_task(
+                self.analytics.process_call_analytics(
+                    session_id=resolved_session_id,
+                    pipeline_mode="multimodal",
+                    history=history,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                    average_latency=avg_latency,
+                    user_id=user_id
+                )
+            )
             
             return {"total_turns": turn_index, "state": state}
