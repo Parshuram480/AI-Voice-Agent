@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from app.api import create_api_router
@@ -75,6 +76,39 @@ app = FastAPI(
     description="AI-powered voice agent with Twilio + Groq — streaming low-latency pipeline",
     version="2.0.0",
 )
+app.state.last_active_client_id = None
+
+# Add CORS Middleware to support decoupled React-TS frontend origin
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Globally track websocket listener connections for session synchronization
+active_listeners: dict[str, list[WebSocket]] = {}
+
+async def broadcast_to_listeners(session_id: str, message: dict):
+    if session_id in active_listeners:
+        disconnected = []
+        for ws in active_listeners[session_id]:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                disconnected.append(ws)
+        for ws in disconnected:
+            try:
+                active_listeners[session_id].remove(ws)
+            except Exception:
+                pass
 
 
 def _get_pipeline() -> VoicePipeline:
@@ -85,7 +119,11 @@ def _get_streaming_pipeline() -> StreamingVoicePipeline:
     return streaming_pipeline
 
 
-app.include_router(create_api_router(_get_pipeline, _get_streaming_pipeline))
+def _get_twilio_handler() -> TwilioHandler:
+    return twilio_handler
+
+
+app.include_router(create_api_router(_get_pipeline, _get_streaming_pipeline, _get_twilio_handler))
 
 # Shared service instances (initialized on startup)
 groq_client_1: GroqClient = None  # type: ignore
@@ -174,7 +212,7 @@ async def startup():
         from app.gemini_live_client import GeminiLiveClient
         from app.multimodal_pipeline import GeminiLivePipeline
         gemini_client = GeminiLiveClient(verification_service, order_service)
-        streaming_pipeline = GeminiLivePipeline(gemini_client)
+        streaming_pipeline = GeminiLivePipeline(gemini_client, db_client)
         logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
     else:
         # Initialize streaming pipeline
@@ -275,16 +313,11 @@ async def livekit_token(session_id: Optional[str] = None):
         )
 
 
-# ---- Local Testing UI ----
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    """Serve the local testing UI."""
-    index_path = static_dir / "index.html"
-    if index_path.exists():
-        return HTMLResponse(content=index_path.read_text(encoding="utf-8"))
-    return HTMLResponse(
-        content="<h1>Voice Agent</h1><p>Static files not found. Place index.html in /static/</p>"
-    )
+# ---- API Root Status ----
+@app.get("/")
+async def root():
+    """Returns the API service status."""
+    return {"status": "ok", "service": "AI Voice Agent SaaS API Server"}
 
 
 # ---- Twilio Voice Webhook ----
@@ -295,6 +328,14 @@ async def voice_webhook(request: Request):
 
     Returns TwiML that starts a media stream and greets the caller.
     """
+    # Extract client_id from query parameter if present
+    client_id = request.query_params.get("client_id")
+    if not client_id or client_id == "None":
+        client_id = getattr(request.app.state, "last_active_client_id", None)
+        if client_id:
+            client_id = str(client_id)
+    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}")
+    
     # Build the WebSocket URL dynamically based on the incoming request host
     # If the request comes through ngrok (https), we use wss://
     scheme = "wss" if request.url.scheme == "https" or "ngrok" in request.url.hostname else "ws"
@@ -302,13 +343,15 @@ async def voice_webhook(request: Request):
     if request.url.port and request.url.port not in (80, 443):
         ws_url = f"{scheme}://{request.url.hostname}:{request.url.port}/audio-stream"
 
+    if client_id:
+        ws_url += f"?client_id={client_id}"
+
     twiml = twilio_handler.generate_stream_twiml(ws_url)
     logger.info(f"Voice webhook called — streaming to {ws_url}")
 
     return Response(content=twiml, media_type="application/xml")
 
 
-# ---- Twilio Media Stream WebSocket (STREAMING PIPELINE) ----
 @app.websocket("/audio-stream")
 async def audio_stream(websocket: WebSocket):
     """
@@ -320,20 +363,112 @@ async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     logger.info("Twilio audio stream WebSocket connected")
 
+    client_id_str = websocket.query_params.get("client_id")
+    logger.info(f"[AUDIO STREAM WS] Raw client_id_str from ws query params: {client_id_str}")
+    client_id = None
+    if client_id_str and client_id_str != "None":
+        try:
+            client_id = int(client_id_str)
+        except ValueError:
+            logger.error(f"[AUDIO STREAM WS] ValueError converting client_id_str to int: {client_id_str}")
+            pass
+            
+    if client_id is None:
+        client_id = getattr(websocket.app.state, "last_active_client_id", None)
+        logger.info(f"[AUDIO STREAM WS] Fallback resolved client_id: {client_id}")
+
+    logger.info(f"[AUDIO STREAM WS] Resolved client_id: {client_id}")
+
     stream_sid = None
     call_sid = None
     audio_queue: asyncio.Queue = asyncio.Queue()
     pipeline_task = None
     use_stream_audio_out = TWILIO_STREAM_AUDIO_OUT
     stream_audio_sent = False
+    outbound_task = None
+
+    async def _outbound_audio_loop():
+        nonlocal stream_audio_sent, stream_sid, call_sid
+        resample_state = None
+        logger.info("[OUTBOUND LOOP] Started outbound audio stream task")
+        while True:
+            wav_bytes = await outbound_audio_queue.get()
+            if wav_bytes is None:
+                logger.info("[OUTBOUND LOOP] Received Sentinel None, stopping outbound task")
+                break
+                
+            logger.info(f"[OUTBOUND LOOP] Dequeued {len(wav_bytes)} wav bytes. stream_sid={stream_sid}")
+            if not stream_sid:
+                logger.warning("[OUTBOUND LOOP] stream_sid is not yet set, discarding chunk")
+                continue
+
+            try:
+                pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
+                if not pcm_bytes:
+                    continue
+
+                if sample_width != 2:
+                    pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
+                    sample_width = 2
+
+                pcm_bytes = to_mono(pcm_bytes, sample_width=sample_width, channels=channels)
+                if sample_rate != 8000:
+                    # Maintain state across chunks to prevent static/clicks
+                    pcm_bytes, resample_state = audioop.ratecv(
+                        pcm_bytes,
+                        sample_width,
+                        1,
+                        sample_rate,
+                        8000,
+                        resample_state,
+                    )
+
+                ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
+                if ok:
+                    stream_audio_sent = True
+            except Exception as e:
+                logger.error(f"CRITICAL ERROR in _outbound_audio_loop: {e}")
+                import traceback
+                traceback.print_exc()
     twilio_adapter = None
 
     def on_tts_audio(audio_bytes: bytes):
+        logger.info(f"[MAIN ON_TTS_AUDIO] Received {len(audio_bytes)} bytes. use_stream_audio_out={use_stream_audio_out}")
+        if not use_stream_audio_out:
         nonlocal stream_audio_sent
         if not use_stream_audio_out or not twilio_adapter:
             return
         asyncio.create_task(twilio_adapter.send_audio(audio_bytes))
         stream_audio_sent = True
+
+    def on_stt_text(text: str):
+        logger.info(f"Twilio Call STT: {text}")
+        if call_sid:
+            asyncio.create_task(broadcast_to_listeners(call_sid, {"type": "stt", "text": text}))
+
+    def on_llm_token(token: str):
+        if call_sid:
+            asyncio.create_task(broadcast_to_listeners(call_sid, {"type": "llm_token", "token": token}))
+
+    def on_stage(stage: str, status: str, detail: str = ""):
+        if call_sid:
+            asyncio.create_task(broadcast_to_listeners(call_sid, {
+                "type": "stage",
+                "stage": stage,
+                "status": status,
+                "detail": detail
+            }))
+
+    def on_phase_change(phase: str):
+        if call_sid:
+            val = phase.value if hasattr(phase, 'value') else phase
+            asyncio.create_task(broadcast_to_listeners(call_sid, {"type": "phase", "phase": val}))
+
+    def on_turn_done(result: dict):
+        if call_sid:
+            send_result = {k: v for k, v in result.items() if k != "audio_bytes"}
+            asyncio.create_task(broadcast_to_listeners(call_sid, {"type": "timing", "timings": result.get("timings", {})}))
+            asyncio.create_task(broadcast_to_listeners(call_sid, {"type": "turn_done", "result": send_result}))
 
     try:
         while True:
@@ -349,6 +484,9 @@ async def audio_stream(websocket: WebSocket):
                 call_sid = data.get("start", {}).get("callSid")
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
 
+                # Seeding the session state with client_id
+                await session_manager.get_or_create(call_sid, client_id=client_id)
+
                 # Instantiate adapter
                 twilio_adapter = TwilioChannelAdapter(
                     twilio_handler=twilio_handler,
@@ -362,7 +500,12 @@ async def audio_stream(websocket: WebSocket):
                     streaming_pipeline.process_stream(
                         audio_queue=audio_queue,
                         call_sid=call_sid,
+                        on_stt_text=on_stt_text,
+                        on_llm_token=on_llm_token,
                         on_tts_audio=on_tts_audio if use_stream_audio_out else None,
+                        on_stage=on_stage,
+                        on_phase_change=on_phase_change,
+                        on_turn_done=on_turn_done,
                         update_call_with_audio=not use_stream_audio_out,
                         session_id=call_sid,
                         channel_adapter=twilio_adapter,
@@ -524,7 +667,43 @@ async def mic_stream(websocket: WebSocket):
     session_id = websocket.query_params.get("session_id")
     if not session_id:
         session_id = f"mic-{uuid.uuid4().hex[:8]}"
+        
+    client_id_str = websocket.query_params.get("client_id")
+    client_id = None
+    if client_id_str and client_id_str != "null" and client_id_str != "undefined":
+        try:
+            client_id = int(client_id_str)
+        except ValueError:
+            pass
+
+    # Pre-seed session state with client_id
+    await session_manager.get_or_create(session_id, client_id=client_id)
+
     await safe_send({"type": "session", "session_id": session_id})
+
+    listener_str = websocket.query_params.get("listener", "false")
+    is_listener = listener_str.lower() == "true"
+    if is_listener:
+        if session_id not in active_listeners:
+            active_listeners[session_id] = []
+        active_listeners[session_id].append(websocket)
+        logger.info(f"Websocket listener registered for session {session_id}")
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                if "text" in message and message["text"]:
+                    ctrl = json.loads(message["text"])
+                    if ctrl.get("action") == "end_session":
+                        break
+        except Exception:
+            pass
+        finally:
+            if session_id in active_listeners and websocket in active_listeners[session_id]:
+                active_listeners[session_id].remove(websocket)
+            logger.info(f"Websocket listener disconnected for session {session_id}")
+            return
 
     # Launch the continuous conversation pipeline in background
     pipeline_task = asyncio.create_task(

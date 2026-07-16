@@ -185,7 +185,11 @@ class ConversationService:
 
         if session.customer_id:
             with tracker.track("db_lookup"):
-                orders = await self._orders.get_orders(session.customer_id)
+                orders_res = await self._orders.get_orders(session.customer_id)
+                if isinstance(orders_res, dict):
+                    orders = orders_res.get("recent_orders", [])
+                else:
+                    orders = orders_res
             if orders:
                 session.last_order = orders[0]
 

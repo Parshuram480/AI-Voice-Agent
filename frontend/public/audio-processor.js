@@ -1,14 +1,13 @@
 /**
  * AudioWorkletProcessor for capturing raw PCM audio in the browser.
  * 
- * Captures audio from the microphone, optionally downsamples it
- * to 16kHz, and posts the raw 16-bit PCM buffer to the main thread.
+ * Captures audio from the microphone, converts it to 16-bit PCM,
+ * and posts the raw buffer to the main thread.
  */
 
 class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    // Smaller buffer for faster VAD turn detection.
     this.bufferSize = 1024;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
@@ -32,10 +31,6 @@ class PCMProcessor extends AudioWorkletProcessor {
   }
 
   flush() {
-    // We send Float32 arrays to the main thread, which can handle the
-    // downsampling and conversion to 16-bit Int if needed.
-    // However, it's more efficient to do the Float32 -> Int16 conversion here.
-    
     const int16Buffer = new Int16Array(this.bufferSize);
     for (let i = 0; i < this.bufferSize; i++) {
       let s = Math.max(-1, Math.min(1, this.buffer[i]));

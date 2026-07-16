@@ -1,6 +1,4 @@
-"""Conversation response models."""
-
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -17,4 +15,4 @@ class ConversationResult:
     customer: Optional[dict]
     orders: list[dict]
     timings: dict[str, float]
-    turn_metrics: dict
+    turn_metrics: dict = field(default_factory=dict)

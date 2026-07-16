@@ -22,16 +22,19 @@ class SessionManager:
         self._store = store
         self._lock = asyncio.Lock()
 
-    async def get_or_create(self, session_id: str) -> SessionState:
+    async def get_or_create(self, session_id: str, client_id: Optional[int] = None) -> SessionState:
         async with self._lock:
             session = self._store.get(session_id)
             if session and not self._is_expired(session):
+                if client_id is not None:
+                    session.client_id = client_id
                 return session
 
             session = SessionState(
                 session_id=session_id,
                 current_state=ConversationState.WAITING_FOR_INTENT.value,
             )
+            session.client_id = client_id
             self._store.set(session)
             return session
 
