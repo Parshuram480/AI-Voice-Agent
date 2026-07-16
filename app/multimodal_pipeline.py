@@ -114,7 +114,7 @@ class GeminiLivePipeline:
         
         total_input_tokens = 0
         total_output_tokens = 0
-        user_finished_speaking_time = None
+        last_speech_time = None
         
         # State for tools
         state = {
@@ -187,6 +187,9 @@ class GeminiLivePipeline:
                                 for frame in frame_gen.get_frames():
                                     is_speech = vad.is_speech(frame)
                                     if is_speech:
+                                        nonlocal last_speech_time
+                                        last_speech_time = time.perf_counter()
+                                        
                                         consecutive_speech_ms += 30
                                         consecutive_silence_ms = 0
                                         if not speech_active and consecutive_speech_ms >= 250:
@@ -201,8 +204,6 @@ class GeminiLivePipeline:
                                             consecutive_silence_ms += 30
                                             if consecutive_silence_ms >= vad_silence_threshold:
                                                 speech_active = False  # Reset so we can detect the next interruption
-                                                nonlocal user_finished_speaking_time
-                                                user_finished_speaking_time = time.perf_counter()
                             
                         except Exception as e:
                             logger.error(f"Sender task error: {e}")
@@ -342,12 +343,12 @@ class GeminiLivePipeline:
                                         if part.inline_data:
                                             if not is_speaking:
                                                 # First audio byte arrived
-                                                nonlocal user_finished_speaking_time
-                                                if user_finished_speaking_time:
-                                                    gemini_first_audio_ms = (time.perf_counter() - user_finished_speaking_time) * 1000
-                                                    user_finished_speaking_time = None
+                                                nonlocal last_speech_time
+                                                if last_speech_time:
+                                                    gemini_first_audio_ms = (time.perf_counter() - last_speech_time) * 1000
+                                                    last_speech_time = None
                                                 else:
-                                                    gemini_first_audio_ms = (time.perf_counter() - turn_start_time) * 1000
+                                                    gemini_first_audio_ms = 0.0
                                                 is_speaking = True
                                                 _set_phase("SPEAKING")
                                                 
