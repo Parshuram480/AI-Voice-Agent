@@ -226,3 +226,6 @@ research/
 latency_optimization_research.md
 multimodal_research.md
 metrics/
+
+# Silero VAD ONNX models
+app/vad/*.onnx

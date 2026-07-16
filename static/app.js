@@ -337,56 +337,69 @@ async function startWebRTCSession() {
   try {
     addLog('system', 'Generating WebRTC token...');
     const sessId = sessionId || `room-${Math.random().toString(16).slice(2, 10)}`;
-    
+
     const resp = await fetch(`/api/livekit/token?session_id=${encodeURIComponent(sessId)}`);
     if (!resp.ok) {
       const errJson = await resp.json();
       throw new Error(errJson.error || 'Failed to fetch token');
     }
-    
+
     const data = await resp.json();
     const token = data.token;
     const wsUrl = data.url;
     const roomName = data.room;
-    
+
     addLog('system', `Connecting to LiveKit Room: ${roomName}...`);
-    
+
     const lkSDK = window.LivekitClient || window.LiveKitClient;
     if (!lkSDK) {
       throw new Error('LiveKit Client SDK not loaded');
     }
     const { Room, RoomEvent, Track } = lkSDK;
-    livekitRoom = new Room({
-      adaptiveStream: true,
-      dynacast: true,
-    });
-    
+    livekitRoom = new Room({ adaptiveStream: true, dynacast: true });
+
+    // Subscribe to agent audio track (for playback)
     livekitRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
       if (track.kind === Track.Kind.Audio) {
         addLog('system', 'Agent audio track subscribed. Attaching player...');
         const element = track.attach();
+        element.autoplay = true;
+        element.playsInline = true;
         document.body.appendChild(element);
+        element.play().catch((err) => {
+          addLog('warning', `Agent audio playback blocked: ${err.message || err}`);
+        });
       }
     });
-    
+
     livekitRoom.on(RoomEvent.Disconnected, (reason) => {
       addLog('system', `Disconnected from WebRTC room: ${reason}`);
       endWebRTCSession();
     });
-    
+
     await livekitRoom.connect(wsUrl, token);
+    addLog('system', 'Connected to LiveKit room');
+    if (typeof livekitRoom.startAudio === 'function') {
+      await livekitRoom.startAudio();
+    }
+
     addLog('system', 'Connected to WebRTC room! Publishing mic track...');
-    
-    await livekitRoom.localParticipant.setMicrophoneEnabled(true);
+    await livekitRoom.localParticipant.setMicrophoneEnabled(true, {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+    });
     addLog('system', 'Microphone track published! Speak naturally...');
-    
+
+    // UI updates – keep the "Connect" button disabled while a session is active
     isSessionActive = true;
     btnStartWebRTC.disabled = true;
     btnEndSession.disabled = false;
     btnMic.disabled = true;
     setStatus('active', 'WebRTC Session');
     setPhase('LISTENING');
-    
+
   } catch (err) {
     addLog('error', `WebRTC error: ${err.message}`);
     setStatus('error', 'WebRTC Error');
