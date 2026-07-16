@@ -190,3 +190,74 @@ class TwilioHandler:
         except Exception as e:
             logger.error(f"Failed to send clear to stream {stream_sid}: {e}")
             return False
+
+    async def make_outbound_call(self, to_number: str, client_id: int, server_host: str) -> str:
+        """
+        Initiates an outbound call to the given phone number.
+        """
+        if not self._client:
+            raise ValueError("Twilio client is not initialized. Please check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.")
+        
+        twilio_from = os.getenv("TWILIO_PHONE_NUMBER")
+        if not twilio_from:
+            raise ValueError("TWILIO_PHONE_NUMBER environment variable is not configured.")
+        
+        # Prioritize NGROK_URL environment variable if configured
+        ngrok_url = os.getenv("NGROK_URL")
+        if ngrok_url:
+            if "/voice" in ngrok_url:
+                callback_url = ngrok_url
+                if "?" in callback_url:
+                    callback_url += f"&client_id={client_id}"
+                else:
+                    callback_url += f"?client_id={client_id}"
+            else:
+                base_url = ngrok_url.rstrip("/")
+                callback_url = f"{base_url}/voice?client_id={client_id}"
+        else:
+            base_url = server_host.rstrip("/")
+            callback_url = f"{base_url}/voice?client_id={client_id}"
+        
+        logger.info(f"Triggering outbound call from {twilio_from} to {to_number} using webhook: {callback_url}")
+        
+        import anyio
+        call = await anyio.to_thread.run_sync(
+            lambda: self._client.calls.create(
+                to=to_number,
+                from_=twilio_from,
+                url=callback_url,
+                method="POST"
+            )
+        )
+        logger.info(f"Outbound call successfully initiated. Call SID: {call.sid}")
+        return call.sid
+
+    async def get_call_status(self, call_sid: str) -> str:
+        """
+        Retrieves the status of a live or completed call from Twilio.
+        """
+        if not self._client:
+            raise ValueError("Twilio client is not initialized.")
+        
+        import anyio
+        call = await anyio.to_thread.run_sync(
+            lambda: self._client.calls(call_sid).fetch()
+        )
+        return call.status
+
+    async def end_call(self, call_sid: str) -> bool:
+        """
+        Terminates a live Twilio call.
+        """
+        if not self._client:
+            raise ValueError("Twilio client is not initialized.")
+        
+        import anyio
+        try:
+            await anyio.to_thread.run_sync(
+                lambda: self._client.calls(call_sid).update(status="completed")
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to end call {call_sid}: {e}")
+            return False

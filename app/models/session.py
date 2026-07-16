@@ -33,6 +33,7 @@ class SessionState:
     customer_name: Optional[str] = None
     last_order: Optional[dict] = None
     orders: list[dict] = field(default_factory=list)
+    client_id: Optional[int] = None
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC)

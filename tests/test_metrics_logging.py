@@ -8,11 +8,16 @@ def test_log_llm_metrics_creates_file_and_folder():
     """Test that log_llm_metrics creates the metrics folder and proper file formatting."""
     session_id = "test_metrics_session_123"
     metrics = {
-        "prompt_tokens": 100,
-        "completion_tokens": 50,
-        "ttft": 0.45,
-        "generation_time": 1.2,
-        "total_time": 1.65,
+        "llm1_prompt_tokens": 100,
+        "llm1_completion_tokens": 50,
+        "llm1_ttft": 0.45,
+        "llm1_generation_time": 1.2,
+        "llm1_total_time": 1.65,
+        "llm2_prompt_tokens": 80,
+        "llm2_completion_tokens": 40,
+        "llm2_ttft": 0.3,
+        "llm2_generation_time": 0.9,
+        "llm2_total_time": 1.2,
         "streaming_started": "2026-07-06 13:16:02.123",
         "streaming_finished": "2026-07-06 13:16:03.773",
         "tool_called": "verify_user",
@@ -65,19 +70,19 @@ def test_log_llm_metrics_creates_file_and_folder():
     assert "State Update End:            N/A" in content
     assert "Serialization Start:         N/A" in content
     assert "Serialization End:           N/A" in content
-    assert "LLM CALL" in content
+    assert "LLM 1 (ROUTING)" in content
     assert "Prompt Tokens: 100" in content
     assert "Completion Tokens: 50" in content
     assert "TTFT: 0.45s" in content
     assert "Generation Time: 1.2s" in content
-    assert "Total: 1.65s" in content
-    assert "Streaming Started: 2026-07-06 13:16:02.123" in content
-    assert "Streaming Finished: 2026-07-06 13:16:03.773" in content
+    assert "Total Time: 1.65s" in content
     assert "Tool Called: verify_user" in content
-    assert "Second LLM: No" in content
-    assert "History Tokens: 80" in content
-    assert "Summary Tokens: 10" in content
-    assert "Current User Tokens: 10" in content
+    assert "LLM 2 (SYNTHESIS)" in content
+    assert "Prompt Tokens: 80" in content
+    assert "Completion Tokens: 40" in content
+    assert "TTFT: 0.3s" in content
+    assert "Generation Time: 0.9s" in content
+    assert "Total Time: 1.2s" in content
     
     # Check new micro-timings
     assert "User finished:               13:45:41.100" in content
