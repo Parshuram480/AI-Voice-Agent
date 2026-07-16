@@ -184,6 +184,14 @@ class GroqClient:
             max_tokens=max_tokens,
             **kwargs
         )
+        
+        if hasattr(response, 'usage') and response.usage:
+            self.last_usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens
+            }
+            
         if return_full_response:
             return response
             

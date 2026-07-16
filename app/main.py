@@ -172,7 +172,7 @@ async def startup():
         from app.gemini_live_client import GeminiLiveClient
         from app.multimodal_pipeline import GeminiLivePipeline
         gemini_client = GeminiLiveClient(verification_service, order_service)
-        streaming_pipeline = GeminiLivePipeline(gemini_client)
+        streaming_pipeline = GeminiLivePipeline(gemini_client, db_client)
         logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
     else:
         # Initialize streaming pipeline
