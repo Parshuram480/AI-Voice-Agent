@@ -24,7 +24,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from app.state_machine import ConversationStateMachine
 from app.audio_utils import (
+    pcm_to_mulaw,
+    to_mono,
+    resample_pcm,
     build_wav,
     mulaw_to_pcm,
     resample_to_16khz,
@@ -38,6 +42,7 @@ from app.database import DatabaseClient
 from app.groq_client import GroqClient
 from app.llm.rephrase import LLMRephraser
 from app.services.agent_service import AgentService
+from app.services.analytics_service import AnalyticsService
 from app.logging.logger import log_event, log_pipeline_event, log_transcript
 from app.response_cache import ResponseCache
 from app.twilio_handler import TwilioHandler
@@ -114,6 +119,7 @@ class StreamingVoicePipeline:
         self.agent = agent_service
         self.rephraser = rephraser
         self._current_phase = None
+        self.analytics = AnalyticsService(db_client)
 
         self.stt_provider = os.getenv("STT_PROVIDER", "groq").lower()
         if self.stt_provider == "deepgram":
@@ -468,6 +474,54 @@ class StreamingVoicePipeline:
             session_id=resolved_session_id,
             total_turns=turn_index,
         )
+        
+        # Calculate session metrics and trigger background analytics
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_latency = 0.0
+        valid_latency_turns = 0
+        
+        for t in all_timings:
+            total_input_tokens += t.get("llm1_prompt_tokens", 0) + t.get("llm2_prompt_tokens", 0)
+            total_output_tokens += t.get("llm1_completion_tokens", 0) + t.get("llm2_completion_tokens", 0)
+            
+            # Use exact TTFA (perceived latency) if available, otherwise fallback to execution total
+            ttfa_ms = t.get("ttfa_total_ms", t.get("total", 0.0) * 1000.0)
+            if ttfa_ms > 0:
+                total_latency += ttfa_ms / 1000.0
+                valid_latency_turns += 1
+            
+        try:
+            # Extract accumulated background memory tokens from the graph state
+            config = {"configurable": {"thread_id": resolved_session_id}}
+            final_state = await self.agent._graph.aget_state(config)
+            if final_state and final_state.values:
+                total_input_tokens += final_state.values.get("memory_tokens_input", 0)
+                total_output_tokens += final_state.values.get("memory_tokens_output", 0)
+        except Exception as e:
+            logger.error(f"Failed to fetch final graph state for memory tokens: {e}")
+            
+        avg_latency = round(total_latency / valid_latency_turns, 2) if valid_latency_turns > 0 else 0.0
+        
+        # Fetch history from session
+        session_state = await self.agent._sessions.get_or_create(resolved_session_id)
+        history = []
+        user_id = None
+        if session_state:
+            history = [{"role": turn.role, "content": turn.text} for turn in session_state.conversation_history]
+            user_id = session_state.customer_id
+            
+        asyncio.create_task(
+            self.analytics.process_call_analytics(
+                session_id=resolved_session_id,
+                pipeline_mode="cascade",
+                history=history,
+                total_input_tokens=total_input_tokens,
+                total_output_tokens=total_output_tokens,
+                average_latency=avg_latency,
+                user_id=user_id
+            )
+        )
 
         return {
             "session_id": resolved_session_id,
@@ -505,6 +559,7 @@ class StreamingVoicePipeline:
         """
         audio_buffer = bytearray()
         speech_started = False
+        barge_in_triggered = False
         silence_ms = 0.0
         speech_ms = 0.0
         t_start = time.perf_counter()
@@ -583,18 +638,6 @@ class StreamingVoicePipeline:
                         if self.deepgram:
                             await self.deepgram.send_audio(bytes(audio_buffer))
                         
-                        if interruption_event:
-                            interruption_event.set()
-                            
-                        # INSTANT BARGE-IN FIX:
-                        # Even if the pipeline isn't actively waiting for `interruption_event`
-                        # because TTS generation finished early, Twilio might still be playing audio.
-                        # We must blindly clear the Twilio stream the exact millisecond speech is detected.
-                        twilio_ws = kwargs.get("twilio_ws")
-                        stream_sid = kwargs.get("stream_sid")
-                        if twilio_ws and stream_sid and self.twilio:
-                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
-
                         if on_phase_change:
                             on_phase_change(ConversationPhase.SPEECH_DETECTED.value)
                         log_pipeline_event(
@@ -621,6 +664,15 @@ class StreamingVoicePipeline:
                     else:
                         silence_ms = 0.0
                         speech_ms += chunk_ms
+
+                    if speech_started and not barge_in_triggered and speech_ms >= min_speech_ms:
+                        barge_in_triggered = True
+                        if interruption_event:
+                            interruption_event.set()
+                        twilio_ws = kwargs.get("twilio_ws")
+                        stream_sid = kwargs.get("stream_sid")
+                        if twilio_ws and stream_sid and self.twilio:
+                            asyncio.create_task(self.twilio.clear_stream(twilio_ws, stream_sid))
 
                     now = time.perf_counter()
                     if now - last_vad_log >= 1.0:
@@ -666,6 +718,7 @@ class StreamingVoicePipeline:
                             if self.deepgram:
                                 _ = await self.deepgram.flush_and_read(timeout=0.1)
                             speech_started = False
+                            barge_in_triggered = False
                             speech_ms = 0.0
                             silence_ms = 0.0
                             audio_buffer.clear()

@@ -40,6 +40,7 @@ CRITICAL RULES:
 4. NEVER call `get_order_status` unless the user is already verified.
 5. NEVER include raw JSON, xml tags, or function syntax in spoken text. Use tool_calls mechanism.
 6. NEVER invent or hallucinate order data. Use tool results.
+7. STRICT LANGUAGE ENFORCEMENT: You MUST ONLY speak and understand English. If the user speaks ANY other language (e.g., Spanish, Hindi), you must politely state: "I can only assist in English. Please speak English." Do NOT respond to their query in any other language.
 
 VERIFICATION FLOW (For Unverified Users):
 Step 1: Ask for their full name.
@@ -142,6 +143,8 @@ class AgentState(TypedDict):
     reply_text: str
     summary: Optional[str]
     turn_metrics: dict
+    memory_tokens_input: Annotated[int, operator.add]
+    memory_tokens_output: Annotated[int, operator.add]
 
 class AgentService:
     """Primary orchestration layer for LLM-driven dialog using LangGraph."""
@@ -1170,8 +1173,18 @@ class AgentService:
             
             # Update the graph state with the new summary
             if summary:
-                await self._graph.aupdate_state(config, {"summary": summary})
-                logger.info(f"Session {session_id} background summary generated: {summary}")
+                mem_input = 0
+                mem_output = 0
+                if hasattr(summary_groq, 'last_usage') and summary_groq.last_usage:
+                    mem_input = summary_groq.last_usage.get('prompt_tokens', 0)
+                    mem_output = summary_groq.last_usage.get('completion_tokens', 0)
+                    
+                await self._graph.aupdate_state(config, {
+                    "summary": summary,
+                    "memory_tokens_input": mem_input,
+                    "memory_tokens_output": mem_output
+                })
+                logger.info(f"Session {session_id} background summary generated: {summary} (Tokens: {mem_input} in, {mem_output} out)")
             
         except Exception as e:
             logger.error(f"Background summarization failed for {session_id}: {e}")
