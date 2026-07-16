@@ -21,7 +21,9 @@ from app.services.order_service import OrderService
 from app.services.verification_service import VerificationService
 from app.session.manager import SessionManager
 from app.logging.logger import log_llm_metrics
-from datetime import datetime
+from datetime import datetime, date
+from app.system_database import SystemDatabase
+from app.dynamic_db_client import DynamicDbClient
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,7 @@ class AgentService:
         self._groq_2 = groq_client_2
         self._verification = verification_service
         self._orders = order_service
+        self._system_db = SystemDatabase()
         self._memory = MemorySaver()
         self._graph = self._build_graph()
 
@@ -201,8 +204,29 @@ class AgentService:
         if "timing_prompt_assembly_start" not in turn_metrics:
             turn_metrics["timing_prompt_assembly_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        session = await self._sessions.get_or_create(session_id)
+        client_id = getattr(session, "client_id", None)
+        
+        mapping = None
+        if client_id is not None:
+            try:
+                mapping = await self._system_db.get_client_domain_mapping(client_id)
+            except Exception as e:
+                logger.error(f"Error fetching mapping for client {client_id}: {e}")
+
+        logger.info(f"[_LLM1_NODE] Resolved session_id/thread_id: {session_id}, client_id: {client_id}")
+        if mapping:
+            logger.info(f"[_LLM1_NODE] Loaded domain mapping: {mapping.get('domain_name')}")
+            base_prompt = mapping["system_prompt_llm1"]
+            tools_to_use = json.loads(mapping["tools_schema"])
+        else:
+            logger.info(f"[_LLM1_NODE] No domain mapping found, defaulting to Order Tracking.")
+            base_prompt = LLM1_SYSTEM_PROMPT
+            tools_to_use = AGENT_TOOLS
+
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dynamic_prompt = f"{LLM1_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -230,7 +254,7 @@ class AgentService:
             temperature=0.3,
         )
         if use_tools:
-            llm_kwargs["tools"] = AGENT_TOOLS
+            llm_kwargs["tools"] = tools_to_use
             llm_kwargs["tool_choice"] = "auto"
 
         turn_metrics["timing_serialization_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -397,8 +421,27 @@ class AgentService:
         if "timing_prompt_assembly_start" not in turn_metrics:
             turn_metrics["timing_prompt_assembly_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        session = await self._sessions.get_or_create(session_id)
+        client_id = getattr(session, "client_id", None)
+        
+        mapping = None
+        if client_id is not None:
+            try:
+                mapping = await self._system_db.get_client_domain_mapping(client_id)
+            except Exception as e:
+                logger.error(f"Error fetching mapping for client {client_id}: {e}")
+
+        logger.info(f"[_LLM2_NODE] Resolved session_id/thread_id: {session_id}, client_id: {client_id}")
+        if mapping:
+            logger.info(f"[_LLM2_NODE] Loaded domain mapping: {mapping.get('domain_name')}")
+            base_prompt = mapping["system_prompt_llm2"]
+        else:
+            logger.info(f"[_LLM2_NODE] No domain mapping found, defaulting to Order Tracking.")
+            base_prompt = LLM2_SYSTEM_PROMPT
+
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dynamic_prompt = f"{LLM2_SYSTEM_PROMPT}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -694,15 +737,32 @@ class AgentService:
         # All significant parts of the name must appear in user messages
         return all(part in combined_user_text for part in name_parts)
 
-    async def _verify_tool_node(self, state: AgentState) -> dict:
+    async def _verify_tool_node(self, state: AgentState, config: RunnableConfig) -> dict:
         turn_metrics = state.get("turn_metrics", {})
         turn_metrics["timing_tool_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        session = await self._sessions.get_or_create(session_id)
+        client_id = getattr(session, "client_id", None)
+        
+        db_client = None
+        mapping = None
+        if client_id is not None:
+            try:
+                db_config = await self._system_db.get_client_db_config(client_id)
+                mapping = await self._system_db.get_client_domain_mapping(client_id)
+                if db_config and mapping:
+                    db_client = DynamicDbClient(db_config)
+            except Exception as e:
+                logger.error(f"Failed to load dynamic DB client for client {client_id}: {e}")
+
         last_msg = state["messages"][-1]
         updates = {"messages": [], "turn_metrics": turn_metrics}
         
         for tc in last_msg.get("tool_calls", []):
-            if tc["function"]["name"] == "verify_user":
+            tool_name = tc["function"]["name"]
+            
+            if tool_name == "verify_user" or tool_name.startswith("verify"):
                 try:
                     args = json.loads(tc["function"]["arguments"])
                 except Exception:
@@ -796,19 +856,100 @@ class AgentService:
                     })
                     continue
                 
-                verification = await self._verification.verify(name, dob)
-                if verification.verified and verification.customer:
+                verified = False
+                customer = None
+                records = []
+                
+                if db_client and mapping:
+                    try:
+                        # Clean, normalize and lowercase the name to match LOWER(full_name) = ?
+                        name_clean = name.strip().rstrip('.').lower()
+                        
+                        # Clean and normalize the DOB string
+                        dob_norm = dob
+                        import re
+                        dob_clean = re.sub(r'(st|nd|rd|th)', '', dob.lower())
+                        dob_clean = dob_clean.replace(',', '').strip()
+                        
+                        parsed_date = None
+                        # 1) YYYY-MM-DD or YYYY/MM/DD
+                        m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", dob_clean)
+                        if m:
+                            try:
+                                parsed_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                            except ValueError:
+                                pass
+                        
+                        if not parsed_date:
+                            # 2) MM/DD/YYYY or MM-DD-YYYY
+                            m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})", dob_clean)
+                            if m:
+                                try:
+                                    parsed_date = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                                except ValueError:
+                                    pass
+                        
+                        if not parsed_date:
+                            # 3) Natural language: "15 may 1990", "may 15 1990"
+                            for fmt in ("%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"):
+                                try:
+                                    parsed_date = datetime.strptime(dob_clean, fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                        
+                        if not parsed_date:
+                            try:
+                                parsed_date = date.fromisoformat(dob_clean)
+                            except ValueError:
+                                pass
+                        
+                        if parsed_date:
+                            dob_norm = parsed_date.isoformat()
+                        
+                        logger.info(f"name: {name_clean}, dob input: {dob}, dob normalized: {dob_norm}")
+                        logger.info(f"verification_query: {mapping['verification_query']}")
+                        
+                        rows = await db_client.execute_query(mapping["verification_query"], (name_clean, dob_norm))
+                        logger.info(f"rows found:  {rows}")
+                        if rows:
+                            verified = True
+                            customer = rows[0]
+                            # Format dates in patient/customer dict
+                            for k, v in list(customer.items()):
+                                if hasattr(v, "isoformat"):
+                                    customer[k] = v.isoformat()
+                            
+                            raw_records = await db_client.execute_query(mapping["data_query"], (customer["id"],))
+                            records = []
+                            for r in raw_records:
+                                item = dict(r)
+                                for k, v in list(item.items()):
+                                    if hasattr(v, "isoformat"):
+                                        item[k] = v.isoformat()
+                                records.append(item)
+                    except Exception as e:
+                        logger.error(f"Error executing tenant verification query: {e}")
+                else:
+                    # Fallback to local VerificationService and OrderService
+                    verification = await self._verification.verify(name, dob)
+                    if verification.verified and verification.customer:
+                        verified = True
+                        customer = verification.customer
+                        raw_orders = await self._orders.get_orders(customer.get("id"))
+                        records = raw_orders.get("recent_orders", [])
+
+                if verified and customer:
                     updates["verified"] = True
                     updates["user_name"] = name
                     updates["dob"] = dob
-                    updates["customer"] = verification.customer
-                    orders = await self._orders.get_orders(verification.customer.get("id"))
-                    updates["orders"] = orders
+                    updates["customer"] = customer
+                    updates["orders"] = records
                     result_str = json.dumps({
                         "verified": True, 
                         "message": "Account verified successfully.",
-                        "customer_name": verification.customer.get("full_name"),
-                        "orders": orders
+                        "customer_name": customer.get("full_name"),
+                        "records": records
                     })
                 else:
                     updates["verified"] = False
@@ -826,15 +967,32 @@ class AgentService:
                     "name": tc["function"]["name"],
                     "content": result_str
                 })
-            elif tc["function"]["name"] == "get_order_status":
+            else:
+                # Dynamic data query for matching domains
                 if not state.get("verified") or not state.get("customer"):
                     result_str = json.dumps({"error": "User not verified. Please verify user first."})
                 else:
-                    orders = await self._orders.get_orders(state["customer"]["id"])
-                    updates["orders"] = orders
+                    records = []
+                    if db_client and mapping:
+                        try:
+                            raw_records = await db_client.execute_query(mapping["data_query"], (state["customer"]["id"],))
+                            records = []
+                            for r in raw_records:
+                                item = dict(r)
+                                for k, v in list(item.items()):
+                                    if hasattr(v, "isoformat"):
+                                        item[k] = v.isoformat()
+                                records.append(item)
+                        except Exception as e:
+                            logger.error(f"Error executing tenant data query: {e}")
+                    else:
+                        raw_orders = await self._orders.get_orders(state["customer"]["id"])
+                        records = raw_orders.get("recent_orders", [])
+                    
+                    updates["orders"] = records
                     result_str = json.dumps({
                         "customer_name": state["customer"].get("full_name", "Unknown"),
-                        "orders": orders
+                        "records": records
                     })
                 
                 updates["messages"].append({
