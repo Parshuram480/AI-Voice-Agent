@@ -3,14 +3,15 @@ import Button from '@mui/material/Button';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
 import PhoneInTalkIcon from '@mui/icons-material/PhoneInTalk';
+import { useNavigate } from 'react-router-dom';
 
 interface ModeSelectProps {
   domainName: string;
-  onBackToDashboard: () => void;
-  onSelectMode: (mode: 'mic' | 'call') => void;
 }
 
-export default function AgentModeSelectPage({ domainName, onBackToDashboard, onSelectMode }: ModeSelectProps) {
+export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
+  const navigate = useNavigate();
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="flex justify-between items-center mb-10 select-none">
@@ -25,7 +26,7 @@ export default function AgentModeSelectPage({ domainName, onBackToDashboard, onS
         <Button 
           variant="outlined"
           color="inherit"
-          onClick={onBackToDashboard} 
+          onClick={() => navigate('/dashboard')} 
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >
@@ -36,7 +37,7 @@ export default function AgentModeSelectPage({ domainName, onBackToDashboard, onS
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 select-none">
         {/* Option 1: Web Mic */}
         <div 
-          onClick={() => onSelectMode('mic')}
+          onClick={() => navigate('/agent-console')}
           className="group bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-violet-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-violet-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
         >
           <div className="absolute inset-0 bg-gradient-to-b from-violet-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
@@ -70,7 +71,7 @@ export default function AgentModeSelectPage({ domainName, onBackToDashboard, onS
 
         {/* Option 2: Twilio Call */}
         <div 
-          onClick={() => onSelectMode('call')}
+          onClick={() => navigate('/agent-call-console')}
           className="group bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-emerald-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-emerald-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
         >
           <div className="absolute inset-0 bg-gradient-to-b from-emerald-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>

@@ -7,8 +7,9 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import { useNavigate } from 'react-router-dom';
+import { twilioService } from '../services/twilioService';
 
-const API_BASE = 'http://localhost:8000';
 const WS_BASE = 'ws://localhost:8000';
 
 interface Client {
@@ -23,13 +24,14 @@ interface AgentCallConsoleProps {
   client: Client;
   domainName: string;
   pipelineMode: string;
-  onBackToDashboard: () => void;
 }
 
-export default function AgentCallConsolePage({ client, domainName, pipelineMode, onBackToDashboard }: AgentCallConsoleProps) {
+export default function AgentCallConsolePage({ client, domainName, pipelineMode }: AgentCallConsoleProps) {
+  const navigate = useNavigate();
   const [dialPhoneNumber, setDialPhoneNumber] = useState('');
   const [dialing, setDialing] = useState(false);
   const [callSid, setCallSid] = useState<string | null>(null);
+  const [phoneError, setPhoneError] = useState('');
   
   // Call status options: 'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'
   const [callState, setCallState] = useState<'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'>('IDLE');
@@ -66,9 +68,8 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
 
     pollIntervalRef.current = window.setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/twilio/call/${sid}`);
-        const data = await response.json();
-        if (response.ok && data.success) {
+        const data = await twilioService.getCallStatus(sid);
+        if (data.success) {
           const status = data.status; // e.g. queued, ringing, in-progress, completed, failed
           setTwilioStatus(status);
 
@@ -239,22 +240,31 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
     e.preventDefault();
     setStatusMsg('');
     setStatusType('');
+    setPhoneError('');
+
+    const cleanedNumber = dialPhoneNumber.trim();
+    if (!cleanedNumber) {
+      setPhoneError('Phone number is required');
+      return;
+    }
+
+    // Require country code starting with '+' (e.g., +15550199)
+    const phoneRegex = /^\+[1-9]\d{6,14}$/;
+    if (!phoneRegex.test(cleanedNumber)) {
+      setPhoneError('Please enter a valid phone number with "+" and country code (e.g. +15550199)');
+      return;
+    }
+
     setDialing(true);
     setCallState('DIALING');
     setTwilioStatus('Initiating outbound call...');
 
     try {
-      const response = await fetch(`${API_BASE}/api/twilio/call`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          phone_number: dialPhoneNumber,
-          client_id: client.id 
-        }),
-        credentials: 'include'
+      const data = await twilioService.dialCall({ 
+        phone_number: dialPhoneNumber,
+        client_id: client.id 
       });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      if (data.success) {
         setCallSid(data.call_sid);
         setStatusType('success');
         setStatusMsg(`Call successfully placed! SID: ${data.call_sid}`);
@@ -280,11 +290,8 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
     setTwilioStatus('Hanging up...');
 
     try {
-      const response = await fetch(`${API_BASE}/api/twilio/call/${callSid}/end`, {
-        method: 'POST'
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const data = await twilioService.endCall(callSid);
+      if (data.success) {
         setCallState('ENDED');
         setCallSid(null);
         setTranscript('—');
@@ -330,7 +337,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
           variant="outlined"
           color="inherit"
           size="small"
-          onClick={onBackToDashboard} 
+          onClick={() => navigate('/agent-mode-select')} 
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >
@@ -394,13 +401,18 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
                 <form onSubmit={handleDialCall} className="space-y-4">
                   <TextField
                     label="Destination Phone Number"
+                    sx={{ pb: 2 }}
                     placeholder="+15550199"
                     variant="outlined"
                     fullWidth
-                    required
                     disabled={dialing}
                     value={dialPhoneNumber}
-                    onChange={e => setDialPhoneNumber(e.target.value)}
+                    onChange={e => {
+                      setDialPhoneNumber(e.target.value);
+                      if (phoneError) setPhoneError('');
+                    }}
+                    error={!!phoneError}
+                    helperText={phoneError}
                     slotProps={{ inputLabel: { shrink: true } }}
                   />
                   <Button

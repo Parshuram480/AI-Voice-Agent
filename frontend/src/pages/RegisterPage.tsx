@@ -11,8 +11,10 @@ import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import WifiIcon from '@mui/icons-material/Wifi';
 import AssignmentIndIcon from '@mui/icons-material/AssignmentInd';
-
-const API_BASE = 'http://localhost:8000';
+import { useNavigate } from 'react-router-dom';
+import { authService } from '../services/authService';
+import { domainService } from '../services/domainService';
+import { tenantService } from '../services/tenantService';
 
 interface Domain {
   id: number;
@@ -21,12 +23,8 @@ interface Domain {
   status: string;
 }
 
-interface RegisterProps {
-  onRegisterSuccess: () => void;
-  onGoToLogin: () => void;
-}
-
-export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: RegisterProps) {
+export default function RegisterPage() {
+  const navigate = useNavigate();
   const [companyName, setCompanyName] = useState('');
   const [clientName, setClientName] = useState('');
   const [email, setEmail] = useState('');
@@ -52,6 +50,118 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
   const [testingConnection, setTestingConnection] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  // Validation States
+  const [errors, setErrors] = useState({
+    companyName: '',
+    clientName: '',
+    email: '',
+    password: '',
+    phone: '',
+    dbName: '',
+    serverAddress: '',
+    port: '',
+    username: '',
+    timeout: ''
+  });
+
+  const validateForm = (configOnly = false): boolean => {
+    let isValid = true;
+    const newErrors = {
+      companyName: '',
+      clientName: '',
+      email: '',
+      password: '',
+      phone: '',
+      dbName: '',
+      serverAddress: '',
+      port: '',
+      username: '',
+      timeout: ''
+    };
+
+    if (!configOnly) {
+      if (!companyName.trim()) {
+        newErrors.companyName = 'Company name is required';
+        isValid = false;
+      } else if (companyName.trim().length < 2) {
+        newErrors.companyName = 'Company name must be at least 2 characters';
+        isValid = false;
+      }
+
+      if (!clientName.trim()) {
+        newErrors.clientName = 'Contact name is required';
+        isValid = false;
+      } else if (clientName.trim().length < 2) {
+        newErrors.clientName = 'Contact name must be at least 2 characters';
+        isValid = false;
+      }
+
+      if (!email.trim()) {
+        newErrors.email = 'Email is required';
+        isValid = false;
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        newErrors.email = 'Please enter a valid email address';
+        isValid = false;
+      }
+
+      if (!password) {
+        newErrors.password = 'Password is required';
+        isValid = false;
+      } else if (password.length < 6) {
+        newErrors.password = 'Password must be at least 6 characters';
+        isValid = false;
+      }
+
+      if (phone.trim() && !/^\+[1-9][0-9\s-]{7,14}$/.test(phone.trim())) {
+        newErrors.phone = 'Please enter a valid phone number with "+" and country code (e.g. +15551234567)';
+        isValid = false;
+      }
+    }
+
+    // Validate db config
+    if (!dbName.trim()) {
+      newErrors.dbName = 'Database name is required';
+      isValid = false;
+    }
+
+    if (dbType !== 'sqlite') {
+      if (!serverAddress.trim()) {
+        newErrors.serverAddress = 'Server address is required';
+        isValid = false;
+      }
+
+      if (port === '') {
+        newErrors.port = 'Port is required';
+        isValid = false;
+      } else {
+        const portNum = Number(port);
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+          newErrors.port = 'Port must be a valid number between 1 and 65535';
+          isValid = false;
+        }
+      }
+
+      if (!username.trim()) {
+        newErrors.username = 'Username is required';
+        isValid = false;
+      }
+    }
+
+    if (timeout === '' || isNaN(Number(timeout))) {
+      newErrors.timeout = 'Timeout is required';
+      isValid = false;
+    } else {
+      const t = Number(timeout);
+      if (t < 1 || t > 120) {
+        newErrors.timeout = 'Timeout must be between 1 and 120 seconds';
+        isValid = false;
+      }
+    }
+
+    setErrors(newErrors);
+    return isValid;
+  };
+
   const handleDomainChange = (selectedId: number, currentDomains: Domain[] = domains) => {
     setDomainId(selectedId);
     const selectedDomain = currentDomains.find(d => d.id === selectedId);
@@ -75,8 +185,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
   useEffect(() => {
     async function loadDomains() {
       try {
-        const response = await fetch(`${API_BASE}/api/domains`);
-        const data = await response.json();
+        const data = await domainService.getDomains();
         data.sort((a: Domain, b: Domain) => {
           if (a.name === 'Healthcare') return -1;
           if (b.name === 'Healthcare') return 1;
@@ -123,17 +232,17 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
   };
 
   const handleTestConnection = async () => {
+    if (!validateForm(true)) {
+      setStatusType('error');
+      setStatusMsg('Please correct the database configuration errors before testing connection.');
+      return;
+    }
     setStatusMsg('');
     setStatusType('');
     setTestingConnection(true);
     try {
       const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/test-connection`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      const data = await response.json();
+      const data = await tenantService.testConnection(config);
       if (data.success) {
         setStatusType('success');
         setStatusMsg('Database connection test successful!');
@@ -151,6 +260,11 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!validateForm(false)) {
+      setStatusType('error');
+      setStatusMsg('Please correct the highlighted form errors.');
+      return;
+    }
     setStatusMsg('');
     setStatusType('');
     setSubmitting(true);
@@ -176,17 +290,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
     };
 
     try {
-      const response = await fetch(`${API_BASE}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const data = await authService.register(payload);
+      if (data.success) {
         setStatusType('success');
         setStatusMsg('Registration successful! Redirecting to login...');
         setTimeout(() => {
-          onRegisterSuccess();
+          navigate('/login');
         }, 1500);
       } else {
         setStatusType('error');
@@ -205,7 +314,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="text-center mb-8">
-        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-500 bg-clip-text text-transparent mb-2">
+        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-500 bg-clip-text text-transparent pb-2 mb-2">
           Tenant Registration
         </h1>
         <p className="text-slate-400 text-sm md:text-base uppercase tracking-wider font-semibold">
@@ -228,8 +337,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={companyName}
-                onChange={e => setCompanyName(e.target.value)}
-                required
+                onChange={e => {
+                  setCompanyName(e.target.value);
+                  if (errors.companyName) setErrors(prev => ({ ...prev, companyName: '' }));
+                }}
+                error={!!errors.companyName}
+                helperText={errors.companyName}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
@@ -238,8 +351,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                required
+                onChange={e => {
+                  setClientName(e.target.value);
+                  if (errors.clientName) setErrors(prev => ({ ...prev, clientName: '' }));
+                }}
+                error={!!errors.clientName}
+                helperText={errors.clientName}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
@@ -249,8 +366,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
+                onChange={e => {
+                  setEmail(e.target.value);
+                  if (errors.email) setErrors(prev => ({ ...prev, email: '' }));
+                }}
+                error={!!errors.email}
+                helperText={errors.email}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
@@ -260,8 +381,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
+                onChange={e => {
+                  setPassword(e.target.value);
+                  if (errors.password) setErrors(prev => ({ ...prev, password: '' }));
+                }}
+                error={!!errors.password}
+                helperText={errors.password}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
@@ -270,7 +395,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={phone}
-                onChange={e => setPhone(e.target.value)}
+                onChange={e => {
+                  setPhone(e.target.value);
+                  if (errors.phone) setErrors(prev => ({ ...prev, phone: '' }));
+                }}
+                error={!!errors.phone}
+                helperText={errors.phone}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <FormControl fullWidth required>
@@ -322,8 +452,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={dbName}
-                onChange={e => setDbName(e.target.value)}
-                required
+                onChange={e => {
+                  setDbName(e.target.value);
+                  if (errors.dbName) setErrors(prev => ({ ...prev, dbName: '' }));
+                }}
+                error={!!errors.dbName}
+                helperText={errors.dbName}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
@@ -332,7 +466,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={serverAddress}
-                onChange={e => setServerAddress(e.target.value)}
+                onChange={e => {
+                  setServerAddress(e.target.value);
+                  if (errors.serverAddress) setErrors(prev => ({ ...prev, serverAddress: '' }));
+                }}
+                error={!!errors.serverAddress}
+                helperText={errors.serverAddress}
                 disabled={isSqlite}
                 sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
                 slotProps={{ inputLabel: { shrink: true } }}
@@ -344,7 +483,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={port}
-                onChange={e => setPort(e.target.value ? Number(e.target.value) : '')}
+                onChange={e => {
+                  setPort(e.target.value ? Number(e.target.value) : '');
+                  if (errors.port) setErrors(prev => ({ ...prev, port: '' }));
+                }}
+                error={!!errors.port}
+                helperText={errors.port}
                 disabled={isSqlite}
                 sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
                 slotProps={{ inputLabel: { shrink: true } }}
@@ -355,7 +499,12 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={username}
-                onChange={e => setUsername(e.target.value)}
+                onChange={e => {
+                  setUsername(e.target.value);
+                  if (errors.username) setErrors(prev => ({ ...prev, username: '' }));
+                }}
+                error={!!errors.username}
+                helperText={errors.username}
                 disabled={isSqlite}
                 sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
                 slotProps={{ inputLabel: { shrink: true } }}
@@ -387,10 +536,15 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 variant="outlined"
                 fullWidth
                 value={timeout}
-                onChange={e => setTimeoutSec(Number(e.target.value))}
+                onChange={e => {
+                  setTimeoutSec(Number(e.target.value));
+                  if (errors.timeout) setErrors(prev => ({ ...prev, timeout: '' }));
+                }}
+                error={!!errors.timeout}
+                helperText={errors.timeout}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
-              <div className="flex items-center space-x-3 pt-3">
+              {/* <div className="flex items-center space-x-3 pt-3">
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -413,7 +567,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                   }
                   label="Trust Server Certificate"
                 />
-              </div>
+              </div> */}
             </div>
           </div>
 
@@ -461,7 +615,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
         <p className="mt-8 text-center text-slate-400 text-sm">
           Already registered?{' '}
           <button
-            onClick={onGoToLogin}
+            onClick={() => navigate('/login')}
             className="text-violet-400 hover:text-violet-300 font-semibold focus:outline-none transition-colors duration-200 cursor-pointer"
           >
             Sign in here
