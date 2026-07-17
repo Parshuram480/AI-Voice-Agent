@@ -557,7 +557,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                 helperText={errors.timeout}
                 slotProps={{ inputLabel: { shrink: true } }}
               />
-              <div className="flex items-center space-x-3 pt-3">
+              {/* <div className="flex items-center space-x-3 pt-3">
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -580,7 +580,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
                   }
                   label="Trust Server Certificate"
                 />
-              </div>
+              </div> */}
             </div>
           </div>
 

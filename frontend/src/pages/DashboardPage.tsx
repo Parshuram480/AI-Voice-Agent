@@ -243,11 +243,11 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
             Manage settings and launch your AI Voice Agent console
           </p>
         </div>
-        <Button 
-          variant="outlined" 
-          color="inherit" 
+        <Button
+          variant="outlined"
+          color="inherit"
           size="small"
-          onClick={onLogout} 
+          onClick={onLogout}
           startIcon={<LogoutIcon />}
           className="cursor-pointer"
         >
@@ -274,8 +274,8 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
 
         {/* Launch Button Room */}
         <div className="text-center py-4 border-y border-slate-850/80">
-          <Button 
-            onClick={onLaunchAgent} 
+          <Button
+            onClick={onLaunchAgent}
             variant="contained"
             color="primary"
             size="large"
@@ -318,7 +318,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
                 <MenuItem value="oracle">Oracle</MenuItem>
               </Select>
             </FormControl>
-            <TextField 
+            <TextField
               label="Database Name / Path"
               placeholder="healthcare_client.db"
               variant="outlined"
@@ -332,7 +332,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               helperText={errors.dbName}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Server Address"
               placeholder="localhost"
               variant="outlined"
@@ -348,7 +348,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Port"
               placeholder="5432"
               type="number"
@@ -365,7 +365,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Username"
               placeholder="postgres"
               variant="outlined"
@@ -381,7 +381,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Password"
               placeholder="•••••••• (Leave blank to keep unchanged)"
               type="password"
@@ -393,7 +393,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Schema Name (Optional)"
               placeholder="public"
               variant="outlined"
@@ -402,7 +402,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               onChange={e => setSchemaName(e.target.value)}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <TextField 
+            <TextField
               label="Timeout (Seconds)"
               type="number"
               variant="outlined"
@@ -416,7 +416,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               helperText={errors.timeout}
               slotProps={{ inputLabel: { shrink: true } }}
             />
-            <div className="flex items-center space-x-3 pt-3">
+            {/* <div className="flex items-center space-x-3 pt-3">
               <FormControlLabel
                 control={
                   <Checkbox
@@ -439,12 +439,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
                 }
                 label="Trust Server Certificate"
               />
-            </div>
+            </div> */}
           </div>
 
           <div className="flex flex-col sm:flex-row gap-4 pt-4">
-            <Button 
-              type="button" 
+            <Button
+              type="button"
               variant="outlined"
               color="inherit"
               size="large"
@@ -456,8 +456,8 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
             >
               {testingConnection ? 'Testing Connection...' : 'Test Connection'}
             </Button>
-            <Button 
-              type="submit" 
+            <Button
+              type="submit"
               variant="contained"
               color="primary"
               size="large"
