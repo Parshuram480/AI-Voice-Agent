@@ -8,8 +8,7 @@ import IconButton from '@mui/material/IconButton';
 import Visibility from '@mui/icons-material/Visibility';
 import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import LoginIcon from '@mui/icons-material/Login';
-
-const API_BASE = 'http://localhost:8000';
+import { authService } from '../services/authService';
 
 interface LoginProps {
   onLoginSuccess: (client: any, domainName: string, pipelineMode: string) => void;
@@ -56,26 +55,15 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginProps
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-        credentials: 'include'
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        const meRes = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' });
-        if (meRes.ok) {
-          const meData = await meRes.json();
-          onLoginSuccess(meData.client, meData.domain ? meData.domain.name : 'None', meData.pipeline_mode || 'cascade');
-        } else {
-          setError('Failed to load profile.');
-        }
+      const data = await authService.login({ email, password });
+      if (data.success) {
+        const meData = await authService.checkAuth();
+        onLoginSuccess(meData.client, meData.domain ? meData.domain.name : 'None', meData.pipeline_mode || 'cascade');
       } else {
         setError(data.detail || 'Authentication failed.');
       }
-    } catch (err) {
-      setError('An error occurred. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'An error occurred. Please try again.');
     } finally {
       setLoading(false);
     }

@@ -11,8 +11,7 @@ import DashboardPage from './pages/DashboardPage';
 import AgentModeSelectPage from './pages/AgentModeSelectPage';
 import AgentConsolePage from './pages/AgentConsolePage';
 import AgentCallConsolePage from './pages/AgentCallConsolePage';
-
-const API_BASE = 'http://localhost:8000';
+import { authService } from './services/authService';
 
 type Page = 'LOGIN' | 'REGISTER' | 'DASHBOARD' | 'AGENT_MODE_SELECT' | 'AGENT_CONSOLE' | 'AGENT_CALL_CONSOLE';
 
@@ -98,18 +97,11 @@ export default function App() {
   useEffect(() => {
     async function checkAuth() {
       try {
-        const response = await fetch(`${API_BASE}/api/auth/me`, {
-          credentials: 'include'
-        });
-        if (response.ok) {
-          const data = await response.json();
-          setClient(data.client);
-          setDomainName(data.domain ? data.domain.name : 'None');
-          setPipelineMode(data.pipeline_mode || 'cascade');
-          setCurrentPage('DASHBOARD');
-        } else {
-          setCurrentPage('LOGIN');
-        }
+        const data = await authService.checkAuth();
+        setClient(data.client);
+        setDomainName(data.domain ? data.domain.name : 'None');
+        setPipelineMode(data.pipeline_mode || 'cascade');
+        setCurrentPage('DASHBOARD');
       } catch (err) {
         setCurrentPage('LOGIN');
       } finally {
@@ -121,10 +113,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_BASE}/api/auth/logout`, {
-        method: 'POST',
-        credentials: 'include'
-      });
+      await authService.logout();
     } catch (e) {
       console.error('Logout failed', e);
     }

@@ -7,8 +7,8 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import { twilioService } from '../services/twilioService';
 
-const API_BASE = 'http://localhost:8000';
 const WS_BASE = 'ws://localhost:8000';
 
 interface Client {
@@ -67,9 +67,8 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
 
     pollIntervalRef.current = window.setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/twilio/call/${sid}`);
-        const data = await response.json();
-        if (response.ok && data.success) {
+        const data = await twilioService.getCallStatus(sid);
+        if (data.success) {
           const status = data.status; // e.g. queued, ringing, in-progress, completed, failed
           setTwilioStatus(status);
 
@@ -260,17 +259,11 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
     setTwilioStatus('Initiating outbound call...');
 
     try {
-      const response = await fetch(`${API_BASE}/api/twilio/call`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          phone_number: dialPhoneNumber,
-          client_id: client.id 
-        }),
-        credentials: 'include'
+      const data = await twilioService.dialCall({ 
+        phone_number: dialPhoneNumber,
+        client_id: client.id 
       });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      if (data.success) {
         setCallSid(data.call_sid);
         setStatusType('success');
         setStatusMsg(`Call successfully placed! SID: ${data.call_sid}`);
@@ -296,11 +289,8 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
     setTwilioStatus('Hanging up...');
 
     try {
-      const response = await fetch(`${API_BASE}/api/twilio/call/${callSid}/end`, {
-        method: 'POST'
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const data = await twilioService.endCall(callSid);
+      if (data.success) {
         setCallState('ENDED');
         setCallSid(null);
         setTranscript('—');

@@ -13,8 +13,8 @@ import LogoutIcon from '@mui/icons-material/Logout';
 import SettingsInputComponentIcon from '@mui/icons-material/SettingsInputComponent';
 import SaveIcon from '@mui/icons-material/Save';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
-
-const API_BASE = 'http://localhost:8000';
+import { authService } from '../services/authService';
+import { tenantService } from '../services/tenantService';
 
 interface Client {
   id: number;
@@ -113,21 +113,18 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
   useEffect(() => {
     async function loadConfig() {
       try {
-        const response = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' });
-        if (response.ok) {
-          const data = await response.json();
-          const db = data.db_config;
-          if (db) {
-            setDbType(db.db_type);
-            setDbName(db.db_name);
-            setServerAddress(db.server_name || '');
-            setPort(db.port || '');
-            setUsername(db.username || '');
-            setSchemaName(db.schema_name || '');
-            setEnableSsl(!!db.enable_ssl);
-            setTrustCert(!!db.trust_server_certificate);
-            setTimeoutSec(db.connection_timeout || 5);
-          }
+        const data = await authService.checkAuth();
+        const db = data.db_config;
+        if (db) {
+          setDbType(db.db_type);
+          setDbName(db.db_name);
+          setServerAddress(db.server_name || '');
+          setPort(db.port || '');
+          setUsername(db.username || '');
+          setSchemaName(db.schema_name || '');
+          setEnableSsl(!!db.enable_ssl);
+          setTrustCert(!!db.trust_server_certificate);
+          setTimeoutSec(db.connection_timeout || 5);
         }
       } catch (err) {
         console.error('Failed to load DB config', err);
@@ -174,12 +171,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
     setTestingConnection(true);
     try {
       const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/test-connection`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      const data = await response.json();
+      const data = await tenantService.testConnection(config);
       if (data.success) {
         setStatusType('success');
         setStatusMsg('Database connection test successful!');
@@ -208,14 +200,8 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
 
     try {
       const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/db-config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-        credentials: 'include'
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const data = await tenantService.saveDbConfig(config);
+      if (data.success) {
         setStatusType('success');
         setStatusMsg('Database configuration saved successfully!');
       } else {

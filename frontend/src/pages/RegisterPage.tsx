@@ -11,8 +11,9 @@ import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import WifiIcon from '@mui/icons-material/Wifi';
 import AssignmentIndIcon from '@mui/icons-material/AssignmentInd';
-
-const API_BASE = 'http://localhost:8000';
+import { authService } from '../services/authService';
+import { domainService } from '../services/domainService';
+import { tenantService } from '../services/tenantService';
 
 interface Domain {
   id: number;
@@ -187,8 +188,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
   useEffect(() => {
     async function loadDomains() {
       try {
-        const response = await fetch(`${API_BASE}/api/domains`);
-        const data = await response.json();
+        const data = await domainService.getDomains();
         data.sort((a: Domain, b: Domain) => {
           if (a.name === 'Healthcare') return -1;
           if (b.name === 'Healthcare') return 1;
@@ -245,12 +245,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
     setTestingConnection(true);
     try {
       const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/test-connection`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      const data = await response.json();
+      const data = await tenantService.testConnection(config);
       if (data.success) {
         setStatusType('success');
         setStatusMsg('Database connection test successful!');
@@ -298,13 +293,8 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
     };
 
     try {
-      const response = await fetch(`${API_BASE}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const data = await authService.register(payload);
+      if (data.success) {
         setStatusType('success');
         setStatusMsg('Registration successful! Redirecting to login...');
         setTimeout(() => {
