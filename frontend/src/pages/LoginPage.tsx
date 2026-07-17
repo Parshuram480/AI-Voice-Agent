@@ -8,14 +8,15 @@ import IconButton from '@mui/material/IconButton';
 import Visibility from '@mui/icons-material/Visibility';
 import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import LoginIcon from '@mui/icons-material/Login';
+import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/authService';
 
 interface LoginProps {
   onLoginSuccess: (client: any, domainName: string, pipelineMode: string) => void;
-  onGoToRegister: () => void;
 }
 
-export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginProps) {
+export default function LoginPage({ onLoginSuccess }: LoginProps) {
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -165,7 +166,7 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginProps
         <p className="mt-6 text-center text-slate-400 text-sm">
           Don't have an account?{' '}
           <button 
-            onClick={onGoToRegister} 
+            onClick={() => navigate('/register')} 
             className="text-violet-400 hover:text-violet-300 font-semibold focus:outline-none transition-colors duration-200 cursor-pointer"
           >
             Register here

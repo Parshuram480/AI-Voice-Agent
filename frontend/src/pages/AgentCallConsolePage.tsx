@@ -7,6 +7,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import { useNavigate } from 'react-router-dom';
 import { twilioService } from '../services/twilioService';
 
 const WS_BASE = 'ws://localhost:8000';
@@ -23,10 +24,10 @@ interface AgentCallConsoleProps {
   client: Client;
   domainName: string;
   pipelineMode: string;
-  onBackToDashboard: () => void;
 }
 
-export default function AgentCallConsolePage({ client, domainName, pipelineMode, onBackToDashboard }: AgentCallConsoleProps) {
+export default function AgentCallConsolePage({ client, domainName, pipelineMode }: AgentCallConsoleProps) {
+  const navigate = useNavigate();
   const [dialPhoneNumber, setDialPhoneNumber] = useState('');
   const [dialing, setDialing] = useState(false);
   const [callSid, setCallSid] = useState<string | null>(null);
@@ -336,7 +337,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
           variant="outlined"
           color="inherit"
           size="small"
-          onClick={onBackToDashboard} 
+          onClick={() => navigate('/agent-mode-select')} 
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >

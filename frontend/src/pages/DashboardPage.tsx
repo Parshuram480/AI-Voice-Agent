@@ -13,6 +13,7 @@ import LogoutIcon from '@mui/icons-material/Logout';
 import SettingsInputComponentIcon from '@mui/icons-material/SettingsInputComponent';
 import SaveIcon from '@mui/icons-material/Save';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
+import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/authService';
 import { tenantService } from '../services/tenantService';
 
@@ -28,10 +29,10 @@ interface DashboardProps {
   client: Client;
   domainName: string;
   onLogout: () => void;
-  onLaunchAgent: () => void;
 }
 
-export default function DashboardPage({ client, domainName, onLogout, onLaunchAgent }: DashboardProps) {
+export default function DashboardPage({ client, domainName, onLogout }: DashboardProps) {
+  const navigate = useNavigate();
   const [dbType, setDbType] = useState('sqlite');
   const [dbName, setDbName] = useState('');
   const [serverAddress, setServerAddress] = useState('');
@@ -261,7 +262,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
         {/* Launch Button Room */}
         <div className="text-center py-4 border-y border-slate-850/80">
           <Button
-            onClick={onLaunchAgent}
+            onClick={() => navigate('/agent-mode-select')}
             variant="contained"
             color="primary"
             size="large"

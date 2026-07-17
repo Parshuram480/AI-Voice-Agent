@@ -5,6 +5,8 @@ import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
@@ -12,8 +14,6 @@ import AgentModeSelectPage from './pages/AgentModeSelectPage';
 import AgentConsolePage from './pages/AgentConsolePage';
 import AgentCallConsolePage from './pages/AgentCallConsolePage';
 import { authService } from './services/authService';
-
-type Page = 'LOGIN' | 'REGISTER' | 'DASHBOARD' | 'AGENT_MODE_SELECT' | 'AGENT_CONSOLE' | 'AGENT_CALL_CONSOLE';
 
 interface Client {
   id: number;
@@ -66,7 +66,6 @@ const createAppTheme = (mode: 'light' | 'dark') => createTheme({
 });
 
 export default function App() {
-  const [currentPage, setCurrentPage] = useState<Page>('LOGIN');
   const [client, setClient] = useState<Client | null>(null);
   const [domainName, setDomainName] = useState<string>('');
   const [loading, setLoading] = useState(true);
@@ -75,6 +74,8 @@ export default function App() {
     const saved = localStorage.getItem('theme_mode');
     return (saved === 'light' || saved === 'dark') ? saved : 'dark';
   });
+
+  const navigate = useNavigate();
 
   // Sync theme mode with document element (HTML) class for Tailwind v4 custom dark variant
   useEffect(() => {
@@ -101,9 +102,9 @@ export default function App() {
         setClient(data.client);
         setDomainName(data.domain ? data.domain.name : 'None');
         setPipelineMode(data.pipeline_mode || 'cascade');
-        setCurrentPage('DASHBOARD');
       } catch (err) {
-        setCurrentPage('LOGIN');
+        // Not logged in, redirect to login
+        navigate('/login');
       } finally {
         setLoading(false);
       }
@@ -120,7 +121,7 @@ export default function App() {
     setClient(null);
     setDomainName('');
     localStorage.removeItem('voice_session_id');
-    setCurrentPage('LOGIN');
+    navigate('/login');
   };
 
   if (loading) {
@@ -156,65 +157,96 @@ export default function App() {
           </IconButton>
         </div>
 
-        {currentPage === 'LOGIN' && (
-          <LoginPage 
-            onLoginSuccess={(c, d, pm) => {
-              setClient(c);
-              setDomainName(d);
-              setPipelineMode(pm);
-              setCurrentPage('DASHBOARD');
-            }}
-            onGoToRegister={() => setCurrentPage('REGISTER')}
+        <Routes>
+          {/* Public Routes */}
+          <Route 
+            path="/login" 
+            element={
+              client ? (
+                <Navigate to="/dashboard" replace />
+              ) : (
+                <LoginPage 
+                  onLoginSuccess={(c, d, pm) => {
+                    setClient(c);
+                    setDomainName(d);
+                    setPipelineMode(pm);
+                    navigate('/dashboard');
+                  }}
+                />
+              )
+            } 
           />
-        )}
-        
-        {currentPage === 'REGISTER' && (
-          <RegisterPage 
-            onRegisterSuccess={() => setCurrentPage('LOGIN')}
-            onGoToLogin={() => setCurrentPage('LOGIN')}
+          <Route 
+            path="/register" 
+            element={
+              client ? (
+                <Navigate to="/dashboard" replace />
+              ) : (
+                <RegisterPage />
+              )
+            } 
           />
-        )}
 
-        {currentPage === 'DASHBOARD' && client && (
-          <DashboardPage 
-            client={client}
-            domainName={domainName}
-            onLogout={handleLogout}
-            onLaunchAgent={() => setCurrentPage('AGENT_MODE_SELECT')}
+          {/* Protected Routes */}
+          <Route 
+            path="/dashboard" 
+            element={
+              client ? (
+                <DashboardPage 
+                  client={client}
+                  domainName={domainName}
+                  onLogout={handleLogout}
+                />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
           />
-        )}
+          <Route 
+            path="/agent-mode-select" 
+            element={
+              client ? (
+                <AgentModeSelectPage domainName={domainName} />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/agent-console" 
+            element={
+              client ? (
+                <AgentConsolePage 
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/agent-call-console" 
+            element={
+              client ? (
+                <AgentCallConsolePage 
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
 
-        {currentPage === 'AGENT_MODE_SELECT' && (
-          <AgentModeSelectPage
-            domainName={domainName}
-            onBackToDashboard={() => setCurrentPage('DASHBOARD')}
-            onSelectMode={(mode) => {
-              if (mode === 'mic') {
-                setCurrentPage('AGENT_CONSOLE');
-              } else {
-                setCurrentPage('AGENT_CALL_CONSOLE');
-              }
-            }}
+          {/* Catch-all redirect */}
+          <Route 
+            path="*" 
+            element={<Navigate to={client ? "/dashboard" : "/login"} replace />} 
           />
-        )}
-
-        {currentPage === 'AGENT_CONSOLE' && client && (
-          <AgentConsolePage 
-            client={client}
-            domainName={domainName}
-            pipelineMode={pipelineMode}
-            onBackToDashboard={() => setCurrentPage('AGENT_MODE_SELECT')}
-          />
-        )}
-        
-        {currentPage === 'AGENT_CALL_CONSOLE' && client && (
-          <AgentCallConsolePage 
-            client={client}
-            domainName={domainName}
-            pipelineMode={pipelineMode}
-            onBackToDashboard={() => setCurrentPage('AGENT_MODE_SELECT')}
-          />
-        )}
+        </Routes>
       </div>
     </ThemeProvider>
   );

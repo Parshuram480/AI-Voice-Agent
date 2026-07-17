@@ -11,6 +11,7 @@ import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import WifiIcon from '@mui/icons-material/Wifi';
 import AssignmentIndIcon from '@mui/icons-material/AssignmentInd';
+import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/authService';
 import { domainService } from '../services/domainService';
 import { tenantService } from '../services/tenantService';
@@ -22,12 +23,8 @@ interface Domain {
   status: string;
 }
 
-interface RegisterProps {
-  onRegisterSuccess: () => void;
-  onGoToLogin: () => void;
-}
-
-export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: RegisterProps) {
+export default function RegisterPage() {
+  const navigate = useNavigate();
   const [companyName, setCompanyName] = useState('');
   const [clientName, setClientName] = useState('');
   const [email, setEmail] = useState('');
@@ -298,7 +295,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
         setStatusType('success');
         setStatusMsg('Registration successful! Redirecting to login...');
         setTimeout(() => {
-          onRegisterSuccess();
+          navigate('/login');
         }, 1500);
       } else {
         setStatusType('error');
@@ -618,7 +615,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
         <p className="mt-8 text-center text-slate-400 text-sm">
           Already registered?{' '}
           <button
-            onClick={onGoToLogin}
+            onClick={() => navigate('/login')}
             className="text-violet-400 hover:text-violet-300 font-semibold focus:outline-none transition-colors duration-200 cursor-pointer"
           >
             Sign in here
