@@ -30,6 +30,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
   const [dialPhoneNumber, setDialPhoneNumber] = useState('');
   const [dialing, setDialing] = useState(false);
   const [callSid, setCallSid] = useState<string | null>(null);
+  const [phoneError, setPhoneError] = useState('');
   
   // Call status options: 'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'
   const [callState, setCallState] = useState<'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'>('IDLE');
@@ -239,6 +240,21 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
     e.preventDefault();
     setStatusMsg('');
     setStatusType('');
+    setPhoneError('');
+
+    const cleanedNumber = dialPhoneNumber.trim();
+    if (!cleanedNumber) {
+      setPhoneError('Phone number is required');
+      return;
+    }
+
+    // Require country code starting with '+' (e.g., +15550199)
+    const phoneRegex = /^\+[1-9]\d{6,14}$/;
+    if (!phoneRegex.test(cleanedNumber)) {
+      setPhoneError('Please enter a valid phone number with "+" and country code (e.g. +15550199)');
+      return;
+    }
+
     setDialing(true);
     setCallState('DIALING');
     setTwilioStatus('Initiating outbound call...');
@@ -394,13 +410,18 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode,
                 <form onSubmit={handleDialCall} className="space-y-4">
                   <TextField
                     label="Destination Phone Number"
+                    sx={{ pb: 2 }}
                     placeholder="+15550199"
                     variant="outlined"
                     fullWidth
-                    required
                     disabled={dialing}
                     value={dialPhoneNumber}
-                    onChange={e => setDialPhoneNumber(e.target.value)}
+                    onChange={e => {
+                      setDialPhoneNumber(e.target.value);
+                      if (phoneError) setPhoneError('');
+                    }}
+                    error={!!phoneError}
+                    helperText={phoneError}
                     slotProps={{ inputLabel: { shrink: true } }}
                   />
                   <Button

@@ -48,6 +48,68 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
   const [testingConnection, setTestingConnection] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Validation States
+  const [errors, setErrors] = useState({
+    dbName: '',
+    serverAddress: '',
+    port: '',
+    username: '',
+    timeout: ''
+  });
+
+  const validateForm = (): boolean => {
+    let isValid = true;
+    const newErrors = {
+      dbName: '',
+      serverAddress: '',
+      port: '',
+      username: '',
+      timeout: ''
+    };
+
+    if (!dbName.trim()) {
+      newErrors.dbName = 'Database name is required';
+      isValid = false;
+    }
+
+    if (dbType !== 'sqlite') {
+      if (!serverAddress.trim()) {
+        newErrors.serverAddress = 'Server address is required';
+        isValid = false;
+      }
+
+      if (port === '') {
+        newErrors.port = 'Port is required';
+        isValid = false;
+      } else {
+        const portNum = Number(port);
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+          newErrors.port = 'Port must be a valid number between 1 and 65535';
+          isValid = false;
+        }
+      }
+
+      if (!username.trim()) {
+        newErrors.username = 'Username is required';
+        isValid = false;
+      }
+    }
+
+    if (timeout === '' || isNaN(Number(timeout))) {
+      newErrors.timeout = 'Timeout is required';
+      isValid = false;
+    } else {
+      const t = Number(timeout);
+      if (t < 1 || t > 120) {
+        newErrors.timeout = 'Timeout must be between 1 and 120 seconds';
+        isValid = false;
+      }
+    }
+
+    setErrors(newErrors);
+    return isValid;
+  };
+
   useEffect(() => {
     async function loadConfig() {
       try {
@@ -102,6 +164,11 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
   };
 
   const handleTestConnection = async () => {
+    if (!validateForm()) {
+      setStatusType('error');
+      setStatusMsg('Please correct the database configuration errors before testing connection.');
+      return;
+    }
     setStatusMsg('');
     setStatusType('');
     setTestingConnection(true);
@@ -130,6 +197,11 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!validateForm()) {
+      setStatusType('error');
+      setStatusMsg('Please correct the highlighted form errors.');
+      return;
+    }
     setStatusMsg('');
     setStatusType('');
     setSaving(true);
@@ -164,7 +236,7 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-extrabold bg-gradient-to-r from-violet-400 to-pink-500 bg-clip-text text-transparent">
+          <h1 className="text-3xl font-extrabold bg-gradient-to-r from-violet-400 to-pink-500 bg-clip-text text-transparent pb-2">
             Client Dashboard
           </h1>
           <p className="text-slate-400 text-sm mt-1">
@@ -252,8 +324,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               variant="outlined"
               fullWidth
               value={dbName}
-              onChange={e => setDbName(e.target.value)}
-              required
+              onChange={e => {
+                setDbName(e.target.value);
+                if (errors.dbName) setErrors(prev => ({ ...prev, dbName: '' }));
+              }}
+              error={!!errors.dbName}
+              helperText={errors.dbName}
               slotProps={{ inputLabel: { shrink: true } }}
             />
             <TextField 
@@ -262,7 +338,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               variant="outlined"
               fullWidth
               value={serverAddress}
-              onChange={e => setServerAddress(e.target.value)}
+              onChange={e => {
+                setServerAddress(e.target.value);
+                if (errors.serverAddress) setErrors(prev => ({ ...prev, serverAddress: '' }));
+              }}
+              error={!!errors.serverAddress}
+              helperText={errors.serverAddress}
               disabled={isSqlite}
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
@@ -274,7 +355,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               variant="outlined"
               fullWidth
               value={port}
-              onChange={e => setPort(e.target.value ? Number(e.target.value) : '')}
+              onChange={e => {
+                setPort(e.target.value ? Number(e.target.value) : '');
+                if (errors.port) setErrors(prev => ({ ...prev, port: '' }));
+              }}
+              error={!!errors.port}
+              helperText={errors.port}
               disabled={isSqlite}
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
@@ -285,7 +371,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               variant="outlined"
               fullWidth
               value={username}
-              onChange={e => setUsername(e.target.value)}
+              onChange={e => {
+                setUsername(e.target.value);
+                if (errors.username) setErrors(prev => ({ ...prev, username: '' }));
+              }}
+              error={!!errors.username}
+              helperText={errors.username}
               disabled={isSqlite}
               sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
               slotProps={{ inputLabel: { shrink: true } }}
@@ -317,7 +408,12 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
               variant="outlined"
               fullWidth
               value={timeout}
-              onChange={e => setTimeoutSec(Number(e.target.value))}
+              onChange={e => {
+                setTimeoutSec(Number(e.target.value));
+                if (errors.timeout) setErrors(prev => ({ ...prev, timeout: '' }));
+              }}
+              error={!!errors.timeout}
+              helperText={errors.timeout}
               slotProps={{ inputLabel: { shrink: true } }}
             />
             <div className="flex items-center space-x-3 pt-3">

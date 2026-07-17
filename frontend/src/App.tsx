@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import CircularProgress from '@mui/material/CircularProgress';
+import IconButton from '@mui/material/IconButton';
+import LightModeIcon from '@mui/icons-material/LightMode';
+import DarkModeIcon from '@mui/icons-material/DarkMode';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
@@ -21,10 +24,10 @@ interface Client {
   phone?: string;
 }
 
-// Custom Slate-Dark Material-UI Theme
-const darkTheme = createTheme({
+// Custom Slate Material-UI Theme Creator
+const createAppTheme = (mode: 'light' | 'dark') => createTheme({
   palette: {
-    mode: 'dark',
+    mode,
     primary: {
       main: '#8b5cf6', // violet-500
     },
@@ -32,12 +35,12 @@ const darkTheme = createTheme({
       main: '#ec4899', // pink-500
     },
     background: {
-      default: '#020617', // slate-955
-      paper: '#0f172a', // slate-900
+      default: mode === 'dark' ? '#020617' : '#f8fafc', // slate-950 in dark, slate-50 in light
+      paper: mode === 'dark' ? '#0f172a' : '#ffffff', // slate-900 in dark, white in light
     },
     text: {
-      primary: '#f8fafc',
-      secondary: '#94a3b8',
+      primary: mode === 'dark' ? '#f8fafc' : '#0f172a', // slate-100 in dark, slate-950 in light
+      secondary: mode === 'dark' ? '#94a3b8' : '#475569', // slate-400 in dark, slate-600 in light
     },
   },
   typography: {
@@ -69,6 +72,27 @@ export default function App() {
   const [domainName, setDomainName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [pipelineMode, setPipelineMode] = useState<string>('cascade');
+  const [themeMode, setThemeMode] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('theme_mode');
+    return (saved === 'light' || saved === 'dark') ? saved : 'dark';
+  });
+
+  // Sync theme mode with document element (HTML) class for Tailwind v4 custom dark variant
+  useEffect(() => {
+    const root = window.document.documentElement;
+    if (themeMode === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('theme_mode', themeMode);
+  }, [themeMode]);
+
+  const toggleTheme = () => {
+    setThemeMode((prev) => (prev === 'light' ? 'dark' : 'light'));
+  };
+
+  const appTheme = createAppTheme(themeMode);
 
   // Check auth session on startup
   useEffect(() => {
@@ -112,9 +136,9 @@ export default function App() {
 
   if (loading) {
     return (
-      <ThemeProvider theme={darkTheme}>
+      <ThemeProvider theme={appTheme}>
         <CssBaseline />
-        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-slate-400">
+        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-slate-400 transition-colors duration-300">
           <CircularProgress color="primary" className="mb-4" />
           <p className="text-xs uppercase tracking-widest font-semibold select-none">Loading voice platform...</p>
         </div>
@@ -123,9 +147,26 @@ export default function App() {
   }
 
   return (
-    <ThemeProvider theme={darkTheme}>
+    <ThemeProvider theme={appTheme}>
       <CssBaseline />
-      <div className="bg-slate-950 text-slate-100 min-h-screen font-sans selection:bg-violet-500 selection:text-white antialiased">
+      <div className="bg-slate-950 text-slate-100 min-h-screen font-sans selection:bg-violet-500 selection:text-white antialiased relative transition-colors duration-300">
+        
+        {/* Floating Glassmorphic Theme Toggle Button */}
+        <div className="fixed top-4 right-4 z-50 animate-fade-in">
+          <IconButton 
+            onClick={toggleTheme} 
+            color="inherit" 
+            className="cursor-pointer bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 rounded-full p-2.5 backdrop-blur-xl shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-300"
+            aria-label={`Switch to ${themeMode === 'light' ? 'dark' : 'light'} theme`}
+          >
+            {themeMode === 'dark' ? (
+              <LightModeIcon className="text-amber-400 w-5 h-5 transition-transform duration-300 hover:rotate-45" />
+            ) : (
+              <DarkModeIcon className="text-violet-500 w-5 h-5 transition-transform duration-300 hover:-rotate-12" />
+            )}
+          </IconButton>
+        </div>
+
         {currentPage === 'LOGIN' && (
           <LoginPage 
             onLoginSuccess={(c, d, pm) => {
