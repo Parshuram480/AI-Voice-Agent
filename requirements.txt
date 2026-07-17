@@ -27,3 +27,4 @@ langsmith
 openai
 pyodbc
 pymysql
+PyYAML>=6.0.1

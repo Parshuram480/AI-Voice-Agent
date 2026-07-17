@@ -94,13 +94,6 @@ class StreamingVoicePipeline:
       - Multi-turn (new): process_continuous() runs a conversation loop
     """
 
-    SYSTEM_PROMPT = (
-        "You are a helpful, friendly customer support voice agent. "
-        "Assist callers with order status and general questions. "
-        "Keep responses to 1-2 sentences since they'll be spoken aloud. "
-        "Be warm, professional, direct. No markdown or formatting."
-    )
-
     def __init__(
         self,
         groq_client: GroqClient,

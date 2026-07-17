@@ -423,9 +423,9 @@ class DatabaseClient:
                 session_id, user_id, pipeline_mode, history, summary, intent,
                 total_input_tokens, total_output_tokens, total_input_output_tokens,
                 summary_input_tokens, summary_output_tokens, summary_input_output_tokens,
-                total_tokens, average_latency
+                total_tokens, average_latency, client_id, domain
             ) VALUES (
-                $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
             )
             ON CONFLICT (session_id) DO UPDATE SET
                 user_id = EXCLUDED.user_id,
@@ -440,7 +440,9 @@ class DatabaseClient:
                 summary_output_tokens = EXCLUDED.summary_output_tokens,
                 summary_input_output_tokens = EXCLUDED.summary_input_output_tokens,
                 total_tokens = EXCLUDED.total_tokens,
-                average_latency = EXCLUDED.average_latency;
+                average_latency = EXCLUDED.average_latency,
+                client_id = EXCLUDED.client_id,
+                domain = EXCLUDED.domain;
         """
         try:
             import json
@@ -462,7 +464,9 @@ class DatabaseClient:
                     log_data.get("summary_output_tokens", 0),
                     log_data.get("summary_input_output_tokens", 0),
                     log_data.get("total_tokens", 0),
-                    log_data.get("average_latency", 0.0)
+                    log_data.get("average_latency", 0.0),
+                    log_data.get("client_id"),
+                    log_data.get("domain")
                 )
             return True
         except Exception as e:

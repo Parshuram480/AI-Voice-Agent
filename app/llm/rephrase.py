@@ -11,18 +11,11 @@ LLM_REPHRASE_TEMPERATURE = float(os.getenv("LLM_REPHRASE_TEMPERATURE", "0.2"))
 from typing import AsyncGenerator
 
 from app.groq_client import GroqClient
+from app.utils.prompt_loader import get_prompts
 
 
 class LLMRephraser:
     """Rephrase deterministic responses without altering facts."""
-
-    SYSTEM_PROMPT = (
-        "You are a customer support assistant. "
-        "Rephrase the provided response to sound natural, short, and clear. "
-        "Do not add or remove facts. "
-        "If the response asks for clarification, keep it as a question. "
-        "Return only the final response text." 
-    )
 
     def __init__(self, groq_client: GroqClient) -> None:
         self._groq = groq_client
@@ -35,8 +28,10 @@ class LLMRephraser:
         if not draft_text or not self.enabled:
             return draft_text
 
+        prompts_yaml = get_prompts()
+        system_prompt = prompts_yaml.get("cascade", {}).get("rephrase", "Rephrase the text.")
         messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": draft_text},
         ]
 
@@ -55,8 +50,10 @@ class LLMRephraser:
             yield draft_text
             return
 
+        prompts_yaml = get_prompts()
+        system_prompt = prompts_yaml.get("cascade", {}).get("rephrase", "Rephrase the text.")
         messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": draft_text},
         ]
 

@@ -210,7 +210,44 @@ async def startup():
         from app.gemini_live_client import GeminiLiveClient
         from app.multimodal_pipeline import GeminiLivePipeline
         gemini_client = GeminiLiveClient(verification_service, order_service)
-        streaming_pipeline = GeminiLivePipeline(gemini_client, db_client)
+
+        # Dynamic Mode check
+        dynamic_config_path = os.getenv("DYNAMIC_CLIENT_CONFIG")
+        if dynamic_config_path and Path(dynamic_config_path).exists():
+            import json
+            from app.services.pg_schema_service import PgSchemaService
+            from app.services.dynamic_tool_factory import DynamicToolFactory
+            from app.services.dynamic_tool_executor import DynamicToolExecutor
+            from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+            
+            with open(dynamic_config_path, "r") as f:
+                dynamic_config = json.load(f)
+            
+            schema_service = PgSchemaService(dynamic_config["database"])
+            schema_metadata = await schema_service.get_schema_metadata()
+            
+            tool_factory = DynamicToolFactory(dynamic_config, schema_metadata)
+            tools, exec_map = tool_factory.generate_tools()
+            
+            executor = DynamicToolExecutor(
+                dynamic_config["database"], 
+                exec_map, 
+                dynamic_config["identity"]["table"],
+                dynamic_config["identity"]["name_column"],
+                dynamic_config["identity"]["verification_column"]
+            )
+            prompt = DynamicPromptAssembler.assemble(dynamic_config, schema_metadata, tools)
+            
+            gemini_client.set_dynamic_mode(tools, executor, prompt)
+            logger.info("✓ Dynamic Mode enabled for Multimodal Pipeline")
+
+        # Instantiate pipeline
+        streaming_pipeline = GeminiLivePipeline(
+            gemini_client,
+            db_client,
+            client_id=dynamic_config.get("client_id"),
+            domain=dynamic_config.get("domain")
+        )
         logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
     else:
         # Initialize streaming pipeline
@@ -336,20 +373,42 @@ async def audio_stream(websocket: WebSocket):
         resample_state = None
         logger.info("[OUTBOUND LOOP] Started outbound audio stream task")
         while True:
-            wav_bytes = await outbound_audio_queue.get()
-            if wav_bytes is None:
+            audio_item = await outbound_audio_queue.get()
+            if audio_item is None:
                 logger.info("[OUTBOUND LOOP] Received Sentinel None, stopping outbound task")
                 break
                 
-            logger.info(f"[OUTBOUND LOOP] Dequeued {len(wav_bytes)} wav bytes. stream_sid={stream_sid}")
+            if audio_item == "CLEAR":
+                logger.info("[OUTBOUND LOOP] Clear signal received. Flushing pending audio.")
+                while not outbound_audio_queue.empty():
+                    try:
+                        outbound_audio_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                # Reset resample state so the new audio stream doesn't click
+                resample_state = None
+                continue
+                
             if not stream_sid:
                 logger.warning("[OUTBOUND LOOP] stream_sid is not yet set, discarding chunk")
                 continue
 
             try:
-                pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
-                if not pcm_bytes:
-                    continue
+                if isinstance(audio_item, tuple):
+                    # Direct PCM tuple: (pcm_bytes, sample_rate)
+                    pcm_bytes, sample_rate = audio_item
+                    sample_width = 2
+                    channels = 1
+                else:
+                    # Legacy WAV bytes (from Cartesia etc)
+                    wav_bytes = audio_item
+                    pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
+                    if not pcm_bytes:
+                        continue
+                        
+                # Ensure pcm_bytes is a whole number of frames to prevent audioop crash
+                if len(pcm_bytes) % sample_width != 0:
+                    pcm_bytes += b'\x00' * (sample_width - (len(pcm_bytes) % sample_width))
 
                 if sample_width != 2:
                     pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
@@ -370,16 +429,16 @@ async def audio_stream(websocket: WebSocket):
                 ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
                 if ok:
                     stream_audio_sent = True
+                    logger.info(f"[OUTBOUND LOOP] Successfully sent {len(pcm_bytes)} bytes to Twilio.")
             except Exception as e:
                 logger.error(f"CRITICAL ERROR in _outbound_audio_loop: {e}")
                 import traceback
                 traceback.print_exc()
 
-    def on_tts_audio(audio_bytes: bytes):
-        logger.info(f"[MAIN ON_TTS_AUDIO] Received {len(audio_bytes)} bytes. use_stream_audio_out={use_stream_audio_out}")
+    def on_tts_audio(audio_data):
         if not use_stream_audio_out:
             return
-        outbound_audio_queue.put_nowait(audio_bytes)
+        outbound_audio_queue.put_nowait(audio_data)
 
     def on_stt_text(text: str):
         logger.info(f"Twilio Call STT: {text}")
