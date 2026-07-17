@@ -434,7 +434,6 @@ async def audio_stream(websocket: WebSocket):
 
     def on_tts_audio(audio_bytes: bytes):
         logger.info(f"[MAIN ON_TTS_AUDIO] Received {len(audio_bytes)} bytes. use_stream_audio_out={use_stream_audio_out}")
-        if not use_stream_audio_out:
         nonlocal stream_audio_sent
         if not use_stream_audio_out or not twilio_adapter:
             return
