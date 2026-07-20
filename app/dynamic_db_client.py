@@ -16,6 +16,139 @@ class DynamicDbClient:
         self.password = config.get("password", "")
         self.connection_timeout = config.get("connection_timeout", 5)
 
+    async def introspect_schema(self) -> Dict[str, List[str]]:
+        """Introspects user database schema, returning table names mapped to their column names."""
+        if self.db_type == "sqlite":
+            return await self._introspect_sqlite()
+        elif self.db_type == "postgresql":
+            return await self._introspect_postgresql()
+        elif self.db_type in ("mysql", "mariadb"):
+            return await self._introspect_mysql()
+        elif self.db_type == "sql server":
+            return await self._introspect_sql_server()
+        else:
+            return {}
+
+    async def _introspect_sqlite(self) -> Dict[str, List[str]]:
+        db_path = self.db_name
+        def _run():
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            schema: Dict[str, List[str]] = {}
+            try:
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+                tables = [r[0] for r in cursor.fetchall()]
+                for t in tables:
+                    cursor.execute(f'PRAGMA table_info("{t}");')
+                    cols = [c[1] for c in cursor.fetchall()]
+                    schema[t] = cols
+                return schema
+            except Exception as e:
+                logger.error(f"SQLite introspection error: {e}")
+                return {}
+            finally:
+                conn.close()
+        return await asyncio.to_thread(_run)
+
+    async def _introspect_postgresql(self) -> Dict[str, List[str]]:
+        import asyncpg
+        try:
+            conn = await asyncpg.connect(
+                host=self.server_name or "localhost",
+                port=int(self.port) if self.port else 5432,
+                database=self.db_name,
+                user=self.username,
+                password=self.password,
+                timeout=float(self.connection_timeout),
+            )
+            try:
+                rows = await conn.fetch("""
+                    SELECT table_name, column_name 
+                    FROM information_schema.columns 
+                    WHERE table_schema = 'public' 
+                    ORDER BY table_name, ordinal_position
+                """)
+                schema: Dict[str, List[str]] = {}
+                for r in rows:
+                    t = r["table_name"]
+                    c = r["column_name"]
+                    if t not in schema:
+                        schema[t] = []
+                    schema[t].append(c)
+                return schema
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(f"PostgreSQL introspection error: {e}")
+            return {}
+
+    async def _introspect_mysql(self) -> Dict[str, List[str]]:
+        import pymysql
+        def _run():
+            conn = pymysql.connect(
+                host=self.server_name or "localhost",
+                port=int(self.port) if self.port else 3306,
+                database=self.db_name,
+                user=self.username,
+                password=self.password,
+                connect_timeout=int(self.connection_timeout)
+            )
+            schema: Dict[str, List[str]] = {}
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT table_name, column_name 
+                        FROM information_schema.columns 
+                        WHERE table_schema = %s 
+                        ORDER BY table_name, ordinal_position
+                    """, (self.db_name,))
+                    rows = cursor.fetchall()
+                    for t, c in rows:
+                        if t not in schema:
+                            schema[t] = []
+                        schema[t].append(c)
+                return schema
+            except Exception as e:
+                logger.error(f"MySQL introspection error: {e}")
+                return {}
+            finally:
+                conn.close()
+        return await asyncio.to_thread(_run)
+
+    async def _introspect_sql_server(self) -> Dict[str, List[str]]:
+        import pyodbc
+        def _run():
+            conn_str = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.server_name};"
+                f"DATABASE={self.db_name};"
+                f"UID={self.username};"
+                f"PWD={self.password};"
+                f"Connection Timeout={self.connection_timeout};"
+            )
+            if self.config.get("trust_server_certificate"):
+                conn_str += "TrustServerCertificate=yes;"
+            conn = pyodbc.connect(conn_str)
+            schema: Dict[str, List[str]] = {}
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT table_name, column_name 
+                    FROM information_schema.columns 
+                    ORDER BY table_name, ordinal_position
+                """)
+                for t, c in cursor.fetchall():
+                    if t not in schema:
+                        schema[t] = []
+                    schema[t].append(c)
+                return schema
+            except Exception as e:
+                logger.error(f"SQL Server introspection error: {e}")
+                return {}
+            finally:
+                conn.close()
+        return await asyncio.to_thread(_run)
+
     async def execute_query(self, query: str, params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
         """Executes query on client database asynchronously."""
         if self.db_type == "sqlite":
@@ -68,14 +201,25 @@ class DynamicDbClient:
             else:
                 new_query += char
 
-        # Convert ISO date strings ("YYYY-MM-DD") to datetime.date objects for asyncpg
+        # Convert ISO ("YYYY-MM-DD") or compact ("YYYYMMDD") date strings to datetime.date objects for asyncpg
         pg_params = []
         for p in params:
-            if isinstance(p, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", p):
-                try:
-                    pg_params.append(datetime.date.fromisoformat(p))
-                except ValueError:
-                    pg_params.append(p)
+            if isinstance(p, str):
+                p_clean = p.strip()
+                if re.match(r"^\d{4}-\d{2}-\d{2}$", p_clean):
+                    try:
+                        pg_params.append(datetime.date.fromisoformat(p_clean))
+                        continue
+                    except ValueError:
+                        pass
+                elif re.match(r"^\d{8}$", p_clean):
+                    try:
+                        y, m, d = int(p_clean[:4]), int(p_clean[4:6]), int(p_clean[6:8])
+                        pg_params.append(datetime.date(y, m, d))
+                        continue
+                    except ValueError:
+                        pass
+                pg_params.append(p)
             else:
                 pg_params.append(p)
 
@@ -89,7 +233,15 @@ class DynamicDbClient:
             timeout=float(self.connection_timeout),
         )
         try:
-            rows = await conn.fetch(new_query, *pg_params)
+            try:
+                rows = await conn.fetch(new_query, *pg_params)
+            except Exception as first_err:
+                logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with string params...")
+                str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+                try:
+                    rows = await conn.fetch(new_query, *str_params)
+                except Exception:
+                    raise first_err
             return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"PostgreSQL error running query: {e}")
