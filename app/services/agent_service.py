@@ -857,7 +857,10 @@ class AgentService:
                                 if hasattr(v, "isoformat"):
                                     customer[k] = v.isoformat()
                             
-                            raw_records = await db_client.execute_query(mapping["data_query"], (customer["id"],))
+                            data_query = mapping["data_query"]
+                            if "LIMIT" not in data_query.upper():
+                                data_query += " LIMIT 20"
+                            raw_records = await db_client.execute_query(data_query, (customer["id"],))
                             records = []
                             for r in raw_records:
                                 item = dict(r)
@@ -912,7 +915,10 @@ class AgentService:
                     records = []
                     if db_client and mapping:
                         try:
-                            raw_records = await db_client.execute_query(mapping["data_query"], (state["customer"]["id"],))
+                            data_query = mapping["data_query"]
+                            if "LIMIT" not in data_query.upper():
+                                data_query += " LIMIT 20"
+                            raw_records = await db_client.execute_query(data_query, (state["customer"]["id"],))
                             records = []
                             for r in raw_records:
                                 item = dict(r)

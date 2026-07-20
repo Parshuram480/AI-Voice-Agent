@@ -5,25 +5,19 @@ import asyncpg
 from typing import Dict, Any, Optional
 from google.genai import types
 import datetime
+import decimal
 
 logger = logging.getLogger(__name__)
 
 class DynamicToolExecutor:
     """Executes dynamic SQL maps safely."""
 
-    def __init__(self, db_config: Dict[str, Any], execution_map: Dict[str, str], identity_table: str, identity_name_col: str = None, identity_verify_col: str = None):
-        self.db_config = db_config
+    def __init__(self, pool: asyncpg.Pool, execution_map: Dict[str, dict], identity_table: str, identity_name_col: str = None, identity_verify_col: str = None):
+        self._pool = pool
         self.execution_map = execution_map
         self.identity_table = identity_table
         self.identity_name_col = identity_name_col
         self.identity_verify_col = identity_verify_col
-        
-        # Connect to Postgres
-        self.host = db_config.get("server_name", "localhost")
-        self.port = db_config.get("port", 5432)
-        self.database = db_config.get("db_name")
-        self.user = db_config.get("username")
-        self.password = db_config.get("password")
 
     async def execute(self, tool_call_id: str, name: str, args: dict, state: dict) -> types.FunctionResponse:
         """Execute the tool and return FunctionResponse."""
@@ -33,100 +27,116 @@ class DynamicToolExecutor:
                 name=name, id=tool_call_id, response={"error": f"Unknown function {name}"}
             )
             
-        sql = self.execution_map[name]
+        tool_entry = self.execution_map[name]
+        sql = tool_entry["sql"]
+        tool_type = tool_entry["type"]
+        limit = tool_entry.get("limit")
         logger.info(f"Executing Dynamic Tool: {name} with args {args} - SQL: {sql}")
 
         try:
-            conn = await asyncpg.connect(
-                host=self.host, port=self.port, database=self.database, user=self.user, password=self.password
-            )
-        except Exception as e:
-            logger.error(f"Failed to connect to PG for tool execution: {e}")
-            return types.FunctionResponse(
-                name=name, id=tool_call_id, response={"error": "Database connection failed."}
-            )
-
-        try:
             response_data = {}
-            
-            # 1. Identity Verification Tool (e.g., verify_patients)
-            if name == f"verify_{self.identity_table}":
-                if state.get("verified"):
-                    return types.FunctionResponse(
-                        name=name, id=tool_call_id, response={"error": "You are already verified for this session. You cannot change your identity during an active call."}
-                    )
+            async with self._pool.acquire() as conn:
+                if name.startswith("verify_"):
+                    # SECURITY FIX: Prevent re-authentication hijacking
+                    if state.get("verified") is True:
+                        logger.warning(f"SECURITY BLOCK: Attempted re-authentication. Current state: {state}")
+                        response_data = {
+                            "verified": True,
+                            "error": "SECURITY BLOCK: A user is already verified in this session. You cannot verify as a different person during the same call."
+                        }
+                        return types.FunctionResponse(name=name, id=tool_call_id, response=response_data)
+
+                    # Execute verification logic
+                    logger.info(f"Running verification for args: {args}")
                     
-                val1 = args.get(self.identity_name_col)
-                val2 = args.get(self.identity_verify_col)
-                
-                if val1 is not None and val2 is not None:
-                    rows = await conn.fetch(sql, val1, str(val2))
-                    if rows:
+                    params = [args.get(k) for k in tool_entry.get("param_order", args.keys())]
+                    rows = await conn.fetch(sql, *params)
+                    
+                    if not rows:
+                        response_data = {
+                            "verified": False,
+                            "message": f"No record found in {self.identity_table} matching provided details."
+                        }
+                    else:
                         row = dict(rows[0])
                         # Convert date/time to string
                         for k, v in row.items():
                             if isinstance(v, (datetime.date, datetime.datetime, datetime.time)):
                                 row[k] = v.isoformat()
-                                
-                        state["verified"] = True
-                        # Assume the primary key is 'id' or the first column
-                        state["identity_id"] = row.get("id") or list(row.values())[0]
-                        state["identity_data"] = row
-                        
+
                         response_data = {
                             "verified": True,
-                            "message": "Identity successfully verified.",
-                            "data": row
+                            "user_details": row,
+                            "message": "User verified successfully."
                         }
+                        
+                        # Set identity_id in state
+                        pk_col = tool_entry.get("pk_col")
+                        if pk_col and pk_col in row:
+                            state["identity_id"] = row[pk_col]
+                        else:
+                            # Fallback if no PK is defined in schema
+                            state["identity_id"] = list(row.keys())[0] if row else None
+                        state["verified"] = True
+                        
+                elif tool_type == "linked":
+                    # Linked Table Tool (e.g., get_appointments)
+                    logger.info(f"Running linked query for args: {args}")
+                    if not state.get("verified") or not state.get("identity_id"):
+                        response_data = {"error": "User not verified. Please verify identity first."}
                     else:
+                        rows = await conn.fetch(sql, state["identity_id"])
+                        
+                        results = []
+                        for row in rows:
+                            r = dict(row)
+                            for k, v in r.items():
+                                if isinstance(v, (datetime.date, datetime.datetime, datetime.time)):
+                                    r[k] = v.isoformat()
+                                elif isinstance(v, decimal.Decimal):
+                                    r[k] = float(v)
+                            results.append(r)
+    
                         response_data = {
-                            "verified": False,
-                            "message": "Verification failed. Record not found."
+                            "results": results,
+                            "count": len(results)
                         }
+                        if limit and len(results) >= limit:
+                            response_data["note"] = f"Results limited to top {limit}."
+                
                 else:
-                    response_data = {"error": "Missing required verification parameters."}
+                    # Unlinked lookup execution
+                    logger.info(f"Running unlinked query for args: {args}")
                     
-            # 2. Linked Table Tool (e.g., get_appointments)
-            elif name.startswith("get_"):
-                if not state.get("verified") or not state.get("identity_id"):
-                    response_data = {"error": "User not verified. Please verify identity first."}
-                else:
-                    rows = await conn.fetch(sql, state["identity_id"])
+                    params = [args.get(k) for k in tool_entry.get("param_order", args.keys())]
+                    if params and params[0] is not None:
+                        rows = await conn.fetch(sql, params[0])
+                    else:
+                        rows = await conn.fetch(sql)
+                    
                     results = []
                     for row in rows:
                         r = dict(row)
                         for k, v in r.items():
                             if isinstance(v, (datetime.date, datetime.datetime, datetime.time)):
                                 r[k] = v.isoformat()
+                            elif isinstance(v, decimal.Decimal):
+                                r[k] = float(v)
                         results.append(r)
-                    response_data = {"results": results, "count": len(results)}
 
-            # 3. Unlinked/Lookup Tool
-            else:
-                # Standalone lookup by primary key
-                params = list(args.values())
-                if params:
-                    rows = await conn.fetch(sql, params[0])
-                else:
-                    rows = await conn.fetch(sql)
-                    
-                results = []
-                for row in rows:
-                    r = dict(row)
-                    for k, v in r.items():
-                        if isinstance(v, (datetime.date, datetime.datetime)):
-                            r[k] = v.isoformat()
-                    results.append(r)
-                response_data = {"results": results}
+                    response_data = {
+                        "results": results,
+                        "count": len(results)
+                    }
+                    if limit and len(results) >= limit:
+                        response_data["note"] = f"Results limited to top {limit}."
 
             return types.FunctionResponse(
                 name=name, id=tool_call_id, response=response_data
             )
             
         except Exception as e:
-            logger.error(f"Error executing tool {name}: {e}")
+            logger.error(f"Database error executing tool {name}: {e}")
             return types.FunctionResponse(
-                name=name, id=tool_call_id, response={"error": str(e)}
+                name=name, id=tool_call_id, response={"error": f"Database error: {str(e)}"}
             )
-        finally:
-            await conn.close()

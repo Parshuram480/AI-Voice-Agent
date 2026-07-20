@@ -88,9 +88,9 @@ def test_dynamic_tool_factory(sample_config, mock_schema_metadata):
     
     # Test execution map
     assert "verify_patients" in exec_map
-    assert "SELECT id, full_name, date_of_birth, phone, insurance_id" in exec_map["verify_patients"]
+    assert "SELECT id, full_name, date_of_birth, phone, insurance_id" in exec_map["verify_patients"]["sql"]
     assert "get_appointments" in exec_map
-    assert "WHERE patient_id = $1" in exec_map["get_appointments"]
+    assert "WHERE appointments.patient_id = $1" in exec_map["get_appointments"]["sql"]
 
 def test_dynamic_prompt_assembler(sample_config, mock_schema_metadata):
     factory = DynamicToolFactory(sample_config, mock_schema_metadata)
@@ -117,8 +117,11 @@ async def test_pg_schema_service_integration(sample_config):
 async def test_dynamic_executor_integration(sample_config, mock_schema_metadata):
     factory = DynamicToolFactory(sample_config, mock_schema_metadata)
     tools, exec_map = factory.generate_tools()
+    from app.dynamic_db_client import DynamicDbClient
+    dyn_client = DynamicDbClient(sample_config["database"])
+    pool = await dyn_client.get_pg_pool()
     
-    executor = DynamicToolExecutor(sample_config["database"], exec_map, sample_config["identity"]["table"])
+    executor = DynamicToolExecutor(pool, exec_map, sample_config["identity"]["table"])
     
     # Test verify failure
     state = {}

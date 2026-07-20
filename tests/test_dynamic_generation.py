@@ -32,8 +32,8 @@ async def main():
         print(f"- {t['name']}: {t['description']}")
         
     print("\nGenerated SQL Execution Map:")
-    for name, sql in exec_map.items():
-        print(f"- {name}:\n    {sql}")
+    for name, tool_data in exec_map.items():
+        print(f"- {name}:\n    {tool_data['sql']}")
         
     print("\n=== Testing Dynamic Prompt Assembler ===")
     prompt = DynamicPromptAssembler.assemble(config, schema_metadata, tools)

@@ -229,8 +229,12 @@ async def startup():
             tool_factory = DynamicToolFactory(dynamic_config, schema_metadata)
             tools, exec_map = tool_factory.generate_tools()
             
+            from app.dynamic_db_client import DynamicDbClient
+            dyn_db_client = DynamicDbClient(dynamic_config["database"])
+            pool = await dyn_db_client.get_pg_pool()
+
             executor = DynamicToolExecutor(
-                dynamic_config["database"], 
+                pool, 
                 exec_map, 
                 dynamic_config["identity"]["table"],
                 dynamic_config["identity"]["name_column"],

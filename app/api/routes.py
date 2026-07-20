@@ -494,6 +494,32 @@ Return ONLY a JSON object:
             logger.error(f"Error saving rules: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @router.post("/api/tenant/refresh-schema")
+    async def refresh_schema(request: Request):
+        """Force-refresh the schema metadata for the logged-in tenant's database."""
+        client_id_str = request.cookies.get("session_token")
+        if not client_id_str:
+            raise HTTPException(status_code=401, detail="Unauthorized session.")
+        
+        try:
+            client_id = int(client_id_str)
+            db_config = await system_db.get_client_db_config(client_id)
+            if not db_config:
+                raise HTTPException(status_code=404, detail="No database configuration found.")
+            
+            from app.services.pg_schema_service import PgSchemaService
+            schema_service = PgSchemaService(dict(db_config))
+            metadata = await schema_service.refresh()
+            
+            return {
+                "success": True,
+                "tables_found": list(metadata["tables"].keys()),
+                "relationships_found": len(metadata["relationships"]),
+            }
+        except Exception as e:
+            logger.error(f"Error refreshing schema: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @router.post("/api/twilio/call")
     async def make_twilio_call(req: CallRequest, request: Request):
         """Triggers an outbound Twilio phone call to any destination number."""

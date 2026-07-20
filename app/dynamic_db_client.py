@@ -5,6 +5,9 @@ from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Global cache for asyncpg pools
+_pg_pools: Dict[tuple, "asyncpg.Pool"] = {}
+
 class DynamicDbClient:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -223,31 +226,47 @@ class DynamicDbClient:
             else:
                 pg_params.append(p)
 
-        # Connect and execute
-        conn = await asyncpg.connect(
-            host=self.server_name or "localhost",
-            port=int(self.port) if self.port else 5432,
-            database=self.db_name,
-            user=self.username,
-            password=self.password,
-            timeout=float(self.connection_timeout),
-        )
+        pool = await self.get_pg_pool()
+
+        # Execute
         try:
-            try:
-                rows = await conn.fetch(new_query, *pg_params)
-            except Exception as first_err:
-                logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with string params...")
-                str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+            async with pool.acquire() as conn:
                 try:
-                    rows = await conn.fetch(new_query, *str_params)
-                except Exception:
-                    raise first_err
-            return [dict(row) for row in rows]
+                    rows = await conn.fetch(new_query, *pg_params)
+                except Exception as first_err:
+                    logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with string params...")
+                    str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+                    try:
+                        rows = await conn.fetch(new_query, *str_params)
+                    except Exception:
+                        raise first_err
+                return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"PostgreSQL error running query: {e}")
             raise e
-        finally:
-            await conn.close()
+
+    async def get_pg_pool(self) -> "asyncpg.Pool":
+        import asyncpg
+        pool_key = (
+            self.server_name or "localhost",
+            int(self.port) if self.port else 5432,
+            self.db_name,
+            self.username
+        )
+        
+        if pool_key not in _pg_pools:
+            _pg_pools[pool_key] = await asyncpg.create_pool(
+                host=pool_key[0],
+                port=pool_key[1],
+                database=pool_key[2],
+                user=pool_key[3],
+                password=self.password,
+                timeout=float(self.connection_timeout),
+                min_size=1,
+                max_size=10,
+                command_timeout=float(self.connection_timeout),
+            )
+        return _pg_pools[pool_key]
 
     async def _run_mysql(self, query: str, params: Tuple[Any, ...]) -> List[Dict[str, Any]]:
         try:
