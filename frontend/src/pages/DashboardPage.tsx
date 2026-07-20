@@ -1,20 +1,14 @@
-import React, { useState, useEffect } from 'react';
-import TextField from '@mui/material/TextField';
+import { useState, useEffect } from 'react';
 import Button from '@mui/material/Button';
-import FormControl from '@mui/material/FormControl';
-import InputLabel from '@mui/material/InputLabel';
-import Select from '@mui/material/Select';
-import MenuItem from '@mui/material/MenuItem';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Checkbox from '@mui/material/Checkbox';
-import Alert from '@mui/material/Alert';
-import CircularProgress from '@mui/material/CircularProgress';
 import LogoutIcon from '@mui/icons-material/Logout';
-import SettingsInputComponentIcon from '@mui/icons-material/SettingsInputComponent';
-import SaveIcon from '@mui/icons-material/Save';
+import EditIcon from '@mui/icons-material/Edit';
+import StorageIcon from '@mui/icons-material/Storage';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
-
-const API_BASE = 'http://localhost:8000';
+import CloseIcon from '@mui/icons-material/Close';
+import { useNavigate } from 'react-router-dom';
+import NoCodeDbConfigWizard from '../components/NoCodeDbConfigWizard';
+import { authService } from '../services/authService';
 
 interface Client {
   id: number;
@@ -28,154 +22,67 @@ interface DashboardProps {
   client: Client;
   domainName: string;
   onLogout: () => void;
-  onLaunchAgent: () => void;
 }
 
-export default function DashboardPage({ client, domainName, onLogout, onLaunchAgent }: DashboardProps) {
-  const [dbType, setDbType] = useState('sqlite');
-  const [dbName, setDbName] = useState('');
-  const [serverAddress, setServerAddress] = useState('');
-  const [port, setPort] = useState<number | ''>('');
-  const [username, setUsername] = useState('');
-  const [passwordDb, setPasswordDb] = useState('');
-  const [schemaName, setSchemaName] = useState('');
-  const [enableSsl, setEnableSsl] = useState(false);
-  const [trustCert, setTrustCert] = useState(false);
-  const [timeout, setTimeoutSec] = useState(5);
+export default function DashboardPage({ client, domainName, onLogout }: DashboardProps) {
+  const navigate = useNavigate();
 
-  const [statusMsg, setStatusMsg] = useState('');
-  const [statusType, setStatusType] = useState<'success' | 'error' | ''>('');
-  const [testingConnection, setTestingConnection] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [dbConfig, setDbConfig] = useState<any>(null);
+  const [domainData, setDomainData] = useState<any>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [, setLoadingConfig] = useState(true);
+
+  const loadConfig = async () => {
+    setLoadingConfig(true);
+    try {
+      const data = await authService.checkAuth();
+      if (data.db_config) {
+        setDbConfig(data.db_config);
+      }
+      if (data.domain) {
+        setDomainData(data.domain);
+      }
+    } catch (err) {
+      console.error('Failed to load DB configuration', err);
+    } finally {
+      setLoadingConfig(false);
+    }
+  };
 
   useEffect(() => {
-    async function loadConfig() {
-      try {
-        const response = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' });
-        if (response.ok) {
-          const data = await response.json();
-          const db = data.db_config;
-          if (db) {
-            setDbType(db.db_type);
-            setDbName(db.db_name);
-            setServerAddress(db.server_name || '');
-            setPort(db.port || '');
-            setUsername(db.username || '');
-            setSchemaName(db.schema_name || '');
-            setEnableSsl(!!db.enable_ssl);
-            setTrustCert(!!db.trust_server_certificate);
-            setTimeoutSec(db.connection_timeout || 5);
-          }
-        }
-      } catch (err) {
-        console.error('Failed to load DB config', err);
-      }
-    }
     loadConfig();
   }, []);
 
-  const handleDbTypeChange = (type: string) => {
-    setDbType(type);
-    if (type === 'sqlite') {
-      setDbName('healthcare_client.db');
-    } else {
-      setDbName('voice_agent');
-      if (type === 'postgresql') setPort(5432);
-      else if (type === 'mysql') setPort(3306);
-      else if (type === 'sql server') setPort(1433);
-    }
-  };
-
-  const getDbConfigObject = () => {
-    return {
-      db_type: dbType,
-      server_name: serverAddress || null,
-      port: port ? Number(port) : null,
-      db_name: dbName,
-      username: username || null,
-      password: passwordDb || null,
-      schema_name: schemaName || null,
-      enable_ssl: enableSsl,
-      trust_server_certificate: trustCert,
-      connection_timeout: timeout
-    };
-  };
-
-  const handleTestConnection = async () => {
-    setStatusMsg('');
-    setStatusType('');
-    setTestingConnection(true);
+  // Parse UI metadata if available
+  let parsedMetadata: any = null;
+  if (domainData?.ui_config_metadata) {
     try {
-      const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/test-connection`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      const data = await response.json();
-      if (data.success) {
-        setStatusType('success');
-        setStatusMsg('Database connection test successful!');
-      } else {
-        setStatusType('error');
-        setStatusMsg('Connection failed: ' + data.message);
-      }
-    } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg('Error testing connection: ' + err.message);
-    } finally {
-      setTestingConnection(false);
+      parsedMetadata = typeof domainData.ui_config_metadata === 'string'
+        ? JSON.parse(domainData.ui_config_metadata)
+        : domainData.ui_config_metadata;
+    } catch {
+      parsedMetadata = null;
     }
-  };
+  }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setStatusMsg('');
-    setStatusType('');
-    setSaving(true);
-
-    try {
-      const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/db-config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-        credentials: 'include'
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setStatusType('success');
-        setStatusMsg('Database configuration saved successfully!');
-      } else {
-        setStatusType('error');
-        setStatusMsg('Failed to save database configuration: ' + (data.detail || 'Unknown error'));
-      }
-    } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg('Error saving configuration: ' + err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const isSqlite = dbType === 'sqlite';
+  const hasConfig = Boolean(dbConfig && dbConfig.db_name);
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-extrabold bg-gradient-to-r from-violet-400 to-pink-500 bg-clip-text text-transparent">
+          <h1 className="text-3xl font-extrabold bg-gradient-to-r from-violet-400 to-pink-500 bg-clip-text text-transparent pb-2">
             Client Dashboard
           </h1>
           <p className="text-slate-400 text-sm mt-1">
             Manage settings and launch your AI Voice Agent console
           </p>
         </div>
-        <Button 
-          variant="outlined" 
-          color="inherit" 
+        <Button
+          variant="outlined"
+          color="inherit"
           size="small"
-          onClick={onLogout} 
+          onClick={onLogout}
           startIcon={<LogoutIcon />}
           className="cursor-pointer"
         >
@@ -183,9 +90,9 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
         </Button>
       </header>
 
-      <div className="bg-slate-900/50 backdrop-blur-xl border border-slate-800/85 rounded-2xl p-6 md:p-8 shadow-2xl shadow-slate-950/60 space-y-8 animate-slide-up">
+      <div className="space-y-8 animate-slide-up">
         {/* Profile Card */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 bg-slate-950/40 border border-slate-800/60 rounded-xl p-6 select-none">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 bg-slate-900/50 backdrop-blur-xl border border-slate-800/85 rounded-2xl p-6 shadow-xl select-none">
           <div className="space-y-1">
             <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Company</span>
             <span className="block text-base font-bold text-slate-100">{client.company_name}</span>
@@ -201,9 +108,9 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
         </div>
 
         {/* Launch Button Room */}
-        <div className="text-center py-4 border-y border-slate-850/80">
-          <Button 
-            onClick={onLaunchAgent} 
+        <div className="text-center py-4 bg-slate-900/40 border border-slate-800 rounded-2xl">
+          <Button
+            onClick={() => navigate('/agent-mode-select')}
             variant="contained"
             color="primary"
             size="large"
@@ -223,169 +130,109 @@ export default function DashboardPage({ client, domainName, onLogout, onLaunchAg
           </Button>
         </div>
 
-        {/* Edit Config Form */}
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <h2 className="text-md font-bold text-violet-400 uppercase tracking-wider border-b border-slate-800 pb-2 mb-4 select-none">
-            Edit Database Configuration
-          </h2>
+        {/* Database Configuration Section */}
+        {hasConfig && !isEditing ? (
+          <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-950/50 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                  <StorageIcon />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                    Active Database Connection
+                    <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-medium">
+                      <CheckCircleIcon sx={{ fontSize: 14 }} /> Connected
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">Configured database & AI verification rules</p>
+                </div>
+              </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <FormControl fullWidth required>
-              <InputLabel shrink id="db-type-label-dashboard">Database Type</InputLabel>
-              <Select
-                labelId="db-type-label-dashboard"
-                label="Database Type"
-                value={dbType}
-                onChange={e => handleDbTypeChange(e.target.value as string)}
-                notched
+              <Button
+                variant="contained"
+                color="primary"
+                startIcon={<EditIcon />}
+                onClick={() => setIsEditing(true)}
+                sx={{
+                  borderRadius: '12px',
+                  background: 'linear-gradient(to right, #8b5cf6, #ec4899)',
+                  px: 3,
+                }}
               >
-                <MenuItem value="sqlite">SQLite</MenuItem>
-                <MenuItem value="postgresql">PostgreSQL</MenuItem>
-                <MenuItem value="mysql">MySQL</MenuItem>
-                <MenuItem value="sql server">SQL Server</MenuItem>
-                <MenuItem value="oracle">Oracle</MenuItem>
-              </Select>
-            </FormControl>
-            <TextField 
-              label="Database Name / Path"
-              placeholder="healthcare_client.db"
-              variant="outlined"
-              fullWidth
-              value={dbName}
-              onChange={e => setDbName(e.target.value)}
-              required
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Server Address"
-              placeholder="localhost"
-              variant="outlined"
-              fullWidth
-              value={serverAddress}
-              onChange={e => setServerAddress(e.target.value)}
-              disabled={isSqlite}
-              sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Port"
-              placeholder="5432"
-              type="number"
-              variant="outlined"
-              fullWidth
-              value={port}
-              onChange={e => setPort(e.target.value ? Number(e.target.value) : '')}
-              disabled={isSqlite}
-              sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Username"
-              placeholder="postgres"
-              variant="outlined"
-              fullWidth
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              disabled={isSqlite}
-              sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Password"
-              placeholder="•••••••• (Leave blank to keep unchanged)"
-              type="password"
-              variant="outlined"
-              fullWidth
-              value={passwordDb}
-              onChange={e => setPasswordDb(e.target.value)}
-              disabled={isSqlite}
-              sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Schema Name (Optional)"
-              placeholder="public"
-              variant="outlined"
-              fullWidth
-              value={schemaName}
-              onChange={e => setSchemaName(e.target.value)}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <TextField 
-              label="Timeout (Seconds)"
-              type="number"
-              variant="outlined"
-              fullWidth
-              value={timeout}
-              onChange={e => setTimeoutSec(Number(e.target.value))}
-              slotProps={{ inputLabel: { shrink: true } }}
-            />
-            <div className="flex items-center space-x-3 pt-3">
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={enableSsl}
-                    onChange={e => setEnableSsl(e.target.checked)}
-                    color="primary"
-                  />
-                }
-                label="Enable SSL"
-              />
+                Edit Configuration
+              </Button>
             </div>
-            <div className="flex items-center space-x-3 pt-3">
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={trustCert}
-                    onChange={e => setTrustCert(e.target.checked)}
-                    color="primary"
-                  />
-                }
-                label="Trust Server Certificate"
-              />
+
+            {/* Read-only Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-slate-950/50 border border-slate-800/80 rounded-2xl p-4 space-y-2">
+                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider block">Database Settings</span>
+                <div className="text-sm text-slate-200">
+                  <span className="font-semibold text-slate-400">Type:</span> <span className="uppercase font-bold text-violet-400">{dbConfig.db_type}</span>
+                </div>
+                <div className="text-sm text-slate-200">
+                  <span className="font-semibold text-slate-400">Database Name:</span> <span className="font-mono text-slate-200">{dbConfig.db_name?.includes('/') ? dbConfig.db_name.split('/').pop() : dbConfig.db_name}</span>
+                </div>
+                {dbConfig.db_type !== 'sqlite' && (
+                  <div className="text-sm text-slate-200">
+                    <span className="font-semibold text-slate-400">Server:</span> <span className="font-mono text-slate-300">{dbConfig.server_name || 'localhost'}:{dbConfig.port || ''}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-slate-950/50 border border-slate-800/80 rounded-2xl p-4 space-y-2">
+                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider block">Agent AI Rules Mapping</span>
+                {parsedMetadata ? (
+                  <>
+                    <div className="text-sm text-slate-200">
+                      <span className="font-semibold text-slate-400">Primary Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.customerTable || 'Configured'}</span>
+                    </div>
+                    <div className="text-sm text-slate-200">
+                      <span className="font-semibold text-slate-400">Verified Columns:</span>{' '}
+                      <span className="font-mono text-violet-300">
+                        {Array.isArray(parsedMetadata.verificationFields) ? parsedMetadata.verificationFields.join(', ') : 'Default'}
+                      </span>
+                    </div>
+                    <div className="text-sm text-slate-200">
+                      <span className="font-semibold text-slate-400">Related Table:</span> <span className="font-mono text-emerald-400">{parsedMetadata.dataTable || 'Configured'}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs text-emerald-400 font-medium pt-1">
+                    AI verification and business record queries compiled and ready.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
+        ) : (
+          <div className="space-y-4">
+            {hasConfig && (
+              <div className="flex justify-between items-center bg-slate-900/40 p-4 rounded-2xl border border-slate-800">
+                <span className="text-sm text-slate-300 font-medium">Modifying Database Configuration & Rules Stepper</span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="inherit"
+                  startIcon={<CloseIcon />}
+                  onClick={() => setIsEditing(false)}
+                >
+                  Cancel Edit
+                </Button>
+              </div>
+            )}
 
-          <div className="flex flex-col sm:flex-row gap-4 pt-4">
-            <Button 
-              type="button" 
-              variant="outlined"
-              color="inherit"
-              size="large"
-              onClick={handleTestConnection}
-              disabled={testingConnection}
-              startIcon={testingConnection ? <CircularProgress size={20} color="inherit" /> : <SettingsInputComponentIcon />}
-              className="flex-1 cursor-pointer"
-              sx={{ py: 1.5 }}
-            >
-              {testingConnection ? 'Testing Connection...' : 'Test Connection'}
-            </Button>
-            <Button 
-              type="submit" 
-              variant="contained"
-              color="primary"
-              size="large"
-              disabled={saving}
-              startIcon={saving ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />}
-              className="flex-1 cursor-pointer"
-              sx={{
-                py: 1.5,
-                background: 'linear-gradient(to right, #7c3aed, #db2777)',
-                '&:hover': {
-                  background: 'linear-gradient(to right, #6d28d9, #be185d)',
-                }
+            {/* Reusable No-Code Database Introspection & Rule Configurator Wizard */}
+            <NoCodeDbConfigWizard
+              domainId={domainData?.id || 1}
+              onSaveSuccess={() => {
+                loadConfig();
+                setIsEditing(false);
               }}
-            >
-              {saving ? 'Saving...' : 'Save Changes'}
-            </Button>
+            />
           </div>
-
-          {statusMsg && (
-            <Alert severity={statusType === 'success' ? 'success' : 'error'} variant="outlined" sx={{ width: '105%' }}>
-              {statusMsg}
-            </Alert>
-          )}
-        </form>
+        )}
       </div>
     </div>
   );
