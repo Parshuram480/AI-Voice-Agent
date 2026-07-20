@@ -116,8 +116,10 @@ class SystemDatabase:
                 domain_id           INTEGER NOT NULL REFERENCES domains(id),
                 verification_query  TEXT NOT NULL,
                 data_query          TEXT NOT NULL,
+                ui_config_metadata  TEXT,
                 status              VARCHAR(50) DEFAULT 'Active'
             );
+            ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS ui_config_metadata TEXT;
             """)
 
         # Seed standard domains
@@ -128,7 +130,7 @@ class SystemDatabase:
         hc_llm1_prompt = """You are the first point of contact for a healthcare patient assistant. Speak in 1-2 short sentences. No markdown, no emojis, no symbols. This is spoken over the phone.
 
 TOPICS YOU ALLOW:
-- Greetings like "Hello" or "Hi" — reply politely and briefly.
+- Greetings like "Hello" or "Hi" - reply politely and briefly.
 - Audio checks like "Can you hear me?" — reply "Yes, I can hear you."
 - Any requests about checking appointment details, schedules, or patient record status.
 
@@ -447,14 +449,15 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
             """, client_id)
             return dict(row) if row else None
 
-    async def update_client_domain_mapping(self, client_id: int, domain_id: int, verification_query: str, data_query: str):
+    async def update_client_domain_mapping(self, client_id: int, domain_id: int, verification_query: str, data_query: str, ui_config_metadata: Optional[str] = None):
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             await conn.execute("""
-            INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query, ui_config_metadata)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (client_id) DO UPDATE SET
                 domain_id = EXCLUDED.domain_id,
                 verification_query = EXCLUDED.verification_query,
-                data_query = EXCLUDED.data_query
-            """, client_id, domain_id, verification_query, data_query)
+                data_query = EXCLUDED.data_query,
+                ui_config_metadata = EXCLUDED.ui_config_metadata
+            """, client_id, domain_id, verification_query, data_query, ui_config_metadata)
