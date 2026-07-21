@@ -12,10 +12,49 @@ class DynamicToolFactory:
     def __init__(self, config: Dict[str, Any], schema_metadata: Dict[str, Any]):
         self.config = config
         self.schema = schema_metadata
+        self.db_type = config.get("database", {}).get("db_type", "postgresql").lower()
         self.identity_table = config.get("identity", {}).get("table")
         self.identity_name_col = config.get("identity", {}).get("name_column")
         self.identity_verify_col = config.get("identity", {}).get("verification_column")
         self.selected_tables = config.get("selected_tables", {})
+
+    def _format_query(self, select_cols: str, table_and_joins: str, where_clause: str = "", order_by: str = "", limit: int = None) -> str:
+        """Formats the query according to the dialect."""
+        if self.db_type == "sql server" and limit and not order_by:
+            sql = f"SELECT TOP {limit} {select_cols} FROM {table_and_joins}"
+        else:
+            sql = f"SELECT {select_cols} FROM {table_and_joins}"
+            
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        if order_by:
+            sql += f" ORDER BY {order_by}"
+            
+        if limit:
+            if self.db_type == "sql server" and order_by:
+                sql += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+            elif self.db_type == "oracle":
+                sql += f" FETCH FIRST {limit} ROWS ONLY"
+            elif self.db_type != "sql server":
+                # PostgreSQL, MySQL, SQLite
+                sql += f" LIMIT {limit}"
+                
+        return sql
+
+    def _format_search_clause(self, col: str) -> str:
+        """Formats a case-insensitive search clause according to the dialect."""
+        if self.db_type == "sql server":
+            return f"LOWER({col}) LIKE LOWER('%' + ? + '%')"
+        elif self.db_type in ("mysql", "mariadb"):
+            return f"LOWER({col}) LIKE LOWER(CONCAT('%', ?, '%'))"
+        else:
+            # PostgreSQL, SQLite, Oracle
+            return f"LOWER({col}) LIKE LOWER('%' || ? || '%')"
+
+    def _is_text_type(self, col_type: str) -> bool:
+        """Determines if a column is a searchable text type across all dialects."""
+        col_type = col_type.lower()
+        return any(t in col_type for t in ("char", "text", "varchar", "nvar", "clob"))
 
     def _map_pg_type_to_gemini(self, pg_type: str) -> str:
         """Map PostgreSQL data types to Gemini OpenAPI types."""
@@ -82,7 +121,8 @@ class DynamicToolFactory:
 
                 # SQL generation
                 cols_str = ", ".join(selected_cols)
-                sql = f"SELECT {cols_str} FROM {table_name} WHERE LOWER({self.identity_name_col}) ILIKE $1 AND {self.identity_verify_col}::text = $2"
+                where_identity = f"LOWER({self.identity_name_col}) LIKE LOWER(?) AND {self.identity_verify_col} = ?"
+                sql = self._format_query(cols_str, table_name, where_clause=where_identity, limit=1)
                 execution_map[tool_name] = {
                     "sql": sql,
                     "type": "identity",
@@ -121,8 +161,8 @@ class DynamicToolFactory:
                     
                     ref_schema = self.schema["tables"][ref_table]
                     display_cols = []
-                    for col_name, col_info in ref_schema["columns"].items():
-                        if col_info["type"] in ("character varying", "text", "varchar"):
+                    for col_name in ref_schema["columns"].keys():
+                        if col_name != "id" and col_name != "created_at":
                             display_cols.append(col_name)
                     
                     if display_cols:
@@ -136,8 +176,10 @@ class DynamicToolFactory:
                 all_cols = [f"{table_name}.{c}" for c in selected_cols] + extra_cols
                 cols_str = ", ".join(all_cols)
                 joins = " ".join(join_clauses)
+                table_and_joins = f"{table_name} {joins}".strip()
                 
-                sql = f"SELECT {cols_str} FROM {table_name} {joins} WHERE {table_name}.{foreign_key_col} = $1 ORDER BY {table_name}.{pk} DESC LIMIT 10"
+                order_by = f"{table_name}.{pk} DESC" if pk else ""
+                sql = self._format_query(cols_str, table_and_joins, where_clause=f"{table_name}.{foreign_key_col} = ?", order_by=order_by, limit=10)
                 execution_map[tool_name] = {
                     "sql": sql,
                     "type": "linked",
@@ -153,7 +195,7 @@ class DynamicToolFactory:
                 # Find all text columns for search
                 search_cols = []
                 for col_name, col_info in schema_table["columns"].items():
-                    if col_name in selected_cols and col_info["type"] in ("character varying", "text", "varchar"):
+                    if col_name in selected_cols and self._is_text_type(col_info["type"]):
                         search_cols.append(f"{table_name}.{col_name}")
 
                 # Auto-JOIN logic
@@ -166,8 +208,8 @@ class DynamicToolFactory:
                     
                     ref_schema = self.schema["tables"][ref_table]
                     display_cols = []
-                    for col_name, col_info in ref_schema["columns"].items():
-                        if col_info["type"] in ("character varying", "text", "varchar"):
+                    for col_name in ref_schema["columns"].keys():
+                        if col_name != "id" and col_name != "created_at":
                             display_cols.append(col_name)
                     
                     if display_cols:
@@ -177,13 +219,17 @@ class DynamicToolFactory:
                         for d_col in display_cols:
                             alias = f"{ref_table}_{d_col}"
                             extra_cols.append(f"{ref_table}.{d_col} AS {alias}")
-                            search_cols.append(f"{ref_table}.{d_col}")
+                            
+                            col_info = ref_schema["columns"][d_col]
+                            if self._is_text_type(col_info["type"]):
+                                search_cols.append(f"{ref_table}.{d_col}")
 
                 properties = {}
                 required = []
                 all_cols = [f"{table_name}.{c}" for c in selected_cols] + extra_cols
                 cols_str = ", ".join(all_cols)
                 joins = " ".join(join_clauses)
+                table_and_joins = f"{table_name} {joins}".strip()
                 
                 if search_cols:
                     desc_cols = " or ".join([c.split('.')[-1] for c in search_cols])
@@ -193,16 +239,22 @@ class DynamicToolFactory:
                     }
                     required.append("search_query")
                     
-                    where_clauses = [f"{col} ILIKE '%' || $1 || '%'" for col in search_cols]
+                    where_clauses = [self._format_search_clause(col) for col in search_cols]
                     where_str = " OR ".join(where_clauses)
-                    sql = f"SELECT {cols_str} FROM {table_name} {joins} WHERE {where_str} LIMIT 5"
+                    
+                    # Create param bindings per clause
+                    param_order = ["search_query"] * len(search_cols)
+                    
+                    sql = self._format_query(cols_str, table_and_joins, where_clause=where_str, limit=5)
                 elif pk and pk in selected_cols:
                     properties[pk] = {"type": "INTEGER", "description": f"The primary key {pk}"}
                     required.append(pk)
-                    sql = f"SELECT {cols_str} FROM {table_name} {joins} WHERE {table_name}.{pk} = $1 LIMIT 5"
+                    param_order = [pk]
+                    sql = self._format_query(cols_str, table_and_joins, where_clause=f"{table_name}.{pk} = ?", limit=5)
                 else:
                     # fallback
-                    sql = f"SELECT {cols_str} FROM {table_name} {joins} LIMIT 5"
+                    param_order = []
+                    sql = self._format_query(cols_str, table_and_joins, limit=5)
                 
                 tools.append({
                     "name": tool_name,
@@ -218,7 +270,7 @@ class DynamicToolFactory:
                     "sql": sql,
                     "type": "unlinked",
                     "limit": 5,
-                    "param_order": ["search_query"]
+                    "param_order": param_order
                 }
 
         # Apply Hard Cap

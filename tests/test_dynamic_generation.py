@@ -3,7 +3,7 @@ import json
 import logging
 from pprint import pprint
 
-from app.services.pg_schema_service import PgSchemaService
+from app.services.schema_service import SchemaService
 from app.services.dynamic_tool_factory import DynamicToolFactory
 from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
 
@@ -16,7 +16,7 @@ async def main():
         config = json.load(f)
         
     print("=== Testing Schema Introspection ===")
-    schema_service = PgSchemaService(config["database"])
+    schema_service = SchemaService(config["database"])
     schema_metadata = await schema_service.get_schema_metadata()
     print("Discovered Tables:", list(schema_metadata["tables"].keys()))
     print("Discovered Relationships:")
