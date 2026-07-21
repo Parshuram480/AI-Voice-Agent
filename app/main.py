@@ -215,7 +215,7 @@ async def startup():
         dynamic_config_path = os.getenv("DYNAMIC_CLIENT_CONFIG")
         if dynamic_config_path and Path(dynamic_config_path).exists():
             import json
-            from app.services.pg_schema_service import PgSchemaService
+            from app.services.schema_service import SchemaService
             from app.services.dynamic_tool_factory import DynamicToolFactory
             from app.services.dynamic_tool_executor import DynamicToolExecutor
             from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
@@ -223,7 +223,7 @@ async def startup():
             with open(dynamic_config_path, "r") as f:
                 dynamic_config = json.load(f)
             
-            schema_service = PgSchemaService(dynamic_config["database"])
+            schema_service = SchemaService(dynamic_config["database"])
             schema_metadata = await schema_service.get_schema_metadata()
             
             tool_factory = DynamicToolFactory(dynamic_config, schema_metadata)
@@ -231,10 +231,9 @@ async def startup():
             
             from app.dynamic_db_client import DynamicDbClient
             dyn_db_client = DynamicDbClient(dynamic_config["database"])
-            pool = await dyn_db_client.get_pg_pool()
 
             executor = DynamicToolExecutor(
-                pool, 
+                dyn_db_client, 
                 exec_map, 
                 dynamic_config["identity"]["table"],
                 dynamic_config["identity"]["name_column"],

@@ -507,8 +507,8 @@ Return ONLY a JSON object:
             if not db_config:
                 raise HTTPException(status_code=404, detail="No database configuration found.")
             
-            from app.services.pg_schema_service import PgSchemaService
-            schema_service = PgSchemaService(dict(db_config))
+            from app.services.schema_service import SchemaService
+            schema_service = SchemaService(dict(db_config))
             metadata = await schema_service.refresh()
             
             return {
