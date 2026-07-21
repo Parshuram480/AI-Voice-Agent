@@ -42,8 +42,9 @@ class GeminiLivePipeline:
     Multimodal pipeline using Gemini Live API.
     Replaces StreamingVoicePipeline when PIPELINE_MODE=multimodal.
     """
-    def __init__(self, client: GeminiLiveClient, db_client: DatabaseClient, client_id: str = None, domain: str = None):
-        self.client = client
+    def __init__(self, verification_service, order_service, db_client: DatabaseClient, client_id: str = None, domain: str = None):
+        self.verification_service = verification_service
+        self.order_service = order_service
         self.db = db_client
         self.analytics = AnalyticsService(db_client)
         self.client_id = client_id
@@ -151,14 +152,27 @@ class GeminiLivePipeline:
         _set_phase("LISTENING")
         log_pipeline_event("session_start", session_id=resolved_session_id)
         
+        # Instantiate Gemini Client per session
+        dynamic_tools = kwargs.get("dynamic_tools")
+        dynamic_executor = kwargs.get("dynamic_executor")
+        system_prompt = kwargs.get("system_prompt")
+        
+        session_client = GeminiLiveClient(
+            self.verification_service,
+            self.order_service,
+            dynamic_tools=dynamic_tools,
+            dynamic_executor=dynamic_executor,
+            system_prompt=system_prompt
+        )
+        
         # Connect to Gemini
         try:
             # Connect returns the async context manager
-            async with self.client.connect() as session:
+            async with session_client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
                 # Trigger the agent to speak first based on the domain context
-                domain_name = state.get("domain", "default").replace("_", " ")
+                domain_name = kwargs.get("domain", "default").replace("_", " ")
                 initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
                 await session.send(input=initial_prompt, end_of_turn=True)
                 
@@ -384,7 +398,7 @@ class GeminiLivePipeline:
                                             on_stage("conversation", "running", f"Gemini executing tool: {fc.name}")
                                     
                                         # Execute the tool
-                                        tool_response = await self.client.execute_tool_call(
+                                        tool_response = await session_client.execute_tool_call(
                                             tool_call_id=fc.id,
                                             name=fc.name,
                                             args=fc.args,

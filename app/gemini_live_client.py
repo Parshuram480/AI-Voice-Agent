@@ -46,6 +46,9 @@ class GeminiLiveClient:
         self,
         verification_service: VerificationService,
         order_service: OrderService,
+        dynamic_tools: list = None,
+        dynamic_executor = None,
+        system_prompt: str = None
     ):
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -58,19 +61,16 @@ class GeminiLiveClient:
         self.verification_service = verification_service
         self.order_service = order_service
         
-        # Dynamic Mode Attributes
-        self.dynamic_tools = None
-        self.dynamic_executor = None
-        
-        prompts = get_prompts()
-        self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.")
-
-    def set_dynamic_mode(self, dynamic_tools: list, dynamic_executor, system_prompt: str):
-        """Enable dynamic mode with auto-generated tools and schema-aware prompt."""
         self.dynamic_tools = dynamic_tools
         self.dynamic_executor = dynamic_executor
-        self.system_prompt = system_prompt
-        logger.info(f"GeminiLiveClient configured for DYNAMIC mode with {len(dynamic_tools)} tools.")
+        
+        if system_prompt:
+            self.system_prompt = system_prompt
+        else:
+            prompts = get_prompts()
+            self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.")
+
+
 
 
     def _get_config(self) -> types.LiveConnectConfig:
