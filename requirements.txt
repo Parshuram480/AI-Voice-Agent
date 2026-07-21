@@ -27,6 +27,8 @@ langsmith
 openai
 pyodbc
 pymysql
+PyYAML>=6.0.1
+
 livekit
 livekit-agents
 livekit-api

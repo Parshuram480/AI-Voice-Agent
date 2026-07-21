@@ -18,10 +18,11 @@ except ImportError:
 
 from google import genai
 from google.genai import types
+from google.genai.types import AudioTranscriptionConfig
 
 from app.services.verification_service import VerificationService
 from app.services.order_service import OrderService
-from app.services.agent_service import AGENT_SYSTEM_PROMPT
+from app.utils.prompt_loader import get_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +58,34 @@ class GeminiLiveClient:
         self.verification_service = verification_service
         self.order_service = order_service
         
+        # Dynamic Mode Attributes
+        self.dynamic_tools = None
+        self.dynamic_executor = None
+        
+        prompts = get_prompts()
+        self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.")
+
+    def set_dynamic_mode(self, dynamic_tools: list, dynamic_executor, system_prompt: str):
+        """Enable dynamic mode with auto-generated tools and schema-aware prompt."""
+        self.dynamic_tools = dynamic_tools
+        self.dynamic_executor = dynamic_executor
+        self.system_prompt = system_prompt
+        logger.info(f"GeminiLiveClient configured for DYNAMIC mode with {len(dynamic_tools)} tools.")
+
 
     def _get_config(self) -> types.LiveConnectConfig:
         """Build the configuration for the live session."""
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
+            input_audio_transcription=AudioTranscriptionConfig(),
+            output_audio_transcription=AudioTranscriptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
                 )
             ),
             system_instruction=types.Content(
-                parts=[types.Part(text=AGENT_SYSTEM_PROMPT)]
+                parts=[types.Part(text=self.system_prompt)]
             )
         )
 
@@ -84,7 +101,8 @@ class GeminiLiveClient:
             # might not have a simple 'tools' parameter mapping in all versions.
             # Actually, types.LiveConnectConfig supports 'tools'. Let's add it properly.
             
-            tool_declarations = [
+            # Use dynamic tools if in dynamic mode, else fallback to hardcoded e-commerce tools
+            tool_declarations = self.dynamic_tools if self.dynamic_tools is not None else [
                 {
                     "name": "verify_user",
                     "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call if DOB is missing.",
@@ -113,17 +131,17 @@ class GeminiLiveClient:
             # Recreate config with tools
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
-                input_audio_transcription=types.AudioTranscriptionConfig(),
-                output_audio_transcription=types.AudioTranscriptionConfig(),
+                input_audio_transcription=AudioTranscriptionConfig(),
+                output_audio_transcription=AudioTranscriptionConfig(),
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
                     )
                 ),
                 system_instruction=types.Content(
-                    parts=[types.Part(text=AGENT_SYSTEM_PROMPT)]
+                    parts=[types.Part(text=self.system_prompt)]
                 ),
-                tools=[{"function_declarations": tool_declarations}]
+                tools=[{"function_declarations": tool_declarations}] if tool_declarations else None
             )
             
             return self.client.aio.live.connect(
@@ -148,6 +166,10 @@ class GeminiLiveClient:
         """
         logger.info(f"Executing tool call: {name} with args {args}")
         
+        # Delegate to Dynamic Executor if in dynamic mode
+        if self.dynamic_executor is not None:
+            return await self.dynamic_executor.execute(tool_call_id, name, args, state)
+            
         try:
             if name == "verify_user":
                 user_name = args.get("name", "")
