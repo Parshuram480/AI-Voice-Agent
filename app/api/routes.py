@@ -88,6 +88,29 @@ class SaveRulesRequest(BaseModel):
     ui_config_metadata: Optional[dict[str, Any]] = None
 
 
+from app.auth_jwt import create_access_token, verify_and_get_client_id
+
+
+def get_authenticated_client_id(request: Request) -> int:
+    """Extracts client_id from Authorization Bearer JWT token header or session cookie."""
+    # 1. Bearer Token Header
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token_str = auth_header.split(" ", 1)[1].strip()
+        client_id = verify_and_get_client_id(token_str)
+        if client_id is not None:
+            return client_id
+
+    # 2. Session Cookie Fallback
+    cookie_str = request.cookies.get("session_token")
+    if cookie_str:
+        client_id = verify_and_get_client_id(cookie_str)
+        if client_id is not None:
+            return client_id
+
+    raise HTTPException(status_code=401, detail="Unauthorized: Missing, invalid, or expired JWT token.")
+
+
 def create_api_router(
     get_pipeline: Callable[[], object],
     get_streaming_pipeline: Callable[[], object],
@@ -138,8 +161,14 @@ def create_api_router(
             }
 
             client_id = await system_db.register_client(client_data, db_config, req.domain_id)
-            response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
-            return {"success": True, "client_id": client_id, "message": "Registration successful."}
+            jwt_token = create_access_token(client_id=client_id, email=req.email)
+            response.set_cookie(key="session_token", value=jwt_token, httponly=True, samesite="lax")
+            return {
+                "success": True,
+                "token": jwt_token,
+                "client_id": client_id,
+                "message": "Registration successful."
+            }
         except HTTPException as he:
             raise he
         except Exception as e:
@@ -148,7 +177,7 @@ def create_api_router(
 
     @router.post("/api/auth/login")
     async def login_tenant(req: LoginRequest, response: Response):
-        """Authenticates client and sets cookie session token."""
+        """Authenticates client and sets token/cookie."""
         client = await system_db.get_client_by_email(req.email)
         if not client:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -159,15 +188,20 @@ def create_api_router(
         if client["status"] != "Active":
             raise HTTPException(status_code=403, detail="Account is disabled.")
 
-        # Set session cookie (valid for 1 day)
+        jwt_token = create_access_token(client_id=client["id"], email=client["email"])
         response.set_cookie(
             key="session_token",
-            value=str(client["id"]),
+            value=jwt_token,
             httponly=True,
-            max_age=86400,
+            max_age=86400 * 7,
             samesite="lax"
         )
-        return {"success": True, "message": "Login successful."}
+        return {
+            "success": True,
+            "token": jwt_token,
+            "client_id": client["id"],
+            "message": "Login successful."
+        }
 
     @router.post("/api/auth/logout")
     async def logout_tenant(response: Response):
@@ -177,13 +211,9 @@ def create_api_router(
 
     @router.get("/api/auth/me")
     async def get_current_client(request: Request):
-        """Retrieves details of the currently logged-in client."""
-        client_id_str = request.cookies.get("session_token")
-        if not client_id_str:
-            raise HTTPException(status_code=401, detail="Unauthorized session.")
-        
+        """Retrieves details of the currently logged-in client via token or cookie."""
         try:
-            client_id = int(client_id_str)
+            client_id = get_authenticated_client_id(request)
             request.app.state.last_active_client_id = client_id
             client = await system_db.get_client_by_id(client_id)
             if not client:
@@ -192,14 +222,15 @@ def create_api_router(
             db_config = await system_db.get_client_db_config(client_id)
             mapping = await system_db.get_client_domain_mapping(client_id)
             
-            # Strip sensitive data before returning
             client.pop("password_hash", None)
             if db_config:
                 db_config.pop("password", None)
             
             import os
             pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
+            jwt_token = create_access_token(client_id=client_id, email=client.get("email", ""))
             return {
+                "token": jwt_token,
                 "client": client,
                 "db_config": db_config,
                 "pipeline_mode": pipeline_mode,
@@ -212,7 +243,7 @@ def create_api_router(
                 } if mapping else None
             }
         except ValueError:
-            raise HTTPException(status_code=401, detail="Invalid session cookie.")
+            raise HTTPException(status_code=401, detail="Invalid token format.")
 
     @router.post("/api/tenant/test-connection")
     async def test_db_connection(req: DbConfigRequest):
@@ -444,21 +475,15 @@ Return ONLY a JSON object:
     @router.post("/api/tenant/db-config/save-rules")
     async def save_db_rules(req: SaveRulesRequest, request: Request, response: Response):
         """Saves DB configuration, SQL rules, and UI metadata for tenant."""
-        client_id_str = request.cookies.get("session_token")
-        client_id = None
-        if client_id_str:
-            try:
-                client_id = int(client_id_str)
-            except ValueError:
-                pass
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            if req.client_id:
+                client_id = req.client_id
+                response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
+            else:
+                raise
                 
-        if not client_id and req.client_id:
-            client_id = req.client_id
-            response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
-            
-        if not client_id:
-            raise HTTPException(status_code=401, detail="Unauthorized session.")
-            
         try:
             existing = await system_db.get_client_db_config(client_id)
             
