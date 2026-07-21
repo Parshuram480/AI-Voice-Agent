@@ -3,7 +3,7 @@ import json
 import asyncio
 from app.services.dynamic_tool_factory import DynamicToolFactory
 from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
-from app.services.pg_schema_service import PgSchemaService
+from app.services.schema_service import SchemaService
 from app.services.dynamic_tool_executor import DynamicToolExecutor
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_dynamic_tool_factory(sample_config, mock_schema_metadata):
     assert "verify_patients" in exec_map
     assert "SELECT id, full_name, date_of_birth, phone, insurance_id" in exec_map["verify_patients"]["sql"]
     assert "get_appointments" in exec_map
-    assert "WHERE appointments.patient_id = $1" in exec_map["get_appointments"]["sql"]
+    assert "WHERE appointments.patient_id = ?" in exec_map["get_appointments"]["sql"]
 
 def test_dynamic_prompt_assembler(sample_config, mock_schema_metadata):
     factory = DynamicToolFactory(sample_config, mock_schema_metadata)
@@ -104,7 +104,7 @@ def test_dynamic_prompt_assembler(sample_config, mock_schema_metadata):
 @pytest.mark.asyncio
 async def test_pg_schema_service_integration(sample_config):
     # This integration test assumes the database is running with the specified config.
-    service = PgSchemaService(sample_config["database"])
+    service = SchemaService(sample_config["database"])
     try:
         metadata = await service.get_schema_metadata()
         assert "patients" in metadata["tables"]
@@ -115,13 +115,23 @@ async def test_pg_schema_service_integration(sample_config):
 
 @pytest.mark.asyncio
 async def test_dynamic_executor_integration(sample_config, mock_schema_metadata):
+    class MockDbClient:
+        async def execute_query(self, sql, params=()):
+            if params and "Non Existent" in params:
+                return []
+            return [{"id": 1, "name": "Alice Smith", "dob": "1990-01-01"}]
+            
+    mock_db = MockDbClient()
     factory = DynamicToolFactory(sample_config, mock_schema_metadata)
     tools, exec_map = factory.generate_tools()
-    from app.dynamic_db_client import DynamicDbClient
-    dyn_client = DynamicDbClient(sample_config["database"])
-    pool = await dyn_client.get_pg_pool()
     
-    executor = DynamicToolExecutor(pool, exec_map, sample_config["identity"]["table"])
+    executor = DynamicToolExecutor(
+        mock_db,
+        exec_map,
+        identity_table="customers",
+        identity_name_col="name",
+        identity_verify_col="dob"
+    )
     
     # Test verify failure
     state = {}
