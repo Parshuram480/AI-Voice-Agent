@@ -1,13 +1,20 @@
 export const API_BASE = 'http://localhost:8000';
 
 export async function request<T = any>(url: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem('auth_token');
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const defaults: RequestInit = {
     credentials: 'include',
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers,
   };
 
   const response = await fetch(url, defaults);
