@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS call_logs (
     summary_input_output_tokens INTEGER DEFAULT 0,
     total_tokens                INTEGER DEFAULT 0,
     average_latency         FLOAT,
+    client_id               INTEGER,
+    domain                  VARCHAR(255),
     created_at              TIMESTAMPTZ DEFAULT NOW()
 );
 

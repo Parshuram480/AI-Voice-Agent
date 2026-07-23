@@ -103,7 +103,7 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
           </div>
           <div className="space-y-1">
             <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Domain</span>
-            <span className="block text-base font-bold text-emerald-400">{domainName}</span>
+            <span className="block text-base font-bold text-emerald-400">{domainData?.name || domainName}</span>
           </div>
         </div>
 
@@ -186,16 +186,16 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
                 {parsedMetadata ? (
                   <>
                     <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Primary Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.customerTable || 'Configured'}</span>
+                      <span className="font-semibold text-slate-400">Identity Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.identityTable || 'Configured'}</span>
                     </div>
                     <div className="text-sm text-slate-200">
                       <span className="font-semibold text-slate-400">Verified Columns:</span>{' '}
-                      <span className="font-mono text-violet-300">
-                        {Array.isArray(parsedMetadata.verificationFields) ? parsedMetadata.verificationFields.join(', ') : 'Default'}
+                      <span className="font-mono text-violet-400">
+                        {parsedMetadata.nameColumn}, {parsedMetadata.verificationColumn}
                       </span>
                     </div>
                     <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Related Table:</span> <span className="font-mono text-emerald-400">{parsedMetadata.dataTable || 'Configured'}</span>
+                      <span className="font-semibold text-slate-400">Mapped Tables:</span> <span className="font-mono text-emerald-400">{parsedMetadata.selectedTables ? Object.keys(parsedMetadata.selectedTables).join(', ') : 'Configured'}</span>
                     </div>
                   </>
                 ) : (
