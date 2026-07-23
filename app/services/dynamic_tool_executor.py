@@ -83,7 +83,20 @@ class DynamicToolExecutor:
                 if not state.get("verified") or not state.get("identity_id"):
                     response_data = {"error": "User not verified. Please verify identity first."}
                 else:
-                    rows = await self._db_client.execute_query(sql, (state["identity_id"],))
+                    final_sql = tool_entry.get("sql", sql)
+                    params = [state["identity_id"]]
+                    
+                    if "base_sql" in tool_entry:
+                        final_sql = tool_entry["base_sql"]
+                        search_query = args.get("search_query")
+                        
+                        if search_query and tool_entry.get("search_sql"):
+                            final_sql += tool_entry["search_sql"]
+                            params.extend([search_query] * tool_entry.get("param_count", 0))
+                            
+                        final_sql += tool_entry.get("order_limit_sql", "")
+                        
+                    rows = await self._db_client.execute_query(final_sql, tuple(params))
                     
                     results = []
                     for row in rows:

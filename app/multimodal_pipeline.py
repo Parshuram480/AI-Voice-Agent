@@ -487,8 +487,8 @@ class GeminiLivePipeline:
                     total_output_tokens=total_output_tokens,
                     average_latency=avg_latency,
                     user_id=user_id,
-                    client_id=self.client_id,
-                    domain=self.domain
+                    client_id=kwargs.get("client_id", self.client_id),
+                    domain=kwargs.get("domain", self.domain)
                 )
             )
             

@@ -516,6 +516,7 @@ async def audio_stream(websocket: WebSocket):
                         session_id=call_sid,
                         twilio_ws=websocket,
                         stream_sid=stream_sid,
+                        client_id=client_id,
                         **dynamic_kwargs
                     )
                 )

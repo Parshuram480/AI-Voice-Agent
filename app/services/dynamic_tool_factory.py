@@ -1,7 +1,7 @@
 """Factory for dynamically generating Gemini tools and SQL maps."""
 
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,10 @@ class DynamicToolFactory:
         col_type = col_type.lower()
         return any(t in col_type for t in ("char", "text", "varchar", "nvar", "clob"))
 
-    def _map_pg_type_to_gemini(self, pg_type: str) -> str:
+    def _get_json_type(self, pg_type: str) -> str:
         """Map PostgreSQL data types to Gemini OpenAPI types."""
+        if not pg_type:
+            return "STRING"
         pg_type = pg_type.lower()
         if any(t in pg_type for t in ["int", "serial"]):
             return "INTEGER"
@@ -67,6 +69,32 @@ class DynamicToolFactory:
             return "BOOLEAN"
         else:
             return "STRING"
+
+    def _find_path_to_identity(self, start_table: str, path=None, visited=None) -> Optional[List[Dict[str, str]]]:
+        """Returns a list of foreign key steps leading to the identity table, or None if no path exists."""
+        if visited is None: visited = set()
+        if path is None: path = []
+        
+        if start_table in visited: return None
+        visited.add(start_table)
+        
+        schema_table = self.schema["tables"].get(start_table)
+        if not schema_table: return None
+        
+        for fk in schema_table.get("foreign_keys", []):
+            ref_table = fk["references_table"]
+            fk_with_source = dict(fk)
+            fk_with_source["source_table"] = start_table
+            
+            if ref_table == self.identity_table:
+                return path + [fk_with_source]
+                
+            sub_path = self._find_path_to_identity(ref_table, path + [fk_with_source], visited)
+            if sub_path:
+                return sub_path
+                
+        return None
+
 
     def generate_tools(self) -> Tuple[List[Dict[str, Any]], Dict[str, dict]]:
         """
@@ -84,24 +112,23 @@ class DynamicToolFactory:
                 
             schema_table = self.schema["tables"][table_name]
 
-            # Determine relationships
-            linked_to_identity = False
-            foreign_key_col = None
+            # Determine relationships using deep path resolution
+            identity_path = None
             if table_name != self.identity_table:
-                for fk in schema_table.get("foreign_keys", []):
-                    if fk["references_table"] == self.identity_table:
-                        linked_to_identity = True
-                        foreign_key_col = fk["column"]
-                        break
+                identity_path = self._find_path_to_identity(table_name)
 
             # Handle Identity Table
             if table_name == self.identity_table:
                 tool_name = f"verify_{table_name}"
                 description = f"Verify user identity in the {table_name} table. REQUIRES BOTH {self.identity_name_col} and {self.identity_verify_col}. NEVER call this tool if the user has not explicitly provided BOTH of these details. Do NOT guess or hallucinate missing information."
                 
+                verify_col_desc = f"User's {self.identity_verify_col}."
+                if "date" in self.identity_verify_col.lower() or "birth" in self.identity_verify_col.lower() or "dob" in self.identity_verify_col.lower():
+                    verify_col_desc += " MUST format as YYYY-MM-DD."
+                    
                 properties = {
                     self.identity_name_col: {"type": "STRING", "description": f"User's {self.identity_name_col}"},
-                    self.identity_verify_col: {"type": "STRING", "description": f"User's {self.identity_verify_col}. If this represents a date, you MUST format it as YYYY-MM-DD."}
+                    self.identity_verify_col: {"type": "STRING", "description": verify_col_desc}
                 }
                 
                 tools.append({
@@ -132,30 +159,38 @@ class DynamicToolFactory:
                 }
 
             # Handle Linked Tables (requires identity_id)
-            elif linked_to_identity:
+            elif identity_path:
                 tool_name = f"get_{table_name}"
-                description = f"Get records from {table_name} for the verified user. Do not pass parameters, the system will automatically inject the verified user's ID."
-                
-                tools.append({
-                    "name": tool_name,
-                    "description": description,
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "dummy": {"type": "STRING", "description": "Optional dummy parameter"}
-                        }
-                    }
-                })
-
                 pk = schema_table.get("primary_key", selected_cols[0])
                 
+                search_cols = []
+                for col_name, col_info in schema_table["columns"].items():
+                    if col_name in selected_cols and self._is_text_type(col_info["type"]):
+                        search_cols.append(f"{table_name}.{col_name}")
+                        
                 # Auto-JOIN logic
                 join_clauses = []
                 extra_cols = []
+                where_clause = ""
+                joined_tables = set([table_name])
+                
+                # 1. Joins for deep tenant isolation path
+                for step in identity_path:
+                    source_table = step["source_table"]
+                    ref_table = step["references_table"]
+                    
+                    if ref_table == self.identity_table:
+                        where_clause = f"{source_table}.{step['column']} = ?"
+                    else:
+                        if ref_table not in joined_tables:
+                            join_clauses.append(f"LEFT JOIN {ref_table} ON {source_table}.{step['column']} = {ref_table}.{step['references_column']}")
+                            joined_tables.add(ref_table)
+                
+                # 2. Joins for display columns (unrelated tables like lookup dictionaries)
                 for fk in schema_table.get("foreign_keys", []):
                     ref_table = fk["references_table"]
                     if ref_table == self.identity_table:
-                        continue  # Skip identity link
+                        continue
                     if ref_table not in self.schema["tables"]:
                         continue
                     
@@ -166,12 +201,40 @@ class DynamicToolFactory:
                             display_cols.append(col_name)
                     
                     if display_cols:
-                        join_clauses.append(
-                            f"LEFT JOIN {ref_table} ON {table_name}.{fk['column']} = {ref_table}.{fk['references_column']}"
-                        )
+                        if ref_table not in joined_tables:
+                            join_clauses.append(
+                                f"LEFT JOIN {ref_table} ON {table_name}.{fk['column']} = {ref_table}.{fk['references_column']}"
+                            )
+                            joined_tables.add(ref_table)
+                            
                         for d_col in display_cols:
                             alias = f"{ref_table}_{d_col}"
                             extra_cols.append(f"{ref_table}.{d_col} AS {alias}")
+                            
+                            col_info = ref_schema["columns"][d_col]
+                            if self._is_text_type(col_info["type"]):
+                                search_cols.append(f"{ref_table}.{d_col}")
+
+                properties = {}
+                description = f"Get records from {table_name} for the verified user."
+                if search_cols:
+                    desc_cols = " or ".join([c.split('.')[-1] for c in search_cols])
+                    properties["search_query"] = {
+                        "type": "STRING",
+                        "description": f"Optional. Search term to filter records by {desc_cols}."
+                    }
+                    description += " You can optionally provide a search_query to filter the results."
+                else:
+                    properties["dummy"] = {"type": "STRING", "description": "Optional dummy parameter"}
+                
+                tools.append({
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": properties
+                    }
+                })
 
                 all_cols = [f"{table_name}.{c}" for c in selected_cols] + extra_cols
                 cols_str = ", ".join(all_cols)
@@ -179,9 +242,32 @@ class DynamicToolFactory:
                 table_and_joins = f"{table_name} {joins}".strip()
                 
                 order_by = f"{table_name}.{pk} DESC" if pk else ""
-                sql = self._format_query(cols_str, table_and_joins, where_clause=f"{table_name}.{foreign_key_col} = ?", order_by=order_by, limit=10)
+                
+                base_sql = self._format_query(cols_str, table_and_joins, where_clause=where_clause, order_by=None, limit=None)
+                
+                search_sql = ""
+                if search_cols:
+                    search_where_clauses = [self._format_search_clause(col) for col in search_cols]
+                    search_sql = " AND (" + " OR ".join(search_where_clauses) + ")"
+                
+                order_limit_sql = ""
+                if order_by:
+                    order_limit_sql += f" ORDER BY {order_by}"
+                if self.db_type == "sql server" and order_by:
+                    order_limit_sql += " OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
+                elif self.db_type == "oracle":
+                    order_limit_sql += " FETCH FIRST 10 ROWS ONLY"
+                elif self.db_type != "sql server":
+                    order_limit_sql += " LIMIT 10"
+                    
+                full_sql = base_sql + order_limit_sql
+                
                 execution_map[tool_name] = {
-                    "sql": sql,
+                    "sql": full_sql,
+                    "base_sql": base_sql,
+                    "search_sql": search_sql,
+                    "order_limit_sql": order_limit_sql,
+                    "param_count": len(search_cols) if search_cols else 0,
                     "type": "linked",
                     "limit": 10
                 }
