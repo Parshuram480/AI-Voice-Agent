@@ -115,12 +115,12 @@ class SystemDatabase:
                 id                  SERIAL PRIMARY KEY,
                 client_id           INTEGER NOT NULL UNIQUE REFERENCES clients(id) ON DELETE CASCADE,
                 domain_id           INTEGER NOT NULL REFERENCES domains(id),
-                verification_query  TEXT NOT NULL,
-                data_query          TEXT NOT NULL,
+                dynamic_config      TEXT,
                 ui_config_metadata  TEXT,
                 status              VARCHAR(50) DEFAULT 'Active'
             );
             ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS ui_config_metadata TEXT;
+            ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS dynamic_config TEXT;
             """)
 
         # Seed standard domains
@@ -289,30 +289,19 @@ class SystemDatabase:
                     db_config.get("port"),
                     db_config["db_name"],
                     db_config.get("username"),
-                    db_config.get("password"),
+                    encrypt(db_config.get("password")),
                     db_config.get("schema_name"),
                     1 if db_config.get("enable_ssl") else 0,
                     1 if db_config.get("trust_server_certificate") else 0,
                     db_config.get("connection_timeout", 5),
-                    db_config.get("connection_string")
+                    encrypt(db_config.get("connection_string"))
                 )
 
-                # 3. Mappings queries
-                domain_name = await conn.fetchval("SELECT name FROM domains WHERE id = $1", domain_id)
-                if not domain_name:
-                    domain_name = "Order Tracking"
-
-                if domain_name == "Healthcare":
-                    v_query = "SELECT id, full_name, date_of_birth, phone FROM patients WHERE LOWER(full_name) = ? AND date_of_birth = ? AND deleted_at IS NULL LIMIT 1"
-                    d_query = "SELECT appointment_date, doctor_name, reason, status FROM appointments WHERE patient_id = ? AND deleted_at IS NULL ORDER BY appointment_date DESC"
-                else:
-                    v_query = "SELECT id, full_name, date_of_birth, phone FROM customers WHERE LOWER(full_name) = ? AND date_of_birth = ? AND deleted_at IS NULL LIMIT 1"
-                    d_query = "SELECT order_number, status, estimated_arrival, items_summary FROM orders WHERE customer_id = ? AND deleted_at IS NULL ORDER BY created_at DESC"
-
+                # 3. Mappings queries (Legacy seeding removed for dynamic config)
                 await conn.execute("""
-                INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query)
-                VALUES ($1, $2, $3, $4)
-                """, client_id, domain_id, v_query, d_query)
+                INSERT INTO client_domain_mappings (client_id, domain_id)
+                VALUES ($1, $2)
+                """, client_id, domain_id)
 
                 await tx.commit()
                 return client_id
@@ -337,7 +326,12 @@ class SystemDatabase:
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM client_database_configurations WHERE client_id = $1", client_id)
-            return dict(row) if row else None
+            if not row:
+                return None
+            config = dict(row)
+            config["password"] = decrypt(config.get("password"))
+            config["connection_string"] = decrypt(config.get("connection_string"))
+            return config
 
     async def save_client_db_config(self, client_id: int, db_config: Dict[str, Any]):
         pool = await self._get_conn()
@@ -366,12 +360,12 @@ class SystemDatabase:
                 db_config.get("port"),
                 db_config["db_name"],
                 db_config.get("username"),
-                db_config.get("password"),
+                encrypt(db_config.get("password")),
                 db_config.get("schema_name"),
                 1 if db_config.get("enable_ssl") else 0,
                 1 if db_config.get("trust_server_certificate") else 0,
                 db_config.get("connection_timeout", 5),
-                db_config.get("connection_string")
+                encrypt(db_config.get("connection_string"))
             )
 
     async def get_client_domain_mapping(self, client_id: int) -> Optional[Dict[str, Any]]:
@@ -385,15 +379,15 @@ class SystemDatabase:
             """, client_id)
             return dict(row) if row else None
 
-    async def update_client_domain_mapping(self, client_id: int, domain_id: int, verification_query: str, data_query: str, ui_config_metadata: Optional[str] = None):
+    async def update_client_domain_mapping(self, client_id: int, domain_id: int, dynamic_config: str, ui_config_metadata: Optional[str] = None):
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             await conn.execute("""
-            INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query, ui_config_metadata)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO client_domain_mappings (client_id, domain_id, dynamic_config, ui_config_metadata)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (client_id) DO UPDATE SET
                 domain_id = EXCLUDED.domain_id,
-                verification_query = EXCLUDED.verification_query,
-                data_query = EXCLUDED.data_query,
+                dynamic_config = EXCLUDED.dynamic_config,
                 ui_config_metadata = EXCLUDED.ui_config_metadata
-            """, client_id, domain_id, verification_query, data_query, ui_config_metadata)
+            """, client_id, domain_id, dynamic_config, ui_config_metadata)
+

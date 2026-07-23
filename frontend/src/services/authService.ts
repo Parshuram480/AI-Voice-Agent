@@ -6,20 +6,29 @@ export const authService = {
   },
 
   async login(payload: any) {
-    return request(`${API_BASE}/api/auth/login`, {
+    const res = await request(`${API_BASE}/api/auth/login`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    if (res.token) {
+      localStorage.setItem('auth_token', String(res.token));
+    }
+    return res;
   },
 
   async register(payload: any) {
-    return request(`${API_BASE}/api/auth/register`, {
+    const res = await request(`${API_BASE}/api/auth/register`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    if (res.token || res.client_id) {
+      localStorage.setItem('auth_token', String(res.token || res.client_id));
+    }
+    return res;
   },
 
   async logout() {
+    localStorage.removeItem('auth_token');
     return request(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
     });

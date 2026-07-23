@@ -65,27 +65,40 @@ class IntrospectRequest(BaseModel):
     password: Optional[str] = None
     connection_timeout: Optional[int] = 5
 
-class GenerateRulesRequest(BaseModel):
-    db_config: DbConfigRequest
-    customer_table: str
-    verification_fields: list[str]
-    data_table: str
-    data_fields: list[str]
-    schema_data: dict[str, list[str]]
 
-class TestQueryRequest(BaseModel):
-    db_config: DbConfigRequest
-    verification_query: str
-    data_query: str
-    test_inputs: list[str] = []
+
+
 
 class SaveRulesRequest(BaseModel):
     db_config: DbConfigRequest
     domain_id: int
-    verification_query: str
-    data_query: str
+    identity: dict[str, Any]
+    selected_tables: dict[str, list[str]]
     client_id: Optional[int] = None
     ui_config_metadata: Optional[dict[str, Any]] = None
+
+
+from app.auth_jwt import create_access_token, verify_and_get_client_id
+
+
+def get_authenticated_client_id(request: Request) -> int:
+    """Extracts client_id from Authorization Bearer JWT token header or session cookie."""
+    # 1. Bearer Token Header
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token_str = auth_header.split(" ", 1)[1].strip()
+        client_id = verify_and_get_client_id(token_str)
+        if client_id is not None:
+            return client_id
+
+    # 2. Session Cookie Fallback
+    cookie_str = request.cookies.get("session_token")
+    if cookie_str:
+        client_id = verify_and_get_client_id(cookie_str)
+        if client_id is not None:
+            return client_id
+
+    raise HTTPException(status_code=401, detail="Unauthorized: Missing, invalid, or expired JWT token.")
 
 
 def create_api_router(
@@ -138,8 +151,14 @@ def create_api_router(
             }
 
             client_id = await system_db.register_client(client_data, db_config, req.domain_id)
-            response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
-            return {"success": True, "client_id": client_id, "message": "Registration successful."}
+            jwt_token = create_access_token(client_id=client_id, email=req.email)
+            response.set_cookie(key="session_token", value=jwt_token, httponly=True, samesite="lax")
+            return {
+                "success": True,
+                "token": jwt_token,
+                "client_id": client_id,
+                "message": "Registration successful."
+            }
         except HTTPException as he:
             raise he
         except Exception as e:
@@ -148,7 +167,7 @@ def create_api_router(
 
     @router.post("/api/auth/login")
     async def login_tenant(req: LoginRequest, response: Response):
-        """Authenticates client and sets cookie session token."""
+        """Authenticates client and sets token/cookie."""
         client = await system_db.get_client_by_email(req.email)
         if not client:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -159,15 +178,20 @@ def create_api_router(
         if client["status"] != "Active":
             raise HTTPException(status_code=403, detail="Account is disabled.")
 
-        # Set session cookie (valid for 1 day)
+        jwt_token = create_access_token(client_id=client["id"], email=client["email"])
         response.set_cookie(
             key="session_token",
-            value=str(client["id"]),
+            value=jwt_token,
             httponly=True,
-            max_age=86400,
+            max_age=86400 * 7,
             samesite="lax"
         )
-        return {"success": True, "message": "Login successful."}
+        return {
+            "success": True,
+            "token": jwt_token,
+            "client_id": client["id"],
+            "message": "Login successful."
+        }
 
     @router.post("/api/auth/logout")
     async def logout_tenant(response: Response):
@@ -177,13 +201,9 @@ def create_api_router(
 
     @router.get("/api/auth/me")
     async def get_current_client(request: Request):
-        """Retrieves details of the currently logged-in client."""
-        client_id_str = request.cookies.get("session_token")
-        if not client_id_str:
-            raise HTTPException(status_code=401, detail="Unauthorized session.")
-        
+        """Retrieves details of the currently logged-in client via token or cookie."""
         try:
-            client_id = int(client_id_str)
+            client_id = get_authenticated_client_id(request)
             request.app.state.last_active_client_id = client_id
             client = await system_db.get_client_by_id(client_id)
             if not client:
@@ -192,27 +212,27 @@ def create_api_router(
             db_config = await system_db.get_client_db_config(client_id)
             mapping = await system_db.get_client_domain_mapping(client_id)
             
-            # Strip sensitive data before returning
             client.pop("password_hash", None)
             if db_config:
                 db_config.pop("password", None)
             
             import os
             pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
+            jwt_token = create_access_token(client_id=client_id, email=client.get("email", ""))
             return {
+                "token": jwt_token,
                 "client": client,
                 "db_config": db_config,
                 "pipeline_mode": pipeline_mode,
                 "domain": {
                     "id": mapping["domain_id"] if mapping else None,
                     "name": mapping["domain_name"] if mapping else None,
-                    "verification_query": mapping["verification_query"] if mapping else None,
-                    "data_query": mapping["data_query"] if mapping else None,
+                    "dynamic_config": mapping["dynamic_config"] if mapping else None,
                     "ui_config_metadata": mapping["ui_config_metadata"] if mapping else None,
                 } if mapping else None
             }
         except ValueError:
-            raise HTTPException(status_code=401, detail="Invalid session cookie.")
+            raise HTTPException(status_code=401, detail="Invalid token format.")
 
     @router.post("/api/tenant/test-connection")
     async def test_db_connection(req: DbConfigRequest):
@@ -308,157 +328,25 @@ def create_api_router(
         if not success:
             return {"success": False, "message": message, "schema": {}}
         
-        schema = await client.introspect_schema()
+        schema = await client.introspect_schema_full()
         return {"success": True, "message": "Database introspected successfully.", "schema": schema}
 
-    @router.post("/api/tenant/db-config/generate-rules")
-    async def generate_db_rules(req: GenerateRulesRequest):
-        """Uses LLM to construct dialect-specific SQL queries and natural language summary."""
-        import json
-        import os
-        
-        db_type = req.db_config.db_type.lower()
-        placeholder_hint = "$1, $2, ..." if db_type == "postgresql" else ("?" if db_type != "oracle" else ":1, :2, ...")
-        
-        prompt = f"""You are an expert SQL engineer. Generate standard, parameterized SQL queries matching the user's requirements.
 
-DATABASE TYPE: {db_type}
-PARAMETER PLACEHOLDER HINT: Use {placeholder_hint} for parameters.
 
-SCHEMA METADATA:
-{json.dumps(req.schema_data, indent=2)}
 
-USER SELECTIONS:
-- Verification Table: {req.customer_table}
-- Verification Criteria Fields: {json.dumps(req.verification_fields)}
-- Business Data Table: {req.data_table}
-- Business Data Fields to Retrieve: {json.dumps(req.data_fields)}
-
-INSTRUCTIONS:
-1. Locate columns matching verification fields in '{req.customer_table}'.
-2. Write a verification_query:
-   - Must SELECT primary key 'id' plus verified fields from '{req.customer_table}'.
-   - CRITICAL: Write the WHERE clause filters in the EXACT SAME ORDER as verification_fields: {json.dumps(req.verification_fields)}.
-   - Must filter using LOWER() on text fields where applicable.
-   - Example (PostgreSQL): SELECT id, full_name, email_address FROM {req.customer_table} WHERE LOWER(full_name) = $1 AND email_address = $2 LIMIT 1
-   - Example (SQLite/MySQL): SELECT id, full_name, email_address FROM {req.customer_table} WHERE LOWER(full_name) = ? AND email_address = ? LIMIT 1
-3. Write a data_query:
-   - Must SELECT specified data fields ({json.dumps(req.data_fields) if req.data_fields else '*'}) from '{req.data_table}'.
-   - Must filter by foreign key referencing customer id (e.g. patient_id, customer_id, or id = $1 / ?).
-4. Provide a friendly 2-sentence natural_language_summary explaining how the agent will identify callers and what records it will look up.
-
-Return ONLY a JSON object:
-{{
-  "natural_language_summary": "...",
-  "verification_query": "...",
-  "data_query": "..."
-}}"""
-
-        try:
-            import asyncio
-            from google import genai
-
-            api_key = os.getenv("GEMINI_API_KEY")
-            model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-
-            def _call_gemini():
-                client = genai.Client(api_key=api_key)
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
-                return resp.text or ""
-
-            res_text = await asyncio.to_thread(_call_gemini)
-            
-            clean_json = res_text.strip()
-            if clean_json.startswith("```"):
-                clean_json = clean_json.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                
-            data = json.loads(clean_json)
-            return {
-                "success": True,
-                "summary": data.get("natural_language_summary", ""),
-                "verification_query": data.get("verification_query", ""),
-                "data_query": data.get("data_query", "")
-            }
-        except Exception as e:
-            logger.error(f"Error generating AI SQL rules via Gemini: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to generate SQL rules: {e}")
-
-    @router.post("/api/tenant/db-config/test-query")
-    async def test_db_rules(req: TestQueryRequest):
-        """Executes verification and data queries with sample inputs to produce readable preview result."""
-        config = {
-            "db_type": req.db_config.db_type,
-            "db_name": req.db_config.db_name,
-            "server_name": req.db_config.server_name,
-            "port": req.db_config.port,
-            "username": req.db_config.username,
-            "password": req.db_config.password,
-            "connection_timeout": req.db_config.connection_timeout
-        }
-        client = DynamicDbClient(config)
-        
-        try:
-            params = []
-            import re
-            for val in req.test_inputs:
-                v_str = str(val).strip()
-                if re.match(r"^\d{4}[-/.]\d{2}[-/.]\d{2}$", v_str) or v_str.isdigit():
-                    params.append(v_str)
-                else:
-                    params.append(v_str.lower())
-                
-            rows = await client.execute_query(req.verification_query, tuple(params))
-            if not rows:
-                return {
-                    "success": False,
-                    "verified": False,
-                    "message": f"Verification failed. No matching record found for input values: {req.test_inputs}."
-                }
-                
-            customer = dict(rows[0])
-            for k, v in customer.items():
-                if hasattr(v, "isoformat"):
-                    customer[k] = v.isoformat()
-                    
-            records_rows = await client.execute_query(req.data_query, (customer.get("id", 1),))
-            records = [dict(r) for r in records_rows]
-            for r in records:
-                for k, v in r.items():
-                    if hasattr(v, "isoformat"):
-                        r[k] = v.isoformat()
-                        
-            return {
-                "success": True,
-                "verified": True,
-                "customer": customer,
-                "records": records,
-                "message": f"Verified successfully! Found {len(records)} matching records."
-            }
-        except Exception as e:
-            logger.error(f"Error testing DB queries: {e}")
-            return {"success": False, "verified": False, "message": f"Query execution error: {e}"}
 
     @router.post("/api/tenant/db-config/save-rules")
     async def save_db_rules(req: SaveRulesRequest, request: Request, response: Response):
         """Saves DB configuration, SQL rules, and UI metadata for tenant."""
-        client_id_str = request.cookies.get("session_token")
-        client_id = None
-        if client_id_str:
-            try:
-                client_id = int(client_id_str)
-            except ValueError:
-                pass
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            if req.client_id:
+                client_id = req.client_id
+                response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
+            else:
+                raise
                 
-        if not client_id and req.client_id:
-            client_id = req.client_id
-            response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
-            
-        if not client_id:
-            raise HTTPException(status_code=401, detail="Unauthorized session.")
-            
         try:
             existing = await system_db.get_client_db_config(client_id)
             
@@ -481,12 +369,16 @@ Return ONLY a JSON object:
             await system_db.save_client_db_config(client_id, config)
             
             import json
+            dynamic_config_dict = {
+                "identity": req.identity,
+                "selected_tables": req.selected_tables
+            }
+            dyn_json = json.dumps(dynamic_config_dict)
             meta_json = json.dumps(req.ui_config_metadata) if req.ui_config_metadata else None
             await system_db.update_client_domain_mapping(
                 client_id=client_id,
                 domain_id=req.domain_id,
-                verification_query=req.verification_query,
-                data_query=req.data_query,
+                dynamic_config=dyn_json,
                 ui_config_metadata=meta_json
             )
             return {"success": True, "message": "Database and AI voice agent rules saved successfully!"}
