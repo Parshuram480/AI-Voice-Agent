@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 import asyncpg
 from app.utils.prompt_loader import get_prompts
+from app.utils.encryption import encrypt, decrypt
 
 logger = logging.getLogger(__name__)
 
@@ -299,8 +300,8 @@ class SystemDatabase:
 
                 # 3. Mappings queries (Legacy seeding removed for dynamic config)
                 await conn.execute("""
-                INSERT INTO client_domain_mappings (client_id, domain_id)
-                VALUES ($1, $2)
+                INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query)
+                VALUES ($1, $2, '', '')
                 """, client_id, domain_id)
 
                 await tx.commit()
@@ -383,8 +384,8 @@ class SystemDatabase:
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             await conn.execute("""
-            INSERT INTO client_domain_mappings (client_id, domain_id, dynamic_config, ui_config_metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO client_domain_mappings (client_id, domain_id, dynamic_config, ui_config_metadata, verification_query, data_query)
+            VALUES ($1, $2, $3, $4, '', '')
             ON CONFLICT (client_id) DO UPDATE SET
                 domain_id = EXCLUDED.domain_id,
                 dynamic_config = EXCLUDED.dynamic_config,
