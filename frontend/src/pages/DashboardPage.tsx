@@ -226,6 +226,8 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
             {/* Reusable No-Code Database Introspection & Rule Configurator Wizard */}
             <NoCodeDbConfigWizard
               domainId={domainData?.id || 1}
+              initialDbConfig={dbConfig}
+              initialMetadata={parsedMetadata}
               onSaveSuccess={() => {
                 loadConfig();
                 setIsEditing(false);

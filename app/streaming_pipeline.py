@@ -512,7 +512,9 @@ class StreamingVoicePipeline:
                 total_input_tokens=total_input_tokens,
                 total_output_tokens=total_output_tokens,
                 average_latency=avg_latency,
-                user_id=user_id
+                user_id=user_id,
+                client_id=kwargs.get("client_id"),
+                domain=kwargs.get("domain")
             )
         )
 

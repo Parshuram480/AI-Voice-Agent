@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import TextField from '@mui/material/TextField';
 import Button from '@mui/material/Button';
 import FormControl from '@mui/material/FormControl';
@@ -12,47 +12,56 @@ import CircularProgress from '@mui/material/CircularProgress';
 import Accordion from '@mui/material/Accordion';
 import AccordionSummary from '@mui/material/AccordionSummary';
 import AccordionDetails from '@mui/material/AccordionDetails';
-import Typography from '@mui/material/Typography';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import StorageIcon from '@mui/icons-material/Storage';
 import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import SaveIcon from '@mui/icons-material/Save';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import TableChartIcon from '@mui/icons-material/TableChart';
+import BuildIcon from '@mui/icons-material/Build';
 
 import { tenantService } from '../services/tenantService';
 
 export interface NoCodeDbConfigWizardProps {
   domainId?: number;
+  initialDbConfig?: any;
+  initialMetadata?: any;
   onSaveSuccess?: () => void;
   isRegistrationMode?: boolean;
   onConfigCompleted?: (data: {
     dbConfig: any;
     domainId: number;
-    verificationQuery: string;
-    dataQuery: string;
+    identity: {
+      table: string;
+      name_column: string;
+      verification_column: string;
+      display_columns: string[];
+    };
+    selectedTables: Record<string, string[]>;
     uiConfigMetadata: any;
   }) => void;
 }
 
 export default function NoCodeDbConfigWizard({
   domainId = 1,
+  initialDbConfig,
+  initialMetadata,
   onSaveSuccess,
   isRegistrationMode = false,
   onConfigCompleted,
 }: NoCodeDbConfigWizardProps) {
-  // Step tracking (1: DB Credentials, 2: Rule Mapping, 3: AI Summary & Test)
+  // Step tracking (1: DB Credentials, 2: Rule Mapping, 3: AI Summary Review)
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
 
   // Step 1: DB Credentials State
-  const [dbType, setDbType] = useState('sqlite');
-  const [dbName, setDbName] = useState();
-  const [serverAddress, setServerAddress] = useState('localhost');
-  const [port, setPort] = useState<number | ''>(5432);
-  const [username, setUsername] = useState('postgres');
-  const [passwordDb, setPasswordDb] = useState('');
+  const [dbType, setDbType] = useState(initialDbConfig?.db_type || 'postgresql');
+  const [dbName, setDbName] = useState<string>(initialDbConfig?.db_name || '');
+  const [serverAddress, setServerAddress] = useState(initialDbConfig?.server_name || 'localhost');
+  const [port, setPort] = useState<number | ''>(initialDbConfig?.port || 5432);
+  const [username, setUsername] = useState(initialDbConfig?.username || 'postgres');
+  const [passwordDb, setPasswordDb] = useState(initialDbConfig?.password || '');
   const [schemaName] = useState('');
   const [enableSsl] = useState(false);
   const [trustCert] = useState(false);
@@ -63,32 +72,45 @@ export default function NoCodeDbConfigWizard({
   const [uploadingDb, setUploadingDb] = useState(false);
   const [step1Error, setStep1Error] = useState('');
 
-  // Step 2: Rule Configurator State
-  const [customerTable, setCustomerTable] = useState<string>('');
-  const [verificationFields, setVerificationFields] = useState<string[]>([]);
-  const [dataTable, setDataTable] = useState<string>('');
-  const [selectedDataFields, setSelectedDataFields] = useState<string[]>([]);
-  const [loadingGenerate, setLoadingGenerate] = useState(false);
+  // Step 2: Multi-Table Rule Configurator State
+  const [customerTable, setCustomerTable] = useState<string>(
+    initialMetadata?.identity?.table || initialMetadata?.customerTable || ''
+  );
+  const [verificationFields, setVerificationFields] = useState<string[]>(
+    initialMetadata?.identity?.display_columns || initialMetadata?.verificationFields || []
+  );
+  
+  // Map of selected related tables and their accessible columns: { [tableName]: string[] }
+  const [selectedTables, setSelectedTables] = useState<Record<string, string[]>>(
+    initialMetadata?.selected_tables || initialMetadata?.selectedTables || {}
+  );
+
   const [step2Error, setStep2Error] = useState('');
 
-  // Step 3: AI Summary & Test Preview State
+  // Step 3: Summary State
   const [aiSummary, setAiSummary] = useState('');
-  const [verificationQuery, setVerificationQuery] = useState('');
-  const [dataQuery, setDataQuery] = useState('');
-
-  // Dynamic test inputs map { [columnName]: inputValue }
-  const [testInputs, setTestInputs] = useState<Record<string, string>>({});
-  const [loadingTest, setLoadingTest] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    success: boolean;
-    verified: boolean;
-    message: string;
-    customer?: any;
-    records?: any[];
-  } | null>(null);
-
   const [loadingSave, setLoadingSave] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
+
+  // Pre-fill state whenever initialDbConfig or initialMetadata changes
+  useEffect(() => {
+    if (initialDbConfig) {
+      if (initialDbConfig.db_type) setDbType(initialDbConfig.db_type);
+      if (initialDbConfig.db_name) setDbName(initialDbConfig.db_name);
+      if (initialDbConfig.server_name) setServerAddress(initialDbConfig.server_name);
+      if (initialDbConfig.port) setPort(initialDbConfig.port);
+      if (initialDbConfig.username) setUsername(initialDbConfig.username);
+    }
+    if (initialMetadata) {
+      const custTab = initialMetadata.identity?.table || initialMetadata.customerTable || '';
+      const verFields = initialMetadata.identity?.display_columns || initialMetadata.verificationFields || [];
+      const selTables = initialMetadata.selected_tables || initialMetadata.selectedTables || {};
+      
+      if (custTab) setCustomerTable(custTab);
+      if (verFields.length > 0) setVerificationFields(verFields);
+      if (Object.keys(selTables).length > 0) setSelectedTables(selTables);
+    }
+  }, [initialDbConfig, initialMetadata]);
 
   // Helper to build DB config payload
   const getDbConfigPayload = () => ({
@@ -134,24 +156,60 @@ export default function NoCodeDbConfigWizard({
     setLoadingIntrospect(true);
     try {
       const res = await tenantService.introspectDb(getDbConfigPayload());
-      if (res.success && res.schema && Object.keys(res.schema).length > 0) {
-        setSchemaData(res.schema);
-        const tables = Object.keys(res.schema);
-        const custTab = tables[0] || '';
-        const dataTab = tables[1] || tables[0] || '';
-        setCustomerTable(custTab);
-        setDataTable(dataTab);
-
-        if (res.schema[custTab]) {
-          const cols = res.schema[custTab];
-          const defaults = cols.filter((c: string) => /name|dob|birth|email|phone|code|id/i.test(c));
-          setVerificationFields(defaults.length > 0 ? defaults.slice(0, 2) : cols.slice(0, 2));
+      if (res.success && res.schema) {
+        // Map hierarchical schema { tables: { tableName: { columns: { colName: ... } } } } into flat Record<string, string[]>
+        const flatSchema: Record<string, string[]> = {};
+        if (res.schema.tables) {
+          Object.keys(res.schema.tables).forEach((tableName) => {
+            const tableObj = res.schema.tables[tableName];
+            if (tableObj && tableObj.columns) {
+              flatSchema[tableName] = Object.keys(tableObj.columns);
+            }
+          });
+        } else {
+          // Fallback if schema structure is already flat
+          Object.keys(res.schema).forEach((key) => {
+            if (Array.isArray(res.schema[key])) {
+              flatSchema[key] = res.schema[key];
+            }
+          });
         }
 
-        if (res.schema[dataTab]) {
-          setSelectedDataFields(res.schema[dataTab]);
+        if (Object.keys(flatSchema).length > 0) {
+          setSchemaData(flatSchema);
+          const tables = Object.keys(flatSchema);
+          
+          // Preserve existing identity table if valid, or default to first table
+          const custTab = customerTable && flatSchema[customerTable] ? customerTable : (tables[0] || '');
+          setCustomerTable(custTab);
+
+          // Preserve existing verification fields if valid, or default to first 2 matching columns
+          if (flatSchema[custTab] && verificationFields.length === 0) {
+            const cols = flatSchema[custTab];
+            const defaults = cols.filter((c: string) => /name|dob|birth|email|phone|code|id/i.test(c));
+            setVerificationFields(defaults.length > 0 ? defaults.slice(0, 2) : cols.slice(0, 2));
+          }
+
+          // Merge existing selectedTables with scanned schema
+          const currentSavedTables = initialMetadata?.selected_tables || initialMetadata?.selectedTables || {};
+          const initialSelectedTables: Record<string, string[]> = {};
+          const hasSavedConfig = Boolean(initialMetadata);
+
+          tables.forEach((tbl) => {
+            if (tbl !== custTab) {
+              if (currentSavedTables[tbl]) {
+                initialSelectedTables[tbl] = currentSavedTables[tbl];
+              } else if (!hasSavedConfig) {
+                initialSelectedTables[tbl] = flatSchema[tbl] || [];
+              }
+            }
+          });
+          setSelectedTables(initialSelectedTables);
+
+          setCurrentStep(2);
+        } else {
+          setStep1Error(res.message || 'Could not find readable tables in database.');
         }
-        setCurrentStep(2);
       } else {
         setStep1Error(res.message || 'Could not find readable tables in database.');
       }
@@ -162,15 +220,37 @@ export default function NoCodeDbConfigWizard({
     }
   };
 
-  // Step 2: Generate AI Rules
-  const handleGenerateRules = async () => {
+  // Toggle table selection
+  const toggleTableSelection = (tableName: string, checked: boolean) => {
+    const updated = { ...selectedTables };
+    if (checked) {
+      updated[tableName] = schemaData[tableName] || [];
+    } else {
+      delete updated[tableName];
+    }
+    setSelectedTables(updated);
+  };
+
+  // Toggle column selection inside a specific table
+  const toggleColumnInTable = (tableName: string, colName: string, checked: boolean) => {
+    const currentCols = selectedTables[tableName] || [];
+    let newCols: string[];
+    if (checked) {
+      newCols = [...currentCols, colName];
+    } else {
+      newCols = currentCols.filter((c) => c !== colName);
+    }
+    setSelectedTables({
+      ...selectedTables,
+      [tableName]: newCols,
+    });
+  };
+
+  // Step 2: Generate Agent Configuration Summary
+  const handleGenerateRules = () => {
     setStep2Error('');
     if (!customerTable) {
       setStep2Error('Please select a Primary Identity table.');
-      return;
-    }
-    if (!dataTable) {
-      setStep2Error('Please select a Related Data table.');
       return;
     }
     if (verificationFields.length === 0) {
@@ -178,79 +258,46 @@ export default function NoCodeDbConfigWizard({
       return;
     }
 
-    setLoadingGenerate(true);
-    try {
-      const res = await tenantService.generateRules({
-        db_config: getDbConfigPayload(),
-        customer_table: customerTable,
-        verification_fields: verificationFields,
-        data_table: dataTable,
-        data_fields: selectedDataFields,
-        schema_data: schemaData,
-      });
-
-      if (res.success) {
-        setAiSummary(res.summary);
-        setVerificationQuery(res.verification_query);
-        setDataQuery(res.data_query);
-
-        // Pre-fill test inputs map for chosen verification fields
-        const initialTestInputs: Record<string, string> = {};
-        verificationFields.forEach((field) => {
-          initialTestInputs[field] = field.toLowerCase().includes('name') ? 'John Smith' : '1990-05-15';
-        });
-        setTestInputs(initialTestInputs);
-
-        setCurrentStep(3);
-      } else {
-        setStep2Error(res.message || 'Failed to generate AI rules.');
-      }
-    } catch (e: any) {
-      setStep2Error(e.message || 'Error generating AI rules.');
-    } finally {
-      setLoadingGenerate(false);
+    const selectedTableNames = Object.keys(selectedTables);
+    if (selectedTableNames.length === 0) {
+      setStep2Error('Please select at least one Business Data table for the Voice Agent.');
+      return;
     }
-  };
 
-  // Step 3: Test Query Execution
-  const handleRunTest = async () => {
-    setLoadingTest(true);
-    setTestResult(null);
-    try {
-      const inputsArray = verificationFields.map((field) => testInputs[field] || '');
-      const res = await tenantService.testQuery({
-        db_config: getDbConfigPayload(),
-        verification_query: verificationQuery,
-        data_query: dataQuery,
-        test_inputs: inputsArray,
-      });
-      setTestResult(res);
-    } catch (e: any) {
-      setTestResult({
-        success: false,
-        verified: false,
-        message: e.message || 'Error executing test query.',
-      });
-    } finally {
-      setLoadingTest(false);
-    }
+    // Generate client-side plain-English rule summary for display
+    const summaryStr = `The AI Voice Agent will dynamically identify callers in table "${customerTable}" verifying details against columns: ${verificationFields.join(', ')}. Once verified, it will construct dynamic joins and SQL lookups to search business records in: ${selectedTableNames.join(', ')}.`;
+    setAiSummary(summaryStr);
+    setCurrentStep(3);
   };
 
   // Step 3: Save Final Rules
   const handleSaveFinalRules = async () => {
+    const fullSelectedTablesMap: Record<string, string[]> = {
+      [customerTable]: schemaData[customerTable] || verificationFields,
+      ...selectedTables,
+    };
+
+    const identityPayload = {
+      table: customerTable,
+      name_column: verificationFields.find((f) => f.toLowerCase().includes('name')) || verificationFields[0] || 'full_name',
+      verification_column: verificationFields.find((f) => !f.toLowerCase().includes('name')) || verificationFields[0] || 'date_of_birth',
+      display_columns: verificationFields,
+    };
+
     const uiMetadata = {
-      verificationFields,
+      identity: identityPayload,
+      selected_tables: fullSelectedTablesMap,
       customerTable,
-      dataTable,
-      selectedDataFields,
+      verificationFields,
+      selectedTables,
     };
 
     if (isRegistrationMode && onConfigCompleted) {
       onConfigCompleted({
         dbConfig: getDbConfigPayload(),
         domainId,
-        verificationQuery,
-        dataQuery,
+        identity: identityPayload,
+        selectedTables: fullSelectedTablesMap,
         uiConfigMetadata: uiMetadata,
       });
       return;
@@ -262,13 +309,13 @@ export default function NoCodeDbConfigWizard({
       const res = await tenantService.saveRules({
         db_config: getDbConfigPayload(),
         domain_id: domainId,
-        verification_query: verificationQuery,
-        data_query: dataQuery,
+        identity: identityPayload,
+        selected_tables: fullSelectedTablesMap,
         ui_config_metadata: uiMetadata,
       });
 
       if (res.success) {
-        setSaveSuccessMsg('Database configuration and AI voice agent rules saved successfully!');
+        setSaveSuccessMsg('Database configuration & AI Voice Agent dynamic rules saved successfully!');
         if (onSaveSuccess) {
           onSaveSuccess();
         }
@@ -290,14 +337,14 @@ export default function NoCodeDbConfigWizard({
           </div>
           <div>
             <h3 className="text-lg font-bold text-slate-100">
-              {currentStep === 1 && '1. Database Connection & Introspection'}
-              {currentStep === 2 && '2. Dynamic Visual Rule Configurator'}
-              {currentStep === 3 && '3. AI Agent Summary & Connection Test'}
+              {currentStep === 1 && '1. Database Connection & Schema Scanning'}
+              {currentStep === 2 && '2. Dynamic Multi-Table Rule Configurator'}
+              {currentStep === 3 && '3. AI Agent Summary & Dynamic Tools Review'}
             </h3>
             <p className="text-xs text-slate-400">
               {currentStep === 1 && 'Enter credentials or upload SQLite file to discover tables and columns.'}
-              {currentStep === 2 && 'Select table columns for identity verification & data lookup.'}
-              {currentStep === 3 && 'Verify plain-English rules and test connection live.'}
+              {currentStep === 2 && 'Select tables & column fields for caller verification & AI access.'}
+              {currentStep === 3 && 'Review plain-English agent summary & dynamic tools capabilities.'}
             </p>
           </div>
         </div>
@@ -437,45 +484,28 @@ export default function NoCodeDbConfigWizard({
         </div>
       )}
 
-      {/* STEP 2: DYNAMIC RULE CONFIGURATOR */}
+      {/* STEP 2: DYNAMIC MULTI-TABLE RULE CONFIGURATOR */}
       {currentStep === 2 && (
         <div className="space-y-6">
           {step2Error && <Alert severity="error" className="rounded-xl">{step2Error}</Alert>}
 
-          {/* Table Dropdowns */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* Primary Identity Table Selector */}
+          <div>
             <FormControl fullWidth size="small">
-              <InputLabel id="cust-table-label">Primary Identity Table</InputLabel>
+              <InputLabel id="cust-table-label">Primary Identity Table (Caller Information)</InputLabel>
               <Select
                 labelId="cust-table-label"
                 value={customerTable}
-                label="Primary Identity Table"
+                label="Primary Identity Table (Caller Information)"
                 onChange={(e) => {
                   const t = e.target.value;
                   setCustomerTable(t);
                   if (schemaData[t]) {
                     setVerificationFields(schemaData[t].slice(0, 2));
                   }
-                }}
-              >
-                {Object.keys(schemaData).map((t) => (
-                  <MenuItem key={t} value={t}>{t}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControl fullWidth size="small">
-              <InputLabel id="data-table-label">Related Details / Data Table</InputLabel>
-              <Select
-                labelId="data-table-label"
-                value={dataTable}
-                label="Related Details / Data Table"
-                onChange={(e) => {
-                  const t = e.target.value;
-                  setDataTable(t);
-                  if (schemaData[t]) {
-                    setSelectedDataFields(schemaData[t]);
-                  }
+                  const updatedRelated = { ...selectedTables };
+                  delete updatedRelated[t];
+                  setSelectedTables(updatedRelated);
                 }}
               >
                 {Object.keys(schemaData).map((t) => (
@@ -492,7 +522,7 @@ export default function NoCodeDbConfigWizard({
                 <VerifiedUserIcon sx={{ fontSize: 18, color: '#38bdf8' }} />
                 Which columns from <span className="text-sky-400">{customerTable}</span> should verify callers?
               </h4>
-              <p className="text-xs text-slate-400 mb-3">Select one or more identity verification columns from your database table.</p>
+              <p className="text-xs text-slate-400 mb-3">Select one or more identity verification columns from your table.</p>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {schemaData[customerTable].map((col) => (
                   <FormControlLabel
@@ -518,36 +548,84 @@ export default function NoCodeDbConfigWizard({
             </div>
           )}
 
-          {/* Accessible Data Fields Checklist */}
-          {dataTable && schemaData[dataTable] && (
-            <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 sm:p-5">
-              <h4 className="text-sm font-bold text-slate-200 mb-2">
-                Which fields from <span className="text-violet-400">{dataTable}</span> can the Agent access & speak?
+          {/* Multi-Table Business Data Selector */}
+          <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4">
+            <div>
+              <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                <TableChartIcon sx={{ fontSize: 18, color: '#a78bfa' }} />
+                Which business tables & fields can the AI Agent search and speak about?
               </h4>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {schemaData[dataTable].map((col) => (
-                  <FormControlLabel
-                    key={col}
-                    control={
-                      <Checkbox
-                        size="small"
-                        checked={selectedDataFields.includes(col)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedDataFields([...selectedDataFields, col]);
-                          } else {
-                            setSelectedDataFields(selectedDataFields.filter((c) => c !== col));
-                          }
-                        }}
-                        sx={{ color: '#10b981', '&.Mui-checked': { color: '#10b981' } }}
-                      />
-                    }
-                    label={<span className="text-xs text-slate-300 font-mono">{col}</span>}
-                  />
-                ))}
-              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Select one or more related business tables (e.g. orders, menu items, appointments) and pick accessible fields for each.
+              </p>
             </div>
-          )}
+
+            <div className="space-y-3">
+              {Object.keys(schemaData)
+                .filter((tbl) => tbl !== customerTable)
+                .map((tbl) => {
+                  const isTableSelected = Boolean(selectedTables[tbl]);
+                  const colsInTable = selectedTables[tbl] || [];
+
+                  return (
+                    <Accordion
+                      key={tbl}
+                      sx={{
+                        background: '#020617',
+                        border: '1px solid #1e293b',
+                        borderRadius: '12px !important',
+                        '&:before': { display: 'none' },
+                      }}
+                    >
+                      <AccordionSummary expandIcon={<ExpandMoreIcon sx={{ color: '#94a3b8' }} />}>
+                        <div className="flex items-center gap-3">
+                          <FormControlLabel
+                            onClick={(e) => e.stopPropagation()}
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={isTableSelected}
+                                onChange={(e) => toggleTableSelection(tbl, e.target.checked)}
+                                sx={{ color: '#10b981', '&.Mui-checked': { color: '#10b981' } }}
+                              />
+                            }
+                            label={
+                              <span className="text-sm font-bold text-slate-200 font-mono">
+                                {tbl}
+                              </span>
+                            }
+                          />
+                          {isTableSelected && (
+                            <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
+                              {colsInTable.length} fields enabled
+                            </span>
+                          )}
+                        </div>
+                      </AccordionSummary>
+                      <AccordionDetails className="border-t border-slate-900 pt-3">
+                        <p className="text-xs text-slate-400 mb-2">Check the specific fields the agent is allowed to access:</p>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {schemaData[tbl].map((col) => (
+                            <FormControlLabel
+                              key={col}
+                              control={
+                                <Checkbox
+                                  size="small"
+                                  checked={colsInTable.includes(col)}
+                                  onChange={(e) => toggleColumnInTable(tbl, col, e.target.checked)}
+                                  sx={{ color: '#10b981', '&.Mui-checked': { color: '#10b981' } }}
+                                />
+                              }
+                              label={<span className="text-xs text-slate-300 font-mono">{col}</span>}
+                            />
+                          ))}
+                        </div>
+                      </AccordionDetails>
+                    </Accordion>
+                  );
+                })}
+            </div>
+          </div>
 
           <div className="flex justify-between items-center pt-4">
             <Button variant="outlined" onClick={() => setCurrentStep(1)}>
@@ -557,17 +635,16 @@ export default function NoCodeDbConfigWizard({
               variant="contained"
               color="primary"
               onClick={handleGenerateRules}
-              disabled={loadingGenerate}
-              startIcon={loadingGenerate ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}
+              startIcon={<AutoAwesomeIcon />}
               sx={{ px: 4, py: 1.2, borderRadius: '12px', background: 'linear-gradient(to right, #8b5cf6, #ec4899)' }}
             >
-              {loadingGenerate ? 'Generating AI Rules...' : 'Generate AI Agent Configuration'}
+              Continue to Review
             </Button>
           </div>
         </div>
       )}
 
-      {/* STEP 3: AI SUMMARY & TEST PREVIEW */}
+      {/* STEP 3: AI SUMMARY & DYNAMIC TOOLS REVIEW */}
       {currentStep === 3 && (
         <div className="space-y-6">
           {saveSuccessMsg && (
@@ -585,85 +662,37 @@ export default function NoCodeDbConfigWizard({
             <p className="text-sm text-slate-300 leading-relaxed">{aiSummary}</p>
           </div>
 
-          {/* Interactive Live Test Card with Dynamic Column Inputs */}
+          {/* Dynamic Tools & Capabilities Preview */}
           <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-5 space-y-4">
             <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-              <PlayArrowIcon sx={{ color: '#10b981' }} />
-              Try a Live Test Connection Query
+              <BuildIcon sx={{ color: '#38bdf8' }} />
+              Dynamic Tools Capabilities Registered for Voice Agent
             </h4>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {verificationFields.map((field) => (
-                <TextField
-                  key={field}
-                  size="small"
-                  label={`Sample value for '${field}'`}
-                  value={testInputs[field] || ''}
-                  onChange={(e) =>
-                    setTestInputs({
-                      ...testInputs,
-                      [field]: e.target.value,
-                    })
-                  }
-                />
+            
+            <div className="space-y-2">
+              <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                <div>
+                  <span className="font-bold text-violet-400 font-mono">verify_customer_identity</span>
+                  <p className="text-slate-400">Verifies caller identity on table <span className="text-sky-300 font-mono">{customerTable}</span> using {verificationFields.join(', ')}</p>
+                </div>
+                <span className="bg-violet-950 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full font-mono">
+                  Authentication Tool
+                </span>
+              </div>
+
+              {Object.keys(selectedTables).map((tbl) => (
+                <div key={tbl} className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                  <div>
+                    <span className="font-bold text-emerald-400 font-mono">search_{tbl}</span>
+                    <p className="text-slate-400">Dynamically constructs joins & SQL queries to search <span className="text-emerald-300 font-mono">{tbl}</span> ({selectedTables[tbl].length} fields enabled)</p>
+                  </div>
+                  <span className="bg-emerald-950 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
+                    Dynamic Query Tool
+                  </span>
+                </div>
               ))}
             </div>
-            <Button
-              variant="outlined"
-              color="success"
-              onClick={handleRunTest}
-              disabled={loadingTest}
-              startIcon={loadingTest ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />}
-            >
-              {loadingTest ? 'Executing Query...' : 'Run Test Verification'}
-            </Button>
-
-            {testResult && (
-              <div
-                className={`p-4 rounded-xl border ${
-                  testResult.verified
-                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
-                    : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
-                }`}
-              >
-                <div className="flex items-center gap-2 font-bold mb-2">
-                  <CheckCircleIcon fontSize="small" />
-                  {testResult.message}
-                </div>
-                {testResult.records && testResult.records.length > 0 && (
-                  <div className="text-xs space-y-1 font-mono bg-slate-950/80 p-3 rounded-lg border border-slate-800 text-slate-300 max-h-40 overflow-y-auto">
-                    {testResult.records.map((r, i) => (
-                      <div key={i} className="border-b border-slate-800 pb-1 mb-1 last:border-none">
-                        Record #{i + 1}: {JSON.stringify(r)}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
-
-          {/* Collapsible Advanced Developer View */}
-          <Accordion sx={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '12px !important' }}>
-            <AccordionSummary expandIcon={<ExpandMoreIcon sx={{ color: '#94a3b8' }} />}>
-              <Typography sx={{ fontSize: '0.875rem', fontWeight: 600, color: '#94a3b8' }}>
-                Advanced Developer SQL Queries View
-              </Typography>
-            </AccordionSummary>
-            <AccordionDetails className="space-y-4">
-              <div>
-                <span className="text-xs text-slate-400 font-bold uppercase">Verification Query:</span>
-                <pre className="text-xs bg-slate-950 p-3 rounded-lg border border-slate-800 text-violet-300 font-mono overflow-x-auto mt-1">
-                  {verificationQuery}
-                </pre>
-              </div>
-              <div>
-                <span className="text-xs text-slate-400 font-bold uppercase">Data Retrieval Query:</span>
-                <pre className="text-xs bg-slate-950 p-3 rounded-lg border border-slate-800 text-emerald-300 font-mono overflow-x-auto mt-1">
-                  {dataQuery}
-                </pre>
-              </div>
-            </AccordionDetails>
-          </Accordion>
 
           {/* Action Footer */}
           <div className="flex justify-between items-center pt-4">
@@ -678,7 +707,7 @@ export default function NoCodeDbConfigWizard({
               startIcon={loadingSave ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
               sx={{ px: 5, py: 1.2, borderRadius: '12px' }}
             >
-              {loadingSave ? 'Saving Rules...' : 'Save Agent Configuration'}
+              {loadingSave ? 'Saving Dynamic Rules...' : 'Save Agent Configuration'}
             </Button>
           </div>
         </div>

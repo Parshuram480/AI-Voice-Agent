@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 import asyncpg
 from app.utils.prompt_loader import get_prompts
+from app.utils.encryption import encrypt, decrypt
 
 logger = logging.getLogger(__name__)
 
@@ -134,53 +135,18 @@ class SystemDatabase:
         hc_llm1_prompt = cascade_prompts.get("llm1_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("healthcare", "")
         hc_llm2_prompt = cascade_prompts.get("llm2_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("healthcare", "")
 
-        hc_tools = [
+        # Generic Base Tools for all domains
+        base_tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "verify_user",
-                    "description": "Verifies patient account AND fetches their records automatically. REQUIRES BOTH full name and DOB. NEVER call this tool until the user has explicitly answered 'Yes' to confirm their Name and DOB.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Patient's full name."},
-                            "dob": {"type": "string", "description": "YYYY-MM-DD. Ask for missing info (e.g. year) if incomplete."}
-                        },
-                        "required": ["name", "dob"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_patient_records",
-                    "description": "Fetches medical records and appointments for verified patient. CRITICAL: NEVER call this tool if the user is not verified yet.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Optional. Automatically ignored by backend."},
-                            "dob": {"type": "string", "description": "Optional. Automatically ignored by backend."}
-                        }
-                    }
-                }
-            }
-        ]
-
-        # Order Tracking prompts & schema
-        ot_llm1_prompt = cascade_prompts.get("llm1_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("ecommerce", "")
-        ot_llm2_prompt = cascade_prompts.get("llm2_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("ecommerce", "")
-
-        ot_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "verify_user",
-                    "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call this tool until the user has explicitly answered 'Yes' to confirm their Name and DOB.",
+                    "description": "Verifies user account AND fetches their records automatically. REQUIRES BOTH the defined name and verification fields. NEVER call this tool until the user has explicitly confirmed their verification details.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "User's full name."},
-                            "dob": {"type": "string", "description": "YYYY-MM-DD. Ask for missing info (e.g. year) if incomplete."}
+                            "dob": {"type": "string", "description": "Verification field (e.g. YYYY-MM-DD or Phone number)."}
                         },
                         "required": ["name", "dob"]
                     }
@@ -189,8 +155,8 @@ class SystemDatabase:
             {
                 "type": "function",
                 "function": {
-                    "name": "get_order_status",
-                    "description": "Fetches latest orders for verified user. CRITICAL: NEVER call this tool if the user is not verified yet.",
+                    "name": "get_records",
+                    "description": "Fetches associated records and data for the verified user. CRITICAL: NEVER call this tool if the user is not verified yet.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -214,7 +180,7 @@ class SystemDatabase:
                 "Medical patient assistant for checking appointments and patient records.",
                 hc_llm1_prompt,
                 hc_llm2_prompt,
-                json.dumps(hc_tools)
+                json.dumps(base_tools)
             )
 
             # Order Tracking Seed
@@ -225,9 +191,9 @@ class SystemDatabase:
             """,
                 "Order Tracking",
                 "Customer support voice agent for tracking and checking order delivery status.",
-                ot_llm1_prompt,
-                ot_llm2_prompt,
-                json.dumps(ot_tools)
+                f"{prompts.get('cascade', {}).get('llm1_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get('order tracking', '')}",
+                f"{prompts.get('cascade', {}).get('llm2_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get('order tracking', '')}",
+                json.dumps(base_tools)
             )
 
             # Other domains
@@ -243,12 +209,16 @@ class SystemDatabase:
                 ("Ecommerce", "Store cart status check and support")
             ]
             for name, desc in other_domains:
+                domain_key = name.lower()
                 await conn.execute("""
                 INSERT INTO domains (name, description, system_prompt_llm1, system_prompt_llm2, tools_schema)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (name) DO NOTHING
                 """,
-                    name, desc, ot_llm1_prompt, ot_llm2_prompt, json.dumps(ot_tools)
+                    name, desc, 
+                    f"{prompts.get('cascade', {}).get('llm1_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get(domain_key, '')}", 
+                    f"{prompts.get('cascade', {}).get('llm2_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get(domain_key, '')}", 
+                    json.dumps(base_tools)
                 )
 
     async def get_domains(self) -> List[Dict[str, Any]]:

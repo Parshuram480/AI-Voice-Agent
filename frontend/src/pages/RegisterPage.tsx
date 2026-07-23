@@ -59,8 +59,13 @@ export default function RegisterPage() {
   const handleConfigCompleted = async (configData: {
     dbConfig: any;
     domainId: number;
-    verificationQuery: string;
-    dataQuery: string;
+    identity: {
+      table: string;
+      name_column: string;
+      verification_column: string;
+      display_columns: string[];
+    };
+    selectedTables: Record<string, string[]>;
     uiConfigMetadata: any;
   }) => {
     setStatusMsg('');
@@ -100,8 +105,8 @@ export default function RegisterPage() {
           client_id: res.client_id,
           db_config: configData.dbConfig,
           domain_id: domainId,
-          verification_query: configData.verificationQuery,
-          data_query: configData.dataQuery,
+          identity: configData.identity,
+          selected_tables: configData.selectedTables,
           ui_config_metadata: configData.uiConfigMetadata,
         });
 

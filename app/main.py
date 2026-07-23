@@ -463,7 +463,6 @@ async def audio_stream(websocket: WebSocket):
                         sys_db = SystemDatabase()
                         client_mapping = await sys_db.get_client_domain_mapping(client_id)
                         if client_mapping and client_mapping.get("dynamic_config"):
-                            import json
                             dyn_cfg = json.loads(client_mapping["dynamic_config"])
                             db_config = await sys_db.get_client_db_config(client_id)
                             if db_config:
@@ -517,6 +516,7 @@ async def audio_stream(websocket: WebSocket):
                         session_id=call_sid,
                         twilio_ws=websocket,
                         stream_sid=stream_sid,
+                        client_id=client_id,
                         **dynamic_kwargs
                     )
                 )

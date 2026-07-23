@@ -45,37 +45,16 @@ export const tenantService = {
     });
   },
 
-  async generateRules(payload: {
-    db_config: any;
-    customer_table: string;
-    verification_fields: string[];
-    data_table: string;
-    data_fields: string[];
-    schema_data: Record<string, string[]>;
-  }) {
-    return request(`${API_BASE}/api/tenant/db-config/generate-rules`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
-  async testQuery(payload: {
-    db_config: any;
-    verification_query: string;
-    data_query: string;
-    test_inputs: string[];
-  }) {
-    return request(`${API_BASE}/api/tenant/db-config/test-query`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
   async saveRules(payload: {
     db_config: any;
     domain_id: number;
-    verification_query: string;
-    data_query: string;
+    identity: {
+      table: string;
+      name_column: string;
+      verification_column: string;
+      display_columns: string[];
+    };
+    selected_tables: Record<string, string[]>;
     client_id?: number;
     ui_config_metadata?: any;
   }) {
