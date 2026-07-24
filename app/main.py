@@ -724,7 +724,6 @@ async def mic_stream(websocket: WebSocket):
             sys_db = SystemDatabase()
             client_mapping = await sys_db.get_client_domain_mapping(client_id)
             if client_mapping and client_mapping.get("dynamic_config"):
-                import json
                 dyn_cfg = json.loads(client_mapping["dynamic_config"])
                 db_config = await sys_db.get_client_db_config(client_id)
                 if db_config:
@@ -770,6 +769,7 @@ async def mic_stream(websocket: WebSocket):
             session_id=session_id,
             barge_in_event=barge_in_event,
             langsmith_extra={"metadata": {"session_id": session_id, "thread_id": session_id}},
+            client_id=client_id,
             **dynamic_kwargs
         )
     )

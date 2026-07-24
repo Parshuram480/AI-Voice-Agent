@@ -46,7 +46,7 @@ export const tenantService = {
   },
 
   async saveRules(payload: {
-    db_config: any;
+    db_config?: DbConfig;
     domain_id: number;
     identity: {
       table: string;

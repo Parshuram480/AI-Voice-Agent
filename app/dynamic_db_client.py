@@ -122,15 +122,14 @@ class DynamicDbClient:
         import pyodbc
         def _run():
             conn_str = (
-                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"DRIVER={{ODBC Driver 18 for SQL Server}};"
                 f"SERVER={self.server_name};"
                 f"DATABASE={self.db_name};"
                 f"UID={self.username};"
                 f"PWD={self.password};"
                 f"Connection Timeout={self.connection_timeout};"
+                f"Encrypt=yes;TrustServerCertificate=yes;"
             )
-            if self.config.get("trust_server_certificate"):
-                conn_str += "TrustServerCertificate=yes;"
             conn = pyodbc.connect(conn_str)
             schema: Dict[str, List[str]] = {}
             try:
@@ -490,15 +489,14 @@ class DynamicDbClient:
         def _run():
             # Build connection string
             conn_str = (
-                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"DRIVER={{ODBC Driver 18 for SQL Server}};"
                 f"SERVER={self.server_name};"
                 f"DATABASE={self.db_name};"
                 f"UID={self.username};"
                 f"PWD={self.password};"
                 f"Connection Timeout={self.connection_timeout};"
+                f"Encrypt=yes;TrustServerCertificate=yes;"
             )
-            if self.config.get("trust_server_certificate"):
-                conn_str += "TrustServerCertificate=yes;"
             conn = pyodbc.connect(conn_str)
             try:
                 cursor = conn.cursor()
@@ -573,15 +571,14 @@ class DynamicDbClient:
                 import pyodbc
                 def _test():
                     conn_str = (
-                        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
                         f"SERVER={self.server_name};"
                         f"DATABASE={self.db_name};"
                         f"UID={self.username};"
                         f"PWD={self.password};"
                         f"Connection Timeout={self.connection_timeout};"
+                        f"Encrypt=yes;TrustServerCertificate=yes;"
                     )
-                    if self.config.get("trust_server_certificate"):
-                        conn_str += "TrustServerCertificate=yes;"
                     conn = pyodbc.connect(conn_str)
                     conn.close()
                 await asyncio.to_thread(_test)

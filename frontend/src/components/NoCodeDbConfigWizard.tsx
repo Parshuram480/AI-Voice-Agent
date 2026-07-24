@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTheme } from '@mui/material/styles';
 import TextField from '@mui/material/TextField';
 import Button from '@mui/material/Button';
 import FormControl from '@mui/material/FormControl';
@@ -52,6 +53,9 @@ export default function NoCodeDbConfigWizard({
   isRegistrationMode = false,
   onConfigCompleted,
 }: NoCodeDbConfigWizardProps) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+
   // Step tracking (1: DB Credentials, 2: Rule Mapping, 3: AI Summary Review)
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
 
@@ -520,7 +524,7 @@ export default function NoCodeDbConfigWizard({
             <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 sm:p-5">
               <h4 className="text-sm font-bold text-slate-200 mb-2 flex items-center gap-2">
                 <VerifiedUserIcon sx={{ fontSize: 18, color: '#38bdf8' }} />
-                Which columns from <span className="text-sky-400">{customerTable}</span> should verify callers?
+                Which columns from <span className="text-sky-400 font-mono">{customerTable}</span> should verify callers?
               </h4>
               <p className="text-xs text-slate-400 mb-3">Select one or more identity verification columns from your table.</p>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -533,7 +537,11 @@ export default function NoCodeDbConfigWizard({
                         checked={verificationFields.includes(col)}
                         onChange={(e) => {
                           if (e.target.checked) {
-                            setVerificationFields([...verificationFields, col]);
+                            let newFields = [...verificationFields, col];
+                            if (newFields.length > 2) {
+                              newFields = newFields.slice(1);
+                            }
+                            setVerificationFields(newFields);
                           } else {
                             setVerificationFields(verificationFields.filter((f) => f !== col));
                           }
@@ -571,13 +579,14 @@ export default function NoCodeDbConfigWizard({
                     <Accordion
                       key={tbl}
                       sx={{
-                        background: '#020617',
-                        border: '1px solid #1e293b',
+                        background: isDark ? '#020617' : '#ffffff',
+                        border: isDark ? '1px solid #1e293b' : '1px solid #e2e8f0',
                         borderRadius: '12px !important',
                         '&:before': { display: 'none' },
+                        boxShadow: isDark ? 'none' : '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
                       }}
                     >
-                      <AccordionSummary expandIcon={<ExpandMoreIcon sx={{ color: '#94a3b8' }} />}>
+                      <AccordionSummary expandIcon={<ExpandMoreIcon sx={{ color: isDark ? '#94a3b8' : '#64748b' }} />}>
                         <div className="flex items-center gap-3">
                           <FormControlLabel
                             onClick={(e) => e.stopPropagation()}
@@ -673,9 +682,9 @@ export default function NoCodeDbConfigWizard({
               <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
                 <div>
                   <span className="font-bold text-violet-400 font-mono">verify_customer_identity</span>
-                  <p className="text-slate-400">Verifies caller identity on table <span className="text-sky-300 font-mono">{customerTable}</span> using {verificationFields.join(', ')}</p>
+                  <p className="text-slate-400">Verifies caller identity on table <span className="text-violet-400 font-mono">{customerTable}</span> using {verificationFields.join(', ')}</p>
                 </div>
-                <span className="bg-violet-950 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full font-mono">
+                <span className="bg-violet-950 text-violet-400 border border-violet-500/30 px-2 py-0.5 rounded-full font-mono">
                   Authentication Tool
                 </span>
               </div>
@@ -684,9 +693,9 @@ export default function NoCodeDbConfigWizard({
                 <div key={tbl} className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
                   <div>
                     <span className="font-bold text-emerald-400 font-mono">search_{tbl}</span>
-                    <p className="text-slate-400">Dynamically constructs joins & SQL queries to search <span className="text-emerald-300 font-mono">{tbl}</span> ({selectedTables[tbl].length} fields enabled)</p>
+                    <p className="text-slate-400">Dynamically constructs joins & SQL queries to search <span className="text-emerald-400 font-mono">{tbl}</span> ({selectedTables[tbl].length} fields enabled)</p>
                   </div>
-                  <span className="bg-emerald-950 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
+                  <span className="bg-emerald-950 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
                     Dynamic Query Tool
                   </span>
                 </div>

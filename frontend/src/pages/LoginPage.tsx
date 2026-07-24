@@ -167,7 +167,7 @@ export default function LoginPage({ onLoginSuccess }: LoginProps) {
           Don't have an account?{' '}
           <button 
             onClick={() => navigate('/register')} 
-            className="text-violet-400 hover:text-violet-300 font-semibold focus:outline-none transition-colors duration-200 cursor-pointer"
+            className="text-violet-400 hover:opacity-80 font-semibold focus:outline-none transition-opacity duration-200 cursor-pointer"
           >
             Register here
           </button>
