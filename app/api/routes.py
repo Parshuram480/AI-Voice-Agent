@@ -10,14 +10,24 @@ from pydantic import BaseModel
 from app.schemas.requests import SimulateRequest
 from app.system_database import SystemDatabase, verify_password
 from app.dynamic_db_client import DynamicDbClient
+from app.services.email_service import EmailService
 
 logger = logging.getLogger(__name__)
 AUDIO_CACHE_DIR = Path("audio_cache")
 
 # Initialize central System Database
 system_db = SystemDatabase()
+email_service = EmailService()
 
 # --- Pydantic Schemas ---
+class SendOtpRequest(BaseModel):
+    email: str
+    client_name: str
+
+class VerifyOtpRequest(BaseModel):
+    email: str
+    otp: str
+
 class RegisterRequest(BaseModel):
     company_name: str
     client_name: str
@@ -117,6 +127,34 @@ def create_api_router(
         """Retrieve list of active domains from system database."""
         try:
             return await system_db.get_domains()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/auth/send-otp")
+    async def send_otp(req: SendOtpRequest):
+        """Generate and send an OTP validation code to a client's email."""
+        try:
+            existing = await system_db.get_client_by_email(req.email)
+            if existing:
+                raise HTTPException(status_code=400, detail="Email is already registered.")
+
+            await email_service.send_otp_email(req.email, req.client_name)
+            return {"success": True, "message": "Verification code sent successfully."}
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/auth/verify-otp")
+    async def verify_otp(req: VerifyOtpRequest):
+        """Verify the OTP validation code submitted by the user."""
+        try:
+            is_valid = email_service.verify_otp(req.email, req.otp)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+            return {"success": True, "message": "Email verified successfully."}
+        except HTTPException as he:
+            raise he
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
