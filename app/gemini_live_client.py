@@ -128,7 +128,7 @@ class GeminiLiveClient:
                 }
             ]
             
-            # Recreate config with tools
+            # Recreate config with tools + optimized server-side VAD for low latency
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 input_audio_transcription=AudioTranscriptionConfig(),
@@ -136,6 +136,14 @@ class GeminiLiveClient:
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
+                    )
+                ),
+                realtime_input_config=types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(
+                        disabled=False,
+                        start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                        end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                        silence_duration_ms=500,
                     )
                 ),
                 system_instruction=types.Content(

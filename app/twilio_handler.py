@@ -8,6 +8,7 @@ to update live calls with audio playback.
 import json
 
 import logging
+logging.getLogger("twilio.http_client").setLevel(logging.WARNING)
 import os
 from typing import Optional
 

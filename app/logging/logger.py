@@ -55,7 +55,7 @@ from datetime import datetime
 
 TRANSCRIPTS_DIR = "transcripts"
 
-def log_transcript(session_id: str, user_text: str, agent_text: str, latency_str: str = "") -> None:
+def log_transcript(session_id: str, user_text: str, agent_text: str, latency_str: str = "", filler_text: str = "", filler_latency_str: str = "") -> None:
     """Log the raw user input and agent response to a session-specific file."""
     if not os.path.exists(TRANSCRIPTS_DIR):
         os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
@@ -69,6 +69,8 @@ def log_transcript(session_id: str, user_text: str, agent_text: str, latency_str
     with open(filepath, "a", encoding="utf-8") as f:
         f.write(f"{header}\n")
         f.write(f"user: \"{user_text}\"\n")
+        if filler_text:
+            f.write(f"agent_filler (Latency: {filler_latency_str}): \"{filler_text}\"\n")
         f.write(f"agent: \"{agent_text}\"\n\n")
 
 HISTORIES_DIR = "histories"

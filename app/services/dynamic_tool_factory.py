@@ -155,7 +155,9 @@ class DynamicToolFactory:
                     "type": "identity",
                     "limit": 1,
                     "pk_col": pk,
-                    "param_order": [self.identity_name_col, self.identity_verify_col]
+                    "param_order": [self.identity_name_col, self.identity_verify_col],
+                    "filler_category": "verification",
+                    "expected_latency": "medium"
                 }
 
             # Handle Linked Tables (requires identity_id)
@@ -269,7 +271,9 @@ class DynamicToolFactory:
                     "order_limit_sql": order_limit_sql,
                     "param_count": len(search_cols) if search_cols else 0,
                     "type": "linked",
-                    "limit": 10
+                    "limit": 10,
+                    "filler_category": "lookup",
+                    "expected_latency": "slow"
                 }
 
             # Handle Unlinked Tables (Standalone search)

@@ -134,6 +134,7 @@ streaming_pipeline: StreamingVoicePipeline = None  # type: ignore
 session_manager: SessionManager = None  # type: ignore
 agent_service: AgentService = None  # type: ignore
 rephraser: LLMRephraser = None  # type: ignore
+filler_service = None
 
 # =============================================================================
 # Startup / Shutdown
@@ -142,7 +143,7 @@ rephraser: LLMRephraser = None  # type: ignore
 async def startup():
     """Initialize all services on server startup."""
     global groq_client_1, groq_client_2, cartesia_client, db_client, twilio_handler, pipeline, streaming_pipeline
-    global session_manager, agent_service, rephraser
+    global session_manager, agent_service, rephraser, filler_service
 
     logger.info("=" * 60)
     logger.info("  Voice Agent v2 — Streaming Pipeline — Starting up")
@@ -208,12 +209,18 @@ async def startup():
     
     if pipeline_mode == "multimodal":
         from app.multimodal_pipeline import GeminiLivePipeline
+        from app.services.filler_audio_service import FillerAudioService
+
+        filler_service = FillerAudioService()
+        await filler_service.initialize()
+        logger.info("✓ Filler audio service initialized")
 
         # Instantiate pipeline
         streaming_pipeline = GeminiLivePipeline(
             verification_service,
             order_service,
-            db_client
+            db_client,
+            filler_service=filler_service
         )
         logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
     else:
@@ -354,6 +361,15 @@ async def audio_stream(websocket: WebSocket):
                         break
                 # Reset resample state so the new audio stream doesn't click
                 resample_state = None
+                
+                # Tell Twilio to immediately stop playing any buffered audio (crucial for interruptions)
+                if stream_sid:
+                    try:
+                        await twilio_handler.clear_stream(websocket, stream_sid)
+                        logger.info("[OUTBOUND LOOP] Sent Twilio clear event.")
+                    except Exception as e:
+                        logger.warning(f"Failed to send clear to Twilio: {e}")
+                
                 continue
                 
             if not stream_sid:
