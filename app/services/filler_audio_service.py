@@ -56,6 +56,16 @@ FILLER_PHRASES = {
             "Good question, let me check.",
         ],
         "fast": []
+    },
+    "universal": {
+        "fast": [
+            "Hmm.",
+            "Mm-hmm.",
+            "Okay.",
+            "Ah."
+        ],
+        "medium": [],
+        "slow": []
     }
 }
 
@@ -148,6 +158,9 @@ class FillerAudioService:
                 contents=phrase,
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
+                    system_instruction=types.Content(
+                        parts=[types.Part(text="You are a text-to-speech engine. Generate audio for the user's text exactly as written, and do not generate any text response.")]
+                    ),
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice_name)
@@ -189,9 +202,9 @@ class FillerAudioService:
     def select_filler(self, category: str, latency_type: str) -> tuple[bytes, int] | None:
         """
         Returns a tuple of (pcm_bytes, sample_rate) for the requested category/latency.
-        Returns None if fast latency or no clips exist.
+        Returns None if no clips exist.
         """
-        if not self.is_ready or latency_type == "fast":
+        if not self.is_ready:
             return None
             
         if category not in self._cache or latency_type not in self._cache[category]:
@@ -199,6 +212,9 @@ class FillerAudioService:
             
         clips = self._cache.get(category, {}).get(latency_type, [])
         if not clips:
+            if category == "universal":
+                return None # Universal fillers should never fallback to non-neutral thinking phrases
+                
             # Fallback to thinking/medium
             clips = self._cache.get("thinking", {}).get("medium", [])
             category = "thinking"

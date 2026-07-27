@@ -143,7 +143,7 @@ class GeminiLiveClient:
                         disabled=False,
                         start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
                         end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                        silence_duration_ms=500,
+                        silence_duration_ms=1200,
                     )
                 ),
                 system_instruction=types.Content(

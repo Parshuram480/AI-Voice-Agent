@@ -211,9 +211,14 @@ async def startup():
         from app.multimodal_pipeline import GeminiLivePipeline
         from app.services.filler_audio_service import FillerAudioService
 
-        filler_service = FillerAudioService()
-        await filler_service.initialize()
-        logger.info("✓ Filler audio service initialized")
+        use_filler_words = os.getenv("USE_FILLER_WORDS", "true").lower() in ("1", "true", "yes", "on")
+        if use_filler_words:
+            filler_service = FillerAudioService()
+            await filler_service.initialize()
+            logger.info("✓ Filler audio service initialized")
+        else:
+            filler_service = None
+            logger.info("✓ Filler audio service disabled via env var")
 
         # Instantiate pipeline
         streaming_pipeline = GeminiLivePipeline(
@@ -466,76 +471,80 @@ async def audio_stream(websocket: WebSocket):
                 call_sid = data.get("start", {}).get("callSid")
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
 
-                # Seeding the session state with client_id
-                await session_manager.get_or_create(call_sid, client_id=client_id)
+                async def _startup_pipeline():
+                    nonlocal pipeline_task, outbound_task
+                    # Seeding the session state with client_id
+                    await session_manager.get_or_create(call_sid, client_id=client_id)
 
-                if use_stream_audio_out and not outbound_task:
-                    outbound_task = asyncio.create_task(_outbound_audio_loop())
+                    if use_stream_audio_out and not outbound_task:
+                        outbound_task = asyncio.create_task(_outbound_audio_loop())
 
-                dynamic_kwargs = {}
-                if client_id:
-                    try:
-                        from app.system_database import SystemDatabase
-                        sys_db = SystemDatabase()
-                        client_mapping = await sys_db.get_client_domain_mapping(client_id)
-                        if client_mapping and client_mapping.get("dynamic_config"):
-                            dyn_cfg = json.loads(client_mapping["dynamic_config"])
-                            db_config = await sys_db.get_client_db_config(client_id)
-                            if db_config:
-                                dyn_cfg["database"] = db_config
-                                dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
-                                
-                                from app.services.schema_service import SchemaService
-                                from app.services.dynamic_tool_factory import DynamicToolFactory
-                                from app.services.dynamic_tool_executor import DynamicToolExecutor
-                                from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
-                                
-                                schema_service = SchemaService(db_config)
-                                schema_metadata = await schema_service.get_schema_metadata()
-                                
-                                tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
-                                tools, exec_map = tool_factory.generate_tools()
-                                
-                                from app.dynamic_db_client import DynamicDbClient
-                                dyn_db_client = DynamicDbClient(db_config)
-                                
-                                executor = DynamicToolExecutor(
-                                    dyn_db_client, 
-                                    exec_map, 
-                                    dyn_cfg["identity"]["table"],
-                                    dyn_cfg["identity"]["name_column"],
-                                    dyn_cfg["identity"]["verification_column"]
-                                )
-                                prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
-                                dynamic_kwargs = {
-                                    "dynamic_tools": tools,
-                                    "dynamic_executor": executor,
-                                    "system_prompt": prompt,
-                                    "domain": dyn_cfg["domain"]
-                                }
-                                logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
-                    except Exception as e:
-                        logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
+                    dynamic_kwargs = {}
+                    if client_id:
+                        try:
+                            from app.system_database import SystemDatabase
+                            sys_db = SystemDatabase()
+                            client_mapping = await sys_db.get_client_domain_mapping(client_id)
+                            if client_mapping and client_mapping.get("dynamic_config"):
+                                dyn_cfg = json.loads(client_mapping["dynamic_config"])
+                                db_config = await sys_db.get_client_db_config(client_id)
+                                if db_config:
+                                    dyn_cfg["database"] = db_config
+                                    dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+                                    
+                                    from app.services.schema_service import SchemaService
+                                    from app.services.dynamic_tool_factory import DynamicToolFactory
+                                    from app.services.dynamic_tool_executor import DynamicToolExecutor
+                                    from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                                    
+                                    schema_service = SchemaService(db_config)
+                                    schema_metadata = await schema_service.get_schema_metadata()
+                                    
+                                    tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                                    tools, exec_map = tool_factory.generate_tools()
+                                    
+                                    from app.dynamic_db_client import DynamicDbClient
+                                    dyn_db_client = DynamicDbClient(db_config)
+                                    
+                                    executor = DynamicToolExecutor(
+                                        dyn_db_client, 
+                                        exec_map, 
+                                        dyn_cfg["identity"]["table"],
+                                        dyn_cfg["identity"]["name_column"],
+                                        dyn_cfg["identity"]["verification_column"]
+                                    )
+                                    prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                    dynamic_kwargs = {
+                                        "dynamic_tools": tools,
+                                        "dynamic_executor": executor,
+                                        "system_prompt": prompt,
+                                        "domain": dyn_cfg["domain"]
+                                    }
+                                    logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
+                        except Exception as e:
+                            logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
 
-                # Launch the streaming pipeline in the background
-                pipeline_task = asyncio.create_task(
-                    streaming_pipeline.process_stream(
-                        audio_queue=audio_queue,
-                        call_sid=call_sid,
-                        on_stt_text=on_stt_text,
-                        on_llm_token=on_llm_token,
-                        on_tts_audio=on_tts_audio if use_stream_audio_out else None,
-                        on_stage=on_stage,
-                        on_phase_change=on_phase_change,
-                        on_turn_done=on_turn_done,
-                        update_call_with_audio=not use_stream_audio_out,
-                        session_id=call_sid,
-                        twilio_ws=websocket,
-                        stream_sid=stream_sid,
-                        client_id=client_id,
-                        **dynamic_kwargs
+                    # Launch the streaming pipeline in the background
+                    pipeline_task = asyncio.create_task(
+                        streaming_pipeline.process_stream(
+                            audio_queue=audio_queue,
+                            call_sid=call_sid,
+                            on_stt_text=on_stt_text,
+                            on_llm_token=on_llm_token,
+                            on_tts_audio=on_tts_audio if use_stream_audio_out else None,
+                            on_stage=on_stage,
+                            on_phase_change=on_phase_change,
+                            on_turn_done=on_turn_done,
+                            update_call_with_audio=not use_stream_audio_out,
+                            session_id=call_sid,
+                            twilio_ws=websocket,
+                            stream_sid=stream_sid,
+                            client_id=client_id,
+                            **dynamic_kwargs
+                        )
                     )
-                )
+
+                asyncio.create_task(_startup_pipeline())
 
             elif event == "media":
                 # Decode base64 μ-law audio → PCM → 16kHz
