@@ -545,8 +545,7 @@ async def audio_stream(websocket: WebSocket):
                     )
 
                 asyncio.create_task(_startup_pipeline())
-                )
-                
+
                 # Background watcher: hang up Twilio when pipeline signals should_end
                 async def _watch_pipeline_end():
                     try:
