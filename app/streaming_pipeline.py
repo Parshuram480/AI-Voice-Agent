@@ -522,6 +522,7 @@ class StreamingVoicePipeline:
             "session_id": resolved_session_id,
             "total_turns": turn_index,
             "all_timings": all_timings,
+            "should_end": session_ended,
         }
 
     # =====================================================================

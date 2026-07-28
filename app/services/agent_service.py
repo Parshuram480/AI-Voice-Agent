@@ -82,6 +82,8 @@ class AgentState(TypedDict):
     turn_metrics: dict
     memory_tokens_input: Annotated[int, operator.add]
     memory_tokens_output: Annotated[int, operator.add]
+    should_end: Optional[bool]
+    out_of_scope_count: Optional[int]
 
 class AgentService:
     """Primary orchestration layer for LLM-driven dialog using LangGraph."""
@@ -187,7 +189,14 @@ class AgentService:
             tools_to_use = AGENT_TOOLS
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        
+        # Append call flow instructions to the system prompt
+        end_call_instructions = (
+            "\n\n[GLOBAL CALL FLOW RULES]:\n"
+            "1. If the user has obtained all the information they need, or says goodbye/thanks, or indicates they are finished, you MUST call the `end_call` tool to terminate the call.\n"
+            "2. If the user asks unnecessary, out-of-scope questions unrelated to account details, orders, or delivery (e.g. general knowledge, chit-chat, weather, unrelated services), you MUST call the `out_of_scope` tool."
+        )
+        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}{end_call_instructions}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -210,12 +219,49 @@ class AgentService:
             messages_to_send.extend(state["messages"][-8:])
 
         use_tools = True
+        
+        # Append global end_call and out_of_scope tools to tools_to_use
+        global_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_call",
+                    "description": "Terminates the call because the user got all the information they need, is finished, or says goodbye.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "out_of_scope",
+                    "description": "Tracks and flags unnecessary out-of-scope questions completely unrelated to the agent's database or purpose.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Brief explanation of why the query is out-of-scope."}
+                        },
+                        "required": ["reason"]
+                    }
+                }
+            }
+        ]
+        
+        # Ensure list copy to avoid modifying references in AGENT_TOOLS/db mapping unexpectedly
+        tools_to_use_copied = list(tools_to_use)
+        existing_tool_names = {t["function"]["name"] for t in tools_to_use_copied if t.get("type") == "function"}
+        for gt in global_tools:
+            if gt["function"]["name"] not in existing_tool_names:
+                tools_to_use_copied.append(gt)
+
         llm_kwargs = dict(
             messages=messages_to_send,
             temperature=0.3,
         )
         if use_tools:
-            llm_kwargs["tools"] = tools_to_use
+            llm_kwargs["tools"] = tools_to_use_copied
             llm_kwargs["tool_choice"] = "auto"
 
         turn_metrics["timing_serialization_start"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -402,7 +448,15 @@ class AgentService:
             base_prompt = get_prompts().get("cascade", {}).get("llm2_base", "You are a helpful assistant.")
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}"
+        
+        # Append call flow instructions to the system prompt
+        global_instructions = (
+            "\n\n[GLOBAL CALL FLOW RULES]:\n"
+            "- If the out_of_scope tool indicates warning_level is 'warning', you MUST warn the user: 'I can only help you with questions related to your account and orders. Please ask about that, or I will have to end the call.'\n"
+            "- If the out_of_scope tool indicates warning_level is 'terminate', you MUST output a goodbye message like: 'Since you are asking unrelated questions, I am ending the call now. Goodbye.' and say nothing else.\n"
+            "- If the end_call tool is successfully executed, output a polite goodbye message."
+        )
+        dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}{global_instructions}"
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -749,7 +803,42 @@ class AgentService:
         for tc in last_msg.get("tool_calls", []):
             tool_name = tc["function"]["name"]
             
-            if tool_name == "verify_user" or tool_name.startswith("verify"):
+            if tool_name == "end_call":
+                updates["should_end"] = True
+                result_str = json.dumps({
+                    "success": True,
+                    "message": "Call termination triggered successfully."
+                })
+                updates["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "content": result_str
+                })
+            elif tool_name == "out_of_scope":
+                current_count = state.get("out_of_scope_count", 0) or 0
+                new_count = current_count + 1
+                updates["out_of_scope_count"] = new_count
+                if new_count >= 2:
+                    updates["should_end"] = True
+                    result_str = json.dumps({
+                        "warning_level": "terminate",
+                        "out_of_scope_count": new_count,
+                        "message": "This is the second out-of-scope question. The call must now be terminated. Goodbye."
+                    })
+                else:
+                    result_str = json.dumps({
+                        "warning_level": "warning",
+                        "out_of_scope_count": new_count,
+                        "message": "This is the first out-of-scope question. You MUST warn the user: 'I can only help you with questions related to your account and orders. Please ask about that, or I will have to end the call.'"
+                    })
+                updates["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "content": result_str
+                })
+            elif tool_name == "verify_user" or tool_name.startswith("verify"):
                 try:
                     args = json.loads(tc["function"]["arguments"])
                 except Exception:
@@ -1050,7 +1139,7 @@ class AgentService:
                     "name": tc["function"]["name"],
                     "content": result_str
                 })
-
+        return updates
 
     async def handle_user_text(
         self, session_id: str, user_text: str, on_llm_token: Optional[Callable[[str], None]] = None
@@ -1083,6 +1172,8 @@ class AgentService:
                 "messages": [],
                 "summary": None,
                 "turn_metrics": turn_metrics,
+                "should_end": False,
+                "out_of_scope_count": 0,
             })
         else:
             await self._graph.aupdate_state(config, {"turn_metrics": turn_metrics})
@@ -1155,7 +1246,7 @@ class AgentService:
             intent="llm_agent",
             reply_text=reply_text,
             state="AGENT_ACTIVE",
-            should_end=False,
+            should_end=state_values.get("should_end", False),
             verified=session.verified,
             customer=state_values.get("customer"),
             orders=state_values.get("orders", []),

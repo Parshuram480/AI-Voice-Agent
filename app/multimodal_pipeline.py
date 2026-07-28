@@ -140,6 +140,8 @@ class GeminiLivePipeline:
             "orders": [],
             "messages": [],
             "tool_calls": [],  # Track tool calls for transcript
+            "should_end": False,
+            "out_of_scope_count": 0,
         }
         
         def _set_phase(phase: str):
@@ -356,6 +358,11 @@ class GeminiLivePipeline:
                                         current_tool_summary = ""
                                         output_audio_chunks.clear()
                                         turn_index += 1
+                                        
+                                        # If the call should end, stop receiving
+                                        if state.get("should_end"):
+                                            logger.info(f"[{resolved_session_id}] should_end is True after turn complete — stopping receiver")
+                                            return
                                 
                                     # B. Check for Model Turn (Agent's response)
                                     model_turn = response.server_content.model_turn
@@ -421,6 +428,10 @@ class GeminiLivePipeline:
                                     
                                         # Send response back to Gemini session
                                             await session.send_tool_response(function_responses=[tool_response])
+                                    
+                                        # Check if tool execution flagged session end
+                                        if state.get("should_end"):
+                                            logger.info(f"[{resolved_session_id}] should_end detected after tool {fc.name} — will terminate after final audio")
                                     
                     except asyncio.CancelledError:
                         logger.info("Receiver task cancelled")
@@ -492,4 +503,4 @@ class GeminiLivePipeline:
                 )
             )
             
-            return {"total_turns": turn_index, "state": state}
+            return {"total_turns": turn_index, "state": state, "should_end": state.get("should_end", False)}
