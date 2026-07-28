@@ -47,4 +47,17 @@ export const authService = {
       body: JSON.stringify({ email, otp }),
     });
   },
+
+  async updateProfile(payload: {
+    company_name: string;
+    client_name: string;
+    email: string;
+    phone?: string;
+    domain_id: number;
+  }) {
+    return request(`${API_BASE}/api/auth/profile`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
 };

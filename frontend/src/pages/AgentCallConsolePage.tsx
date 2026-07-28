@@ -337,7 +337,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
           variant="outlined"
           color="inherit"
           size="small"
-          onClick={() => navigate('/agent-mode-select')} 
+          onClick={() => navigate('/dashboard')} 
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >

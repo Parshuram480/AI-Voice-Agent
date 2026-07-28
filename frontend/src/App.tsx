@@ -196,6 +196,10 @@ export default function App() {
                   client={client}
                   domainName={domainName}
                   onLogout={handleLogout}
+                  onProfileUpdate={(updatedClient, newDomainName) => {
+                    setClient(updatedClient);
+                    setDomainName(newDomainName);
+                  }}
                 />
               ) : (
                 <Navigate to="/login" replace />

@@ -12,6 +12,7 @@ import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogActions from '@mui/material/DialogActions';
+import Snackbar from '@mui/material/Snackbar';
 
 import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/authService';
@@ -35,9 +36,26 @@ export default function RegisterPage() {
   const [domainId, setDomainId] = useState<number>(1);
   const [domains, setDomains] = useState<Domain[]>([]);
 
-  // Page level message
-  const [statusMsg, setStatusMsg] = useState('');
-  const [statusType, setStatusType] = useState<'success' | 'error' | ''>('');
+  // Validation errors state
+  const [errors, setErrors] = useState<{
+    companyName?: string;
+    clientName?: string;
+    email?: string;
+    password?: string;
+    confirmPassword?: string;
+  }>({});
+
+  // Floating toaster notification state
+  const [toast, setToast] = useState<{
+    open: boolean;
+    message: string;
+    severity: 'success' | 'error' | 'info' | 'warning';
+  }>({
+    open: false,
+    message: '',
+    severity: 'success',
+  });
+
   const [submitting, setSubmitting] = useState(false);
 
   // OTP Verification flow state
@@ -69,20 +87,47 @@ export default function RegisterPage() {
     loadDomains();
   }, []);
 
-  const handleRegisterSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setStatusMsg('');
-    setStatusType('');
+  const showToast = (message: string, severity: 'success' | 'error' | 'info' | 'warning') => {
+    setToast({ open: true, message, severity });
+  };
 
-    if (!companyName.trim() || !clientName.trim() || !email.trim() || !password.trim()) {
-      setStatusType('error');
-      setStatusMsg('Please complete all required fields.');
-      return;
+  const handleCloseToast = (_event?: React.SyntheticEvent | Event, reason?: string) => {
+    if (reason === 'clickaway') return;
+    setToast((prev) => ({ ...prev, open: false }));
+  };
+
+  const validateForm = () => {
+    const newErrors: typeof errors = {};
+    if (!companyName.trim()) {
+      newErrors.companyName = 'Company name is required';
+    }
+    if (!clientName.trim()) {
+      newErrors.clientName = 'Contact full name is required';
+    }
+    if (!email.trim()) {
+      newErrors.email = 'Email address is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      newErrors.email = 'Please enter a valid email address';
+    }
+    if (!password) {
+      newErrors.password = 'Password is required';
+    } else if (password.length < 6) {
+      newErrors.password = 'Password must be at least 6 characters';
+    }
+    if (!confirmPassword) {
+      newErrors.confirmPassword = 'Confirm password is required';
+    } else if (password !== confirmPassword) {
+      newErrors.confirmPassword = 'Passwords do not match';
     }
 
-    if (password !== confirmPassword) {
-      setStatusType('error');
-      setStatusMsg('Passwords do not match.');
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validateForm()) {
+      showToast('Please fill all the required fields', 'error');
       return;
     }
 
@@ -94,13 +139,12 @@ export default function RegisterPage() {
         setOtpError('');
         setOtpCode('');
         setShowOtpModal(true);
+        showToast('Verification code sent successfully to your email!', 'success');
       } else {
-        setStatusType('error');
-        setStatusMsg(res.detail || 'Failed to dispatch verification email.');
+        showToast(res.detail || 'Failed to dispatch verification email.', 'error');
       }
     } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg(err.message || 'Error requesting verification code.');
+      showToast(err.message || 'Error requesting verification code.', 'error');
     } finally {
       setSubmitting(false);
     }
@@ -143,17 +187,19 @@ export default function RegisterPage() {
         if (regRes.success && regRes.token) {
           localStorage.setItem('auth_token', regRes.token);
           setShowOtpModal(false);
-          setStatusType('success');
-          setStatusMsg('Email verified & account registered successfully! Redirecting...');
+          showToast('Account created successfully!', 'success');
           setTimeout(() => navigate('/'), 1200);
         } else {
           setOtpError(regRes.detail || 'Registration failed after validation.');
+          showToast(regRes.detail || 'Registration failed.', 'error');
         }
       } else {
         setOtpError(verifyRes.detail || 'Invalid or expired passcode.');
+        showToast(verifyRes.detail || 'OTP verification failed.', 'error');
       }
     } catch (err: any) {
       setOtpError(err.message || 'Verification failed. Please retry.');
+      showToast(err.message || 'Error verifying OTP.', 'error');
     } finally {
       setVerifyingOtp(false);
     }
@@ -166,11 +212,14 @@ export default function RegisterPage() {
       const res = await authService.sendOtp(email, clientName);
       if (res.success) {
         setOtpError('A new verification code has been sent to your email.');
+        showToast('Verification code resent successfully.', 'success');
       } else {
         setOtpError(res.detail || 'Resend request failed.');
+        showToast(res.detail || 'Resend request failed.', 'error');
       }
     } catch (err: any) {
       setOtpError(err.message || 'Error resending verification code.');
+      showToast(err.message || 'Error resending verification code.', 'error');
     } finally {
       setResendingOtp(false);
     }
@@ -188,14 +237,8 @@ export default function RegisterPage() {
           </p>
         </div>
 
-        {statusMsg && (
-          <Alert severity={statusType === 'error' ? 'error' : 'success'} className="rounded-xl">
-            {statusMsg}
-          </Alert>
-        )}
-
         {/* Client Account Form */}
-        <form onSubmit={handleRegisterSubmit} className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
+        <form onSubmit={handleRegisterSubmit} noValidate className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
           <h3 className="text-lg font-bold text-slate-100 border-b border-slate-800 pb-3">
             Account & Company Details
           </h3>
@@ -206,14 +249,30 @@ export default function RegisterPage() {
               fullWidth
               label="Company Name"
               value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setCompanyName(val);
+                if (val.trim()) {
+                  setErrors((prev) => ({ ...prev, companyName: undefined }));
+                }
+              }}
+              error={Boolean(errors.companyName)}
+              helperText={errors.companyName}
             />
             <TextField
               size="small"
               fullWidth
               label="Contact Full Name"
               value={clientName}
-              onChange={(e) => setClientName(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setClientName(val);
+                if (val.trim()) {
+                  setErrors((prev) => ({ ...prev, clientName: undefined }));
+                }
+              }}
+              error={Boolean(errors.clientName)}
+              helperText={errors.clientName}
             />
             <TextField
               size="small"
@@ -221,7 +280,15 @@ export default function RegisterPage() {
               type="email"
               label="Email Address"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setEmail(val);
+                if (val.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
+                  setErrors((prev) => ({ ...prev, email: undefined }));
+                }
+              }}
+              error={Boolean(errors.email)}
+              helperText={errors.email}
             />
             <TextField
               size="small"
@@ -236,7 +303,18 @@ export default function RegisterPage() {
               type="password"
               label="Account Password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setPassword(val);
+                if (val && val.length >= 6) {
+                  setErrors((prev) => ({ ...prev, password: undefined }));
+                }
+                if (confirmPassword && val === confirmPassword) {
+                  setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                }
+              }}
+              error={Boolean(errors.password)}
+              helperText={errors.password}
             />
             <TextField
               size="small"
@@ -244,7 +322,15 @@ export default function RegisterPage() {
               type="password"
               label="Confirm Password"
               value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setConfirmPassword(val);
+                if (val && val === password) {
+                  setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                }
+              }}
+              error={Boolean(errors.confirmPassword)}
+              helperText={errors.confirmPassword}
             />
 
             <FormControl fullWidth size="small" className="sm:col-span-2">
@@ -380,6 +466,23 @@ export default function RegisterPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Floating Snackbar Toaster Notifications */}
+      <Snackbar
+        open={toast.open}
+        autoHideDuration={4000}
+        onClose={handleCloseToast}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert
+          onClose={handleCloseToast}
+          severity={toast.severity}
+          variant="filled"
+          sx={{ width: '100%', borderRadius: '12px' }}
+        >
+          {toast.message}
+        </Alert>
+      </Snackbar>
     </div>
   );
 }
