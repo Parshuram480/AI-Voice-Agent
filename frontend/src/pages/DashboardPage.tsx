@@ -7,6 +7,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
 import CloseIcon from '@mui/icons-material/Close';
 import { useNavigate } from 'react-router-dom';
+import Alert from '@mui/material/Alert';
 import NoCodeDbConfigWizard from '../components/NoCodeDbConfigWizard';
 import { authService } from '../services/authService';
 
@@ -65,7 +66,7 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
     }
   }
 
-  const hasConfig = Boolean(dbConfig && dbConfig.db_name);
+  const isConfigured = Boolean(dbConfig && dbConfig.db_name && dbConfig.db_name !== 'placeholder.db');
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
@@ -103,7 +104,7 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
           </div>
           <div className="space-y-1">
             <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Domain</span>
-            <span className="block text-base font-bold text-emerald-400">{domainData?.name || domainName}</span>
+            <span className="block text-base font-bold text-emerald-400">{domainName}</span>
           </div>
         </div>
 
@@ -114,24 +115,30 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
             variant="contained"
             color="primary"
             size="large"
+            disabled={!isConfigured}
             endIcon={<KeyboardDoubleArrowRightIcon />}
             className="cursor-pointer"
             sx={{
               py: 1.5,
               px: 4,
               fontSize: '1.05rem',
-              background: 'linear-gradient(to right, #7c3aed, #db2777)',
+              background: isConfigured ? 'linear-gradient(to right, #7c3aed, #db2777)' : '#1e293b',
               '&:hover': {
-                background: 'linear-gradient(to right, #6d28d9, #be185d)',
+                background: isConfigured ? 'linear-gradient(to right, #6d28d9, #be185d)' : '#1e293b',
               }
             }}
           >
             Open AI Voice Agent Console
           </Button>
+          {!isConfigured && (
+            <p className="text-xs text-rose-400 mt-2 font-medium">
+              Please complete your Database Connection setup below to activate the Voice Agent console.
+            </p>
+          )}
         </div>
 
         {/* Database Configuration Section */}
-        {hasConfig && !isEditing ? (
+        {isConfigured && !isEditing ? (
           <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-800 pb-4">
               <div className="flex items-center gap-3">
@@ -186,16 +193,16 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
                 {parsedMetadata ? (
                   <>
                     <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Identity Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.identityTable || 'Configured'}</span>
+                      <span className="font-semibold text-slate-400">Primary Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.customerTable || 'Configured'}</span>
                     </div>
                     <div className="text-sm text-slate-200">
                       <span className="font-semibold text-slate-400">Verified Columns:</span>{' '}
-                      <span className="font-mono text-violet-400">
-                        {parsedMetadata.nameColumn}, {parsedMetadata.verificationColumn}
+                      <span className="font-mono text-violet-300">
+                        {Array.isArray(parsedMetadata.verificationFields) ? parsedMetadata.verificationFields.join(', ') : 'Default'}
                       </span>
                     </div>
                     <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Mapped Tables:</span> <span className="font-mono text-emerald-400">{parsedMetadata.selectedTables ? Object.keys(parsedMetadata.selectedTables).join(', ') : 'Configured'}</span>
+                      <span className="font-semibold text-slate-400">Related Tables:</span> <span className="font-mono text-emerald-400">{Object.keys(parsedMetadata.selectedTables || {}).join(', ') || 'Configured'}</span>
                     </div>
                   </>
                 ) : (
@@ -208,9 +215,11 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
           </div>
         ) : (
           <div className="space-y-4">
-            {hasConfig && (
-              <div className="flex justify-between items-center bg-slate-900/40 p-4 rounded-2xl border border-slate-800">
-                <span className="text-sm text-slate-300 font-medium">Modifying Database Configuration & Rules Stepper</span>
+            <div className="flex justify-between items-center bg-slate-900/40 p-4 rounded-2xl border border-slate-800">
+              <span className="text-sm text-slate-300 font-medium">
+                {isConfigured ? 'Modifying Database Configuration & Rules Stepper' : 'Database Setup Needed'}
+              </span>
+              {isConfigured && (
                 <Button
                   size="small"
                   variant="outlined"
@@ -220,14 +229,20 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
                 >
                   Cancel Edit
                 </Button>
-              </div>
+              )}
+            </div>
+
+            {!isConfigured && (
+              <Alert severity="warning" className="rounded-xl">
+                Please complete your database configuration setup below to proceed.
+              </Alert>
             )}
 
             {/* Reusable No-Code Database Introspection & Rule Configurator Wizard */}
             <NoCodeDbConfigWizard
               domainId={domainData?.id || 1}
-              initialDbConfig={dbConfig}
-              initialMetadata={parsedMetadata}
+              initialDbConfig={isConfigured ? dbConfig : undefined}
+              initialMetadata={isConfigured ? parsedMetadata : undefined}
               onSaveSuccess={() => {
                 loadConfig();
                 setIsEditing(false);

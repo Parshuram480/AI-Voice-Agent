@@ -545,6 +545,27 @@ async def audio_stream(websocket: WebSocket):
                     )
 
                 asyncio.create_task(_startup_pipeline())
+                )
+                
+                # Background watcher: hang up Twilio when pipeline signals should_end
+                async def _watch_pipeline_end():
+                    try:
+                        result = await pipeline_task
+                        if result and result.get("should_end"):
+                            logger.info(f"[{call_sid}] Pipeline finished with should_end=True. Waiting for outbound audio to drain...")
+                            # Wait for outbound audio queue to drain so goodbye audio plays
+                            while not outbound_audio_queue.empty():
+                                await asyncio.sleep(0.1)
+                            # Let the last few syllables play out
+                            await asyncio.sleep(2.0)
+                            logger.info(f"[{call_sid}] Hanging up Twilio call now.")
+                            await twilio_handler.end_call(call_sid)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"[{call_sid}] Pipeline watcher error: {e}")
+                
+                pipeline_watcher_task = asyncio.create_task(_watch_pipeline_end())
 
             elif event == "media":
                 # Decode base64 μ-law audio → PCM → 16kHz
@@ -578,6 +599,18 @@ async def audio_stream(websocket: WebSocket):
                 if use_stream_audio_out and call_sid and result.get("audio_url") and not stream_audio_sent:
                     await twilio_handler.update_call_with_audio(call_sid, result["audio_url"])
                 logger.info(f"Twilio pipeline result: {result.get('reply_text', '')[:80]}")
+                
+                # Automatically hang up if requested by pipeline
+                if result and result.get("should_end"):
+                    logger.info(f"[{call_sid}] Pipeline requested end of call. Waiting for outbound audio to play...")
+                    # Wait for outbound queue to drain
+                    while not outbound_audio_queue.empty():
+                        await asyncio.sleep(0.1)
+                    # Let the last few syllables play
+                    await asyncio.sleep(2.0)
+                    if call_sid:
+                        logger.info(f"[{call_sid}] Hanging up the Twilio call now.")
+                        await twilio_handler.end_call(call_sid)
             except asyncio.TimeoutError:
                 logger.error("Twilio pipeline timed out")
                 pipeline_task.cancel()
@@ -699,6 +732,17 @@ async def mic_stream(websocket: WebSocket):
             "type": "turn_done",
             "result": send_result,
         })
+        
+        # If should_end is True, close the WebSocket after a short delay
+        if result.get("should_end"):
+            logger.info("Pipeline requested session end. Closing WebSocket shortly.")
+            async def close_after_delay():
+                await asyncio.sleep(2.5)
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+            asyncio.create_task(close_after_delay())
 
     # Session ID management
     session_id = websocket.query_params.get("session_id")
