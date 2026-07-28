@@ -549,6 +549,9 @@ async def audio_stream(websocket: WebSocket):
                 # Background watcher: hang up Twilio when pipeline signals should_end
                 async def _watch_pipeline_end():
                     try:
+                        # Wait for pipeline_task to be initialized to avoid TypeError/race condition
+                        while pipeline_task is None:
+                            await asyncio.sleep(0.05)
                         result = await pipeline_task
                         if result and result.get("should_end"):
                             logger.info(f"[{call_sid}] Pipeline finished with should_end=True. Waiting for outbound audio to drain...")
