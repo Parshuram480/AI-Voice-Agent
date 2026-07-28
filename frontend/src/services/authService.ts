@@ -33,4 +33,18 @@ export const authService = {
       method: 'POST',
     });
   },
+
+  async sendOtp(email: string, clientName: string) {
+    return request(`${API_BASE}/api/auth/send-otp`, {
+      method: 'POST',
+      body: JSON.stringify({ email, client_name: clientName }),
+    });
+  },
+
+  async verifyOtp(email: string, otp: string) {
+    return request(`${API_BASE}/api/auth/verify-otp`, {
+      method: 'POST',
+      body: JSON.stringify({ email, otp }),
+    });
+  },
 };
