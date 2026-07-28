@@ -42,13 +42,14 @@ class GeminiLivePipeline:
     Multimodal pipeline using Gemini Live API.
     Replaces StreamingVoicePipeline when PIPELINE_MODE=multimodal.
     """
-    def __init__(self, verification_service, order_service, db_client: DatabaseClient, client_id: str = None, domain: str = None):
+    def __init__(self, verification_service, order_service, db_client: DatabaseClient, client_id: str = None, domain: str = None, filler_service=None):
         self.verification_service = verification_service
         self.order_service = order_service
         self.db = db_client
         self.analytics = AnalyticsService(db_client)
         self.client_id = client_id
         self.domain = domain
+        self.filler_service = filler_service
 
     async def process_stream(
         self,
@@ -131,6 +132,15 @@ class GeminiLivePipeline:
         total_output_tokens = 0
         last_speech_time = None
         
+        # Filler State
+        filler_start_time = None
+        current_filler_meta = None
+        filler_interrupted = False
+        universal_filler_played_this_turn = False
+        filler_debounce_until = 0.0
+        cached_perceived_ttfa = None
+        is_speaking = False
+        
         # State for tools
         state = {
             "verified": False,
@@ -173,6 +183,8 @@ class GeminiLivePipeline:
             async with session_client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
+
+                
                 # Trigger the agent to speak first based on the domain context
                 domain_name = kwargs.get("domain", "default").replace("_", " ")
                 initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
@@ -180,6 +192,7 @@ class GeminiLivePipeline:
                 
                 # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
                 async def sender_task():
+                    nonlocal last_speech_time, filler_start_time, current_filler_meta, universal_filler_played_this_turn, filler_debounce_until, is_speaking, cached_perceived_ttfa
                     import os
                     use_silero = os.getenv("USE_SILERO_VAD", "true").lower() == "true"
                     silero_threshold = float(os.getenv("SILERO_THRESHOLD", "0.5"))
@@ -196,7 +209,7 @@ class GeminiLivePipeline:
                     speech_active = False
                     consecutive_speech_ms = 0
                     consecutive_silence_ms = 0
-                    vad_silence_threshold = 500  # ms to consider speech "done" to allow another barge-in
+                    vad_silence_threshold = 1000  # ms to consider speech "done" to allow another barge-in
                     
                     while True:
                         try:
@@ -216,7 +229,6 @@ class GeminiLivePipeline:
                                 for frame in frame_gen.get_frames():
                                     is_speech = vad.is_speech(frame)
                                     if is_speech:
-                                        nonlocal last_speech_time
                                         last_speech_time = time.perf_counter()
                                         
                                         consecutive_speech_ms += 30
@@ -231,6 +243,7 @@ class GeminiLivePipeline:
                                             if on_tts_audio:
                                                 on_tts_audio("CLEAR")
                                                 
+                                            filler_debounce_until = 0.0
                                             speech_active = True
                                     else:
                                         consecutive_speech_ms = 0
@@ -238,14 +251,44 @@ class GeminiLivePipeline:
                                             consecutive_silence_ms += 30
                                             if consecutive_silence_ms >= vad_silence_threshold:
                                                 speech_active = False  # Reset so we can detect the next interruption
+                                                
+                                                import random
+                                                
+                                                # Inject universal filler immediately on VAD silence (60% chance)
+                                                if self.filler_service and on_tts_audio and not universal_filler_played_this_turn and not is_speaking and time.perf_counter() >= filler_debounce_until and random.random() < 0.60:
+                                                    filler_data = self.filler_service.select_filler("universal", "fast")
+                                                    if filler_data:
+                                                        pcm_bytes, s_rate = filler_data
+                                                        logger.info(f"[{resolved_session_id}] Injecting universal filler audio on VAD silence")
+                                                        chunk_size = 960
+                                                        for i in range(0, len(pcm_bytes), chunk_size):
+                                                            on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
+                                                        
+                                                        # Calculate exact audio duration for dynamic debounce (16-bit mono = 2 bytes per sample)
+                                                        duration_sec = (len(pcm_bytes) / 2) / s_rate
+                                                        filler_debounce_until = time.perf_counter() + duration_sec + 0.5
+                                                        
+                                                        if not filler_start_time:
+                                                            filler_start_time = time.perf_counter()
+                                                            current_filler_meta = self.filler_service.get_filler_metadata("universal", "fast")
+                                                            # Freeze TTFA instantly based on last_speech_time
+                                                            if last_speech_time and filler_start_time >= last_speech_time:
+                                                                cached_perceived_ttfa = (filler_start_time - last_speech_time) * 1000
+                                                            else:
+                                                                cached_perceived_ttfa = 0.0
+                                                        universal_filler_played_this_turn = True
+                                                
+
                             
+                            await asyncio.sleep(0)
                         except Exception as e:
                             logger.exception(f"Sender task error: {e}")
                             break
                             
                 # --- TASK 2: Receiver (Read from Gemini -> execute tools -> send to UI) ---
                 async def receiver_task():
-                    nonlocal turn_index
+                    nonlocal turn_index, last_speech_time, is_speaking
+                    nonlocal filler_start_time, current_filler_meta, filler_interrupted, universal_filler_played_this_turn, filler_debounce_until, cached_perceived_ttfa
                     
                     turn_start_time = None
                     gemini_first_audio_ms = 0
@@ -253,7 +296,7 @@ class GeminiLivePipeline:
                     current_agent_text = ""
                     current_tool_summary = ""
                     output_audio_chunks = []
-                    is_speaking = False
+                    gemini_audio_buffer = bytearray()
                     
                     try:
                         while True:
@@ -290,6 +333,13 @@ class GeminiLivePipeline:
                                     # A. Check for Turn Complete (End of agent's utterance)
                                     if response.server_content.turn_complete:
                                         logger.info("Gemini finished turn")
+                                        
+                                        if gemini_audio_buffer and on_tts_audio:
+                                            remainder = bytes(gemini_audio_buffer)
+                                            if len(remainder) % 2 != 0:
+                                                remainder += b'\x00'
+                                            on_tts_audio((remainder, 24000))
+                                            gemini_audio_buffer.clear()
                                 
                                         # Save audio cache in background
                                         if output_audio_chunks:
@@ -312,7 +362,41 @@ class GeminiLivePipeline:
                                             current_agent_text = current_tool_summary
                                 
                                         total_ms = gemini_first_audio_ms if gemini_first_audio_ms > 0 else 0
-                                        timings = {"ttfa_total_ms": total_ms, "is_native": True}
+                                        filler_text = ""
+                                        filler_latency_str = ""
+                                        
+                                        if cached_perceived_ttfa is not None:
+                                            perceived_ttfa = cached_perceived_ttfa
+                                        elif filler_start_time and last_speech_time and filler_start_time >= last_speech_time:
+                                            perceived_ttfa = (filler_start_time - last_speech_time) * 1000
+                                        else:
+                                            perceived_ttfa = total_ms
+
+                                        if filler_start_time and last_speech_time:
+                                            latency_str = f"Native Audio (TTFA: {round(perceived_ttfa, 1)} ms) [Filler]"
+                                            filler_latency_str = f"{round(perceived_ttfa, 1)} ms"
+                                            if current_filler_meta and "text" in current_filler_meta:
+                                                filler_text = current_filler_meta["text"]
+                                        else:
+                                            latency_str = f"Native Audio (TTFA: {round(total_ms, 1)} ms)" if total_ms > 0 else "Native Audio"
+                                        
+                                        # Attach filler text to agent response for transcript and memory
+                                        if filler_text:
+                                            if current_agent_text:
+                                                current_agent_text = f"[{filler_text}] {current_agent_text}"
+                                            else:
+                                                current_agent_text = f"[{filler_text}]"
+                                            # Clear filler_text so it isn't logged twice by log_transcript
+                                            filler_text = ""
+                                        
+                                        timings = {
+                                            "ttfa_total_ms": total_ms,
+                                            "perceived_ttfa_ms": perceived_ttfa,
+                                            "is_native": True,
+                                        }
+                                        if current_filler_meta:
+                                            timings["filler"] = current_filler_meta
+                                            timings["filler_interrupted"] = filler_interrupted
                                 
                                         turn_result = {
                                             "intent": "multimodal",
@@ -326,13 +410,11 @@ class GeminiLivePipeline:
                                         }
                                         all_timings.append(timings)
                                 
-                                        latency_str = f"Native Audio (TTFA: {total_ms} ms)" if total_ms > 0 else "Native Audio"
-                                        
                                         user_display_text = current_user_text
                                         if not user_display_text:
                                             user_display_text = "[System Initialization: Call Connected]" if turn_index == 1 else "[voice input]"
                                             
-                                        log_transcript(resolved_session_id, user_display_text, current_agent_text or "[audio response]", latency_str)
+                                        log_transcript(resolved_session_id, user_display_text, current_agent_text or "[audio response]", latency_str, filler_text, filler_latency_str)
                                 
                                         if on_turn_done:
                                             on_turn_done(turn_result)
@@ -353,9 +435,16 @@ class GeminiLivePipeline:
                                         is_speaking = False
                                         turn_start_time = None
                                         gemini_first_audio_ms = 0
+                                        filler_start_time = None
+                                        current_filler_meta = None
+                                        filler_interrupted = False
+                                        universal_filler_played_this_turn = False
+                                        filler_debounce_until = 0.0
+                                        cached_perceived_ttfa = None
                                         current_user_text = ""
                                         current_agent_text = ""
                                         current_tool_summary = ""
+                                        last_speech_time = None
                                         output_audio_chunks.clear()
                                         turn_index += 1
                                         
@@ -383,10 +472,10 @@ class GeminiLivePipeline:
                                             if part.inline_data:
                                                 if not is_speaking:
                                                     # First audio byte arrived
-                                                    nonlocal last_speech_time
+                                                    # Removed CLEAR signal so filler finishes playing entirely before actual response
+                                                            
                                                     if last_speech_time:
                                                         gemini_first_audio_ms = (time.perf_counter() - last_speech_time) * 1000
-                                                        last_speech_time = None
                                                     else:
                                                         gemini_first_audio_ms = 0.0
                                                     is_speaking = True
@@ -395,8 +484,11 @@ class GeminiLivePipeline:
                                                 audio_chunk = part.inline_data.data
                                                 output_audio_chunks.append(audio_chunk)
                                                 if on_tts_audio:
-                                                    # Gemini sends 24kHz raw PCM. Pass directly as a tuple to the outbound loop.
-                                                    on_tts_audio((audio_chunk, 24000))
+                                                    gemini_audio_buffer.extend(audio_chunk)
+                                                    while len(gemini_audio_buffer) >= 960:
+                                                        chunk_bytes = bytes(gemini_audio_buffer[:960])
+                                                        del gemini_audio_buffer[:960]
+                                                        on_tts_audio((chunk_bytes, 24000))
                                             
                                 # 2. Handle Tool Calls
                                 if response.tool_call is not None:
@@ -404,6 +496,43 @@ class GeminiLivePipeline:
                                         if on_stage:
                                             on_stage("conversation", "running", f"Gemini executing tool: {fc.name}")
                                     
+                                        # Filler Audio Injection
+                                        if self.filler_service and on_tts_audio:
+                                            executor = kwargs.get("dynamic_executor")
+                                            tool_meta = {}
+                                            if executor and hasattr(executor, "execution_map") and executor.execution_map:
+                                                tool_meta = executor.execution_map.get(fc.name, {})
+                                                
+                                            filler_cat = tool_meta.get("filler_category", "thinking")
+                                            latency_type = tool_meta.get("expected_latency", "fast")
+                                            
+                                            # Debounce: If ANY filler audio is currently queued or playing, skip this tool filler
+                                            if time.perf_counter() < filler_debounce_until:
+                                                logger.info(f"Skipping tool filler for {fc.name} due to active filler debounce")
+                                            else:
+                                                filler_data = self.filler_service.select_filler(filler_cat, latency_type)
+                                                if filler_data:
+                                                    pcm_bytes, s_rate = filler_data
+                                                    logger.info(f"Injecting filler audio for tool {fc.name} (category: {filler_cat}, latency: {latency_type})")
+                                                    # Chunk the audio to prevent Twilio payload rejection
+                                                    # 960 bytes = 20ms at 24kHz 16-bit mono
+                                                    chunk_size = 960
+                                                    for i in range(0, len(pcm_bytes), chunk_size):
+                                                        on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
+                                                    
+                                                    # Calculate exact audio duration for dynamic debounce to prevent multiple tool fillers overlapping
+                                                    duration_sec = (len(pcm_bytes) / 2) / s_rate
+                                                    filler_debounce_until = time.perf_counter() + duration_sec + 0.5
+                                                    
+                                                    if not filler_start_time:
+                                                        filler_start_time = time.perf_counter()
+                                                        if last_speech_time and filler_start_time >= last_speech_time:
+                                                            cached_perceived_ttfa = (filler_start_time - last_speech_time) * 1000
+                                                        else:
+                                                            cached_perceived_ttfa = 0.0
+                                                    # Always overwrite metadata to show the tool filler was used
+                                                    current_filler_meta = self.filler_service.get_filler_metadata(filler_cat, latency_type)
+                                                
                                         # Execute the tool
                                         tool_response = await session_client.execute_tool_call(
                                             tool_call_id=fc.id,
@@ -472,7 +601,7 @@ class GeminiLivePipeline:
                 timings_to_use = all_timings[1:] if len(all_timings) > 1 else all_timings
                 
                 for t in timings_to_use:
-                    latency = t.get("ttfa_total_ms", 0.0)
+                    latency = t.get("perceived_ttfa_ms", t.get("ttfa_total_ms", 0.0))
                     if latency > 0:
                         total_latency += latency / 1000.0
                         valid_latency_turns += 1
