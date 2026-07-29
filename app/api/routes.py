@@ -50,6 +50,13 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class UpdateProfileRequest(BaseModel):
+    company_name: str
+    client_name: str
+    email: str
+    phone: Optional[str] = None
+    domain_id: int
+
 class DbConfigRequest(BaseModel):
     db_type: str
     server_name: Optional[str] = None
@@ -236,6 +243,46 @@ def create_api_router(
         """Clears auth cookie session."""
         response.delete_cookie(key="session_token")
         return {"success": True, "message": "Logged out successfully."}
+
+    @router.put("/api/auth/profile")
+    async def update_profile(req: UpdateProfileRequest, request: Request):
+        """Update client profile and industry domain details."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        # Check if the new email is already taken by another user
+        existing = await system_db.get_client_by_email(req.email)
+        if existing and existing["id"] != client_id:
+            raise HTTPException(status_code=400, detail="Email is already taken by another account.")
+
+        try:
+            await system_db.update_client_profile(
+                client_id=client_id,
+                company_name=req.company_name,
+                client_name=req.client_name,
+                email=req.email,
+                phone=req.phone,
+                domain_id=req.domain_id
+            )
+            # Retrieve updated client data
+            updated_client = await system_db.get_client_by_id(client_id)
+            updated_client.pop("password_hash", None)
+            
+            # Retrieve new domain name
+            domains = await system_db.get_domains()
+            domain_name = next((d["name"] for d in domains if d["id"] == req.domain_id), "Unknown")
+            
+            return {
+                "success": True, 
+                "message": "Profile updated successfully.",
+                "client": updated_client,
+                "domain_name": domain_name
+            }
+        except Exception as e:
+            logger.error(f"Error updating profile: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     @router.get("/api/auth/me")
     async def get_current_client(request: Request):

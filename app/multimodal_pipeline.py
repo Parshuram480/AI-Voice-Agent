@@ -134,7 +134,7 @@ class GeminiLivePipeline:
         
         # Filler State
         filler_start_time = None
-        current_filler_meta = None
+        played_fillers_meta = []
         filler_interrupted = False
         universal_filler_played_this_turn = False
         filler_debounce_until = 0.0
@@ -193,7 +193,7 @@ class GeminiLivePipeline:
                 
                 # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
                 async def sender_task():
-                    nonlocal last_speech_time, filler_start_time, current_filler_meta, universal_filler_played_this_turn, filler_debounce_until, is_speaking, cached_perceived_ttfa
+                    nonlocal last_speech_time, filler_start_time, played_fillers_meta, universal_filler_played_this_turn, filler_debounce_until, is_speaking, cached_perceived_ttfa
                     import os
                     use_silero = os.getenv("USE_SILERO_VAD", "true").lower() == "true"
                     silero_threshold = float(os.getenv("SILERO_THRESHOLD", "0.5"))
@@ -256,7 +256,7 @@ class GeminiLivePipeline:
                                                 import random
                                                 
                                                 # Inject universal filler immediately on VAD silence (60% chance)
-                                                if self.filler_service and on_tts_audio and not universal_filler_played_this_turn and not is_speaking and time.perf_counter() >= filler_debounce_until and random.random() < 0.60:
+                                                if self.filler_service and on_tts_audio and not universal_filler_played_this_turn and not is_speaking and time.perf_counter() >= filler_debounce_until and random.random() < 0.75:
                                                     filler_data = self.filler_service.select_filler("universal", "fast")
                                                     if filler_data:
                                                         pcm_bytes, s_rate = filler_data
@@ -271,7 +271,7 @@ class GeminiLivePipeline:
                                                         
                                                         if not filler_start_time:
                                                             filler_start_time = time.perf_counter()
-                                                            current_filler_meta = self.filler_service.get_filler_metadata("universal", "fast")
+                                                            played_fillers_meta.append(self.filler_service.get_filler_metadata("universal", "fast"))
                                                             # Freeze TTFA instantly based on last_speech_time
                                                             if last_speech_time and filler_start_time >= last_speech_time:
                                                                 cached_perceived_ttfa = (filler_start_time - last_speech_time) * 1000
@@ -289,7 +289,7 @@ class GeminiLivePipeline:
                 # --- TASK 2: Receiver (Read from Gemini -> execute tools -> send to UI) ---
                 async def receiver_task():
                     nonlocal turn_index, last_speech_time, is_speaking
-                    nonlocal filler_start_time, current_filler_meta, filler_interrupted, universal_filler_played_this_turn, filler_debounce_until, cached_perceived_ttfa
+                    nonlocal filler_start_time, played_fillers_meta, filler_interrupted, universal_filler_played_this_turn, filler_debounce_until, cached_perceived_ttfa
                     
                     turn_start_time = None
                     gemini_first_audio_ms = 0
@@ -376,8 +376,9 @@ class GeminiLivePipeline:
                                         if filler_start_time and last_speech_time:
                                             latency_str = f"Native Audio (TTFA: {round(perceived_ttfa, 1)} ms) [Filler]"
                                             filler_latency_str = f"{round(perceived_ttfa, 1)} ms"
-                                            if current_filler_meta and "text" in current_filler_meta:
-                                                filler_text = current_filler_meta["text"]
+                                            filler_texts = [meta.get("text") for meta in played_fillers_meta if meta.get("text")]
+                                            if filler_texts:
+                                                filler_text = " ".join(filler_texts)
                                         else:
                                             latency_str = f"Native Audio (TTFA: {round(total_ms, 1)} ms)" if total_ms > 0 else "Native Audio"
                                         
@@ -395,8 +396,8 @@ class GeminiLivePipeline:
                                             "perceived_ttfa_ms": perceived_ttfa,
                                             "is_native": True,
                                         }
-                                        if current_filler_meta:
-                                            timings["filler"] = current_filler_meta
+                                        if played_fillers_meta:
+                                            timings["filler"] = played_fillers_meta
                                             timings["filler_interrupted"] = filler_interrupted
                                 
                                         turn_result = {
@@ -437,7 +438,7 @@ class GeminiLivePipeline:
                                         turn_start_time = None
                                         gemini_first_audio_ms = 0
                                         filler_start_time = None
-                                        current_filler_meta = None
+                                        played_fillers_meta = []
                                         filler_interrupted = False
                                         universal_filler_played_this_turn = False
                                         filler_debounce_until = 0.0
@@ -498,7 +499,7 @@ class GeminiLivePipeline:
                                             on_stage("conversation", "running", f"Gemini executing tool: {fc.name}")
                                     
                                         # Filler Audio Injection
-                                        if self.filler_service and on_tts_audio:
+                                        if self.filler_service and on_tts_audio and not is_speaking and not current_agent_text and fc.name != "end_call":
                                             executor = kwargs.get("dynamic_executor")
                                             tool_meta = {}
                                             if executor and hasattr(executor, "execution_map") and executor.execution_map:
@@ -507,32 +508,28 @@ class GeminiLivePipeline:
                                             filler_cat = tool_meta.get("filler_category", "thinking")
                                             latency_type = tool_meta.get("expected_latency", "fast")
                                             
-                                            # Debounce: If ANY filler audio is currently queued or playing, skip this tool filler
-                                            if time.perf_counter() < filler_debounce_until:
-                                                logger.info(f"Skipping tool filler for {fc.name} due to active filler debounce")
-                                            else:
-                                                filler_data = self.filler_service.select_filler(filler_cat, latency_type)
-                                                if filler_data:
-                                                    pcm_bytes, s_rate = filler_data
-                                                    logger.info(f"Injecting filler audio for tool {fc.name} (category: {filler_cat}, latency: {latency_type})")
-                                                    # Chunk the audio to prevent Twilio payload rejection
-                                                    # 960 bytes = 20ms at 24kHz 16-bit mono
-                                                    chunk_size = 960
-                                                    for i in range(0, len(pcm_bytes), chunk_size):
-                                                        on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
-                                                    
-                                                    # Calculate exact audio duration for dynamic debounce to prevent multiple tool fillers overlapping
-                                                    duration_sec = (len(pcm_bytes) / 2) / s_rate
-                                                    filler_debounce_until = time.perf_counter() + duration_sec + 0.5
-                                                    
-                                                    if not filler_start_time:
-                                                        filler_start_time = time.perf_counter()
-                                                        if last_speech_time and filler_start_time >= last_speech_time:
-                                                            cached_perceived_ttfa = (filler_start_time - last_speech_time) * 1000
-                                                        else:
-                                                            cached_perceived_ttfa = 0.0
-                                                    # Always overwrite metadata to show the tool filler was used
-                                                    current_filler_meta = self.filler_service.get_filler_metadata(filler_cat, latency_type)
+                                            filler_data = self.filler_service.select_filler(filler_cat, latency_type)
+                                            if filler_data:
+                                                pcm_bytes, s_rate = filler_data
+                                                logger.info(f"Injecting filler audio for tool {fc.name} (category: {filler_cat}, latency: {latency_type})")
+                                                # Chunk the audio to prevent Twilio payload rejection
+                                                # 960 bytes = 20ms at 24kHz 16-bit mono
+                                                chunk_size = 960
+                                                for i in range(0, len(pcm_bytes), chunk_size):
+                                                    on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
+                                                
+                                                # Calculate exact audio duration for dynamic debounce to prevent multiple tool fillers overlapping
+                                                duration_sec = (len(pcm_bytes) / 2) / s_rate
+                                                filler_debounce_until = time.perf_counter() + duration_sec + 0.5
+                                                
+                                                if not filler_start_time:
+                                                    filler_start_time = time.perf_counter()
+                                                    if last_speech_time and filler_start_time >= last_speech_time:
+                                                        cached_perceived_ttfa = (filler_start_time - last_speech_time) * 1000
+                                                    else:
+                                                        cached_perceived_ttfa = 0.0
+                                                # Always append metadata to show the tool filler was used
+                                                played_fillers_meta.append(self.filler_service.get_filler_metadata(filler_cat, latency_type))
                                                 
                                         # Execute the tool
                                         tool_response = await session_client.execute_tool_call(

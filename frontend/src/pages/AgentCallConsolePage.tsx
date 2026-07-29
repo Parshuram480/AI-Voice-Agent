@@ -7,10 +7,18 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import Autocomplete from '@mui/material/Autocomplete';
 import { useNavigate } from 'react-router-dom';
 import { twilioService } from '../services/twilioService';
 
 const WS_BASE = 'ws://localhost:8000';
+
+interface Country {
+  code: string;
+  flagUrl: string;
+  name: string;
+  cioc: string;
+}
 
 interface Client {
   id: number;
@@ -28,18 +36,21 @@ interface AgentCallConsoleProps {
 
 export default function AgentCallConsolePage({ client, domainName, pipelineMode }: AgentCallConsoleProps) {
   const navigate = useNavigate();
-  const [dialPhoneNumber, setDialPhoneNumber] = useState('');
+  const [countries, setCountries] = useState<Country[]>([]);
+  const [selectedCountry, setSelectedCountry] = useState<Country | null>(null);
+  const [localPhoneNumber, setLocalPhoneNumber] = useState('');
   const [dialing, setDialing] = useState(false);
   const [callSid, setCallSid] = useState<string | null>(null);
   const [phoneError, setPhoneError] = useState('');
-  
+  const [codeError, setCodeError] = useState('');
+
   // Call status options: 'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'
   const [callState, setCallState] = useState<'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'>('IDLE');
   const [twilioStatus, setTwilioStatus] = useState('Idle');
-  
+
   const [statusMsg, setStatusMsg] = useState('');
   const [statusType, setStatusType] = useState<'success' | 'error' | ''>('');
-  
+
   const pollIntervalRef = useRef<number | null>(null);
 
   // Live WebSocket state variables
@@ -110,6 +121,63 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
   };
 
   useEffect(() => {
+    async function fetchCountries() {
+      try {
+        const res = await fetch('https://countries.dev/countries');
+        if (!res.ok) throw new Error('Failed to load countries');
+        const data: any[] = await res.json();
+
+        const mapped: Country[] = data
+          .map((item: any) => {
+            const rawCode = item.callingCodes?.[0] || '';
+            const formattedCode = rawCode ? (rawCode.startsWith('+') ? rawCode : `+${rawCode}`) : '';
+            return {
+              code: formattedCode,
+              flagUrl: item.flags?.png || item.flags?.svg || '',
+              name: item.name || '',
+              cioc: item.cioc || '',
+            };
+          })
+          .filter((c: Country) => c.code && c.flagUrl && c.name);
+
+        mapped.sort((a, b) => a.name.localeCompare(b.name));
+
+        // Deduplicate country code items
+        const seen = new Set<string>();
+        const uniqueMapped: Country[] = [];
+        for (const c of mapped) {
+          const key = `${c.code}-${c.name}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            uniqueMapped.push(c);
+          }
+        }
+
+        setCountries(uniqueMapped);
+
+        // Default to India (+91)
+        const defaultCountry = uniqueMapped.find(
+          (c) => c.code === '+91' && c.name.toLowerCase().includes('india')
+        ) || uniqueMapped.find((c) => c.code === '+91') || uniqueMapped.find((c) => c.code === '+1') || uniqueMapped[0];
+
+        setSelectedCountry(defaultCountry || null);
+      } catch (err) {
+        console.error('Failed to fetch country codes from API, using fallbacks:', err);
+        const fallback = [
+          { code: '+91', flagUrl: 'https://flagcdn.com/w320/in.png', name: 'India', cioc: 'IND' },
+          { code: '+1', flagUrl: 'https://flagcdn.com/w320/us.png', name: 'United States', cioc: 'USA' },
+          { code: '+44', flagUrl: 'https://flagcdn.com/w320/gb.png', name: 'United Kingdom', cioc: 'GBR' },
+          { code: '+61', flagUrl: 'https://flagcdn.com/w320/au.png', name: 'Australia', cioc: 'AUS' },
+          { code: '+49', flagUrl: 'https://flagcdn.com/w320/de.png', name: 'Germany', cioc: 'DEU' },
+        ];
+        setCountries(fallback);
+        setSelectedCountry(fallback[0]);
+      }
+    }
+    fetchCountries();
+  }, []);
+
+  useEffect(() => {
     return () => {
       stopPolling();
     };
@@ -138,7 +206,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
       try {
         const data = JSON.parse(event.data);
         console.log('Listener received event:', data);
-        
+
         switch (data.type) {
           case 'phase':
             setConsolePhase(data.phase);
@@ -241,17 +309,24 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     setStatusMsg('');
     setStatusType('');
     setPhoneError('');
+    setCodeError('');
 
-    const cleanedNumber = dialPhoneNumber.trim();
+    if (!selectedCountry) {
+      setCodeError('Country code is required');
+      return;
+    }
+    const cleanedNumber = localPhoneNumber.trim().replace(/\D/g, '');
     if (!cleanedNumber) {
       setPhoneError('Phone number is required');
       return;
     }
 
-    // Require country code starting with '+' (e.g., +15550199)
+    const combinedNumber = selectedCountry.code + cleanedNumber;
+
+    // Require valid format starting with '+' followed by 7-15 digits
     const phoneRegex = /^\+[1-9]\d{6,14}$/;
-    if (!phoneRegex.test(cleanedNumber)) {
-      setPhoneError('Please enter a valid phone number with "+" and country code (e.g. +15550199)');
+    if (!phoneRegex.test(combinedNumber)) {
+      setPhoneError('Please enter a valid phone number (e.g. 9876543210)');
       return;
     }
 
@@ -260,9 +335,9 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     setTwilioStatus('Initiating outbound call...');
 
     try {
-      const data = await twilioService.dialCall({ 
-        phone_number: dialPhoneNumber,
-        client_id: client.id 
+      const data = await twilioService.dialCall({
+        phone_number: combinedNumber,
+        client_id: client.id
       });
       if (data.success) {
         setCallSid(data.call_sid);
@@ -333,11 +408,11 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
             SaaS Domain: <span className="text-emerald-400 font-bold uppercase tracking-wider">{domainName}</span>
           </p>
         </div>
-        <Button 
+        <Button
           variant="outlined"
           color="inherit"
           size="small"
-          onClick={() => navigate('/agent-mode-select')} 
+          onClick={() => navigate('/dashboard')}
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >
@@ -395,26 +470,96 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
           <div className="w-full space-y-3">
             {callState === 'IDLE' || callState === 'ENDED' ? (
               <>
-                <p className="text-slate-400 text-xs text-center select-none uppercase tracking-wider">
+                <p className="text-slate-400 text-xs text-center select-none uppercase tracking-wider pb-2">
                   Dial a number to query agent domain records via call
                 </p>
                 <form onSubmit={handleDialCall} className="space-y-4">
-                  <TextField
-                    label="Destination Phone Number"
-                    sx={{ pb: 2 }}
-                    placeholder="+15550199"
-                    variant="outlined"
-                    fullWidth
-                    disabled={dialing}
-                    value={dialPhoneNumber}
-                    onChange={e => {
-                      setDialPhoneNumber(e.target.value);
-                      if (phoneError) setPhoneError('');
-                    }}
-                    error={!!phoneError}
-                    helperText={phoneError}
-                    slotProps={{ inputLabel: { shrink: true } }}
-                  />
+                  <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-start pb-2">
+                    <Autocomplete
+                      id="country-code-select"
+                      options={countries}
+                      getOptionLabel={(option) => `${option.code} (${option.cioc ? option.cioc : option.name})`}
+                      filterOptions={(options, state) => {
+                        const query = state.inputValue.toLowerCase();
+                        return options.filter((option) =>
+                          option.code.toLowerCase().includes(query) ||
+                          option.name.toLowerCase().includes(query) ||
+                          (option.cioc && option.cioc.toLowerCase().includes(query))
+                        );
+                      }}
+                      value={selectedCountry}
+                      onChange={(_event, newValue) => {
+                        setSelectedCountry(newValue);
+                        if (codeError) setCodeError('');
+                      }}
+                      disabled={dialing}
+                      sx={{ width: { xs: '100%', sm: 180 }, flexShrink: 0 }}
+                      renderOption={(props, option) => {
+                        const { key, ...optionProps } = props as any;
+                        return (
+                          <li key={key} {...optionProps} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem' }}>
+                            {option.flagUrl && (
+                              <img
+                                src={option.flagUrl}
+                                alt={option.name}
+                                style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover' }}
+                                loading="lazy"
+                              />
+                            )}
+                            <span>{option.code}</span>
+                            <span style={{ color: '#64748b', fontSize: '0.75rem' }}>({option.cioc ? option.cioc : option.name})</span>
+                          </li>
+                        );
+                      }}
+                      renderInput={(params) => {
+                        const p = params as any;
+                        const customParams = {
+                          ...params,
+                          InputProps: {
+                            ...p.InputProps,
+                            startAdornment: (
+                              <>
+                                {selectedCountry && selectedCountry.flagUrl && (
+                                  <img
+                                    src={selectedCountry.flagUrl}
+                                    alt={selectedCountry.name}
+                                    style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover', marginRight: '4px' }}
+                                  />
+                                )}
+                                {p.InputProps?.startAdornment}
+                              </>
+                            )
+                          }
+                        } as any;
+                        return (
+                          <TextField
+                            {...customParams}
+                            label="Country Code"
+                            size="medium"
+                            error={!!codeError}
+                            helperText={codeError}
+                          />
+                        );
+                      }}
+                    />
+
+                    <TextField
+                      label="Phone Number"
+                      placeholder="e.g. 9876543210"
+                      variant="outlined"
+                      size="medium"
+                      fullWidth
+                      disabled={dialing}
+                      value={localPhoneNumber}
+                      onChange={e => {
+                        setLocalPhoneNumber(e.target.value.replace(/\D/g, ''));
+                        if (phoneError) setPhoneError('');
+                      }}
+                      error={!!phoneError}
+                      helperText={phoneError}
+                      slotProps={{ inputLabel: { shrink: true } }}
+                    />
+                  </div>
                   <Button
                     type="submit"
                     variant="contained"
@@ -487,7 +632,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
             {/* Stage states pipeline */}
             <div className="flex justify-center flex-wrap gap-2 pt-2 select-none">
               {Object.entries(stageStates).map(([stage, status]) => (
-                <span 
+                <span
                   key={stage}
                   className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider border transition-all duration-300
                     ${status === 'active' ? 'bg-violet-950/80 text-violet-400 border-violet-700/60 animate-pulse' : ''}
@@ -496,12 +641,12 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
                     ${status === 'idle' ? 'bg-slate-950/50 text-slate-500 border-slate-900' : ''}
                   `}
                 >
-                  <FiberManualRecordIcon 
-                    sx={{ 
+                  <FiberManualRecordIcon
+                    sx={{
                       fontSize: 8,
                       animation: status === 'active' ? 'pulse 1s infinite' : 'none',
                       color: status === 'active' ? '#a78bfa' : status === 'done' ? '#34d399' : status === 'error' ? '#ef4444' : '#475569'
-                    }} 
+                    }}
                   />
                   {stage}
                 </span>
