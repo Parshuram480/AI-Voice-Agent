@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class SalesToolExecutor:
     """Executes sales-specific tool calls against an in-memory product catalog loaded from JSON."""
 
-    def __init__(self, catalog_path: str = "data/sales_products.json"):
+    def __init__(self, catalog_path: str = "client_configs/sales_products.json"):
         self.catalog_path = Path(catalog_path)
         self._catalog: Dict[str, Any] = {}
         self._products: List[Dict[str, Any]] = []
@@ -143,12 +143,13 @@ class SalesToolExecutor:
             ])
             if query in searchable:
                 results.append({
-                    "id": p["id"],
-                    "name": p["name"],
-                    "category": p["category"],
-                    "price": p["price"],
-                    "short_description": p["short_description"],
-                    "in_stock": p["in_stock"],
+                    "id": p.get("id"),
+                    "name": p.get("name"),
+                    "category": p.get("category"),
+                    "price": p.get("price"),
+                    "description": p.get("description", p.get("short_description", "")),
+                    "features": p.get("features", []),
+                    "in_stock": p.get("in_stock"),
                     "discount": p.get("discount"),
                 })
 
@@ -166,14 +167,14 @@ class SalesToolExecutor:
 
         # Search by ID
         for p in self._products:
-            if p["id"].lower() == product_id.lower():
+            if p.get("id", "").lower() == product_id.lower():
                 product = p
                 break
 
         # Fallback: search by name substring
         if not product:
             for p in self._products:
-                if product_id.lower() in p["name"].lower():
+                if product_id.lower() in p.get("name", "").lower():
                     product = p
                     break
 
@@ -194,7 +195,7 @@ class SalesToolExecutor:
         self, tool_call_id: str, name: str, category: str
     ) -> types.FunctionResponse:
         """Get all products in a specific category."""
-        matches = [p for p in self._products if p["category"].lower() == category.lower()]
+        matches = [p for p in self._products if p.get("category", "").lower() == category.lower()]
 
         if not matches:
             available = self._catalog.get("categories", [])
@@ -208,12 +209,12 @@ class SalesToolExecutor:
             )
 
         results = [{
-            "id": p["id"],
-            "name": p["name"],
-            "price": p["price"],
-            "short_description": p["short_description"],
-            "in_stock": p["in_stock"],
-            "rating": p["rating"],
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "price": p.get("price"),
+            "description": p.get("description", p.get("short_description", "")),
+            "in_stock": p.get("in_stock"),
+            "rating": p.get("rating"),
             "discount": p.get("discount"),
         } for p in matches]
 
@@ -231,16 +232,16 @@ class SalesToolExecutor:
             product_names = []
             for pid in b.get("products", []):
                 for p in self._products:
-                    if p["id"] == pid:
-                        product_names.append(p["name"])
+                    if p.get("id") == pid:
+                        product_names.append(p.get("name"))
                         break
 
             bundles_info.append({
-                "name": b["name"],
+                "name": b.get("name"),
                 "products": product_names,
-                "bundle_price": b["bundle_price"],
-                "savings": b["savings"],
-                "description": b["description"],
+                "bundle_price": b.get("bundle_price"),
+                "savings": b.get("savings"),
+                "description": b.get("description"),
             })
 
         return types.FunctionResponse(
@@ -254,14 +255,14 @@ class SalesToolExecutor:
     ) -> types.FunctionResponse:
         """Check if a specific product is in stock."""
         for p in self._products:
-            if p["id"].lower() == product_id.lower() or product_id.lower() in p["name"].lower():
+            if p.get("id", "").lower() == product_id.lower() or product_id.lower() in p.get("name", "").lower():
                 return types.FunctionResponse(
                     name=name,
                     id=tool_call_id,
                     response={
-                        "product": p["name"],
-                        "in_stock": p["in_stock"],
-                        "message": f"{p['name']} is {'available' if p['in_stock'] else 'currently out of stock'}.",
+                        "product": p.get("name"),
+                        "in_stock": p.get("in_stock"),
+                        "message": f"{p.get('name')} is {'available' if p.get('in_stock') else 'currently out of stock'}.",
                     },
                 )
 
@@ -285,16 +286,21 @@ class SalesToolExecutor:
 
         scored = []
         for p in self._products:
-            if not p["in_stock"]:
+            if not p.get("in_stock"):
                 continue
-            if max_budget and p["price"] > max_budget:
-                continue
+            if max_budget:
+                import re
+                match = re.search(r'\d+\.?\d*', str(p.get("price")))
+                if match:
+                    price_val = float(match.group())
+                    if price_val > max_budget:
+                        continue
 
             score = 0
             searchable = " ".join([
                 p.get("best_for", "").lower(),
-                p["category"].lower(),
-                p["short_description"].lower(),
+                p.get("category", "").lower(),
+                p.get("description", p.get("short_description", "")).lower(),
                 " ".join(p.get("features", [])).lower(),
             ])
 
@@ -307,36 +313,36 @@ class SalesToolExecutor:
                 scored.append({"product": p, "relevance_score": score})
 
         # Sort by relevance then rating
-        scored.sort(key=lambda x: (x["relevance_score"], x["product"]["rating"]), reverse=True)
+        scored.sort(key=lambda x: (x["relevance_score"], x["product"].get("rating", 0)), reverse=True)
 
         recommendations = []
         for item in scored[:3]:
             p = item["product"]
             recommendations.append({
-                "id": p["id"],
-                "name": p["name"],
-                "price": p["price"],
-                "why": p["best_for"],
-                "short_description": p["short_description"],
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "price": p.get("price"),
+                "why": p.get("best_for", ""),
+                "description": p.get("description", p.get("short_description", "")),
                 "discount": p.get("discount"),
-                "rating": p["rating"],
+                "rating": p.get("rating"),
             })
 
         # If no keyword matches, return top-rated in-stock products
         if not recommendations:
             fallback = sorted(
-                [p for p in self._products if p["in_stock"] and (not max_budget or p["price"] <= max_budget)],
-                key=lambda p: p["rating"],
+                [p for p in self._products if p.get("in_stock")],
+                key=lambda p: p.get("rating", 0),
                 reverse=True,
             )[:3]
             recommendations = [{
-                "id": p["id"],
-                "name": p["name"],
-                "price": p["price"],
-                "why": p["best_for"],
-                "short_description": p["short_description"],
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "price": p.get("price"),
+                "why": p.get("best_for", ""),
+                "description": p.get("description", p.get("short_description", "")),
                 "discount": p.get("discount"),
-                "rating": p["rating"],
+                "rating": p.get("rating"),
             } for p in fallback]
 
         # Also suggest a relevant bundle if any

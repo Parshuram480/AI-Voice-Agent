@@ -289,11 +289,18 @@ async def voice_webhook(request: Request):
     """
     # Extract client_id from query parameter if present
     client_id = request.query_params.get("client_id")
+    if not client_id and "client_id=sales" in str(request.url):
+        client_id = "sales"
+
     if not client_id or client_id == "None":
         client_id = getattr(request.app.state, "last_active_client_id", None)
         if client_id:
             client_id = str(client_id)
-    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}")
+
+    # Extract customer_name from query parameter if present
+    customer_name = request.query_params.get("customer_name")
+
+    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}, customer_name: {customer_name}")
     
     # Build the WebSocket URL dynamically based on the incoming request host
     # If the request comes through ngrok (https), we use wss://
@@ -305,7 +312,7 @@ async def voice_webhook(request: Request):
     if client_id:
         ws_url += f"?client_id={client_id}"
 
-    twiml = twilio_handler.generate_stream_twiml(ws_url)
+    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name)
     logger.info(f"Voice webhook called — streaming to {ws_url}")
 
     return Response(content=twiml, media_type="application/xml")
@@ -321,12 +328,14 @@ async def audio_stream(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("Twilio audio stream WebSocket connected")
+    logger.info(f"[AUDIO STREAM WS] Full URL: {websocket.url}")
+    logger.info(f"[AUDIO STREAM WS] All query_params: {dict(websocket.query_params)}")
 
     client_id_str = websocket.query_params.get("client_id")
     logger.info(f"[AUDIO STREAM WS] Raw client_id_str from ws query params: {client_id_str}")
     client_id = None
     if client_id_str and client_id_str != "None":
-        if client_id_str == "sales":
+        if "sales" in client_id_str.lower():
             client_id = "sales"
         else:
             try:
@@ -472,6 +481,12 @@ async def audio_stream(websocket: WebSocket):
             elif event == "start":
                 stream_sid = data.get("start", {}).get("streamSid")
                 call_sid = data.get("start", {}).get("callSid")
+                start_custom_params = data.get("start", {}).get("customParameters", {})
+                
+                # Twilio strips query params from the WS URL, so we MUST extract client_id from customParameters
+                if "client_id" in start_custom_params:
+                    client_id = start_custom_params["client_id"]
+                    
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
 
                 async def _startup_pipeline():
@@ -481,6 +496,8 @@ async def audio_stream(websocket: WebSocket):
 
                     if use_stream_audio_out and not outbound_task:
                         outbound_task = asyncio.create_task(_outbound_audio_loop())
+
+                    logger.info(f"[{call_sid}] >>> _startup_pipeline: client_id={client_id!r}, type={type(client_id).__name__}")
 
                     dynamic_kwargs = {}
                     if client_id and client_id != "sales":
@@ -527,9 +544,11 @@ async def audio_stream(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
 
-                    # Sales Agent Mode: load tools from JSON catalog (no DB required)
-                    sales_config = os.getenv("SALES_AGENT_CONFIG") or "data/sales_products.json"
-                    if client_id == "sales" or (not dynamic_kwargs and os.getenv("SALES_AGENT_CONFIG")):
+                    sales_config = os.getenv("SALES_AGENT_CONFIG") or "client_configs/sales_products.json"
+                    is_sales = client_id == "sales"
+                    has_sales_env = bool(os.getenv("SALES_AGENT_CONFIG"))
+                    logger.info(f"[{call_sid}] >>> Sales check: client_id={client_id!r}, is_sales={is_sales}, dynamic_kwargs_empty={not dynamic_kwargs}, has_sales_env={has_sales_env}")
+                    if is_sales or (not dynamic_kwargs and has_sales_env):
                         try:
                             from app.services.sales_executor import SalesToolExecutor
                             from app.services.sales_tools import get_sales_tool_declarations
@@ -538,6 +557,11 @@ async def audio_stream(websocket: WebSocket):
                             prompts_yaml = get_prompts()
                             base_prompt = prompts_yaml.get("multimodal", {}).get("base_prompt", "")
                             domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get("sales", "")
+                            
+                            customer_name = start_custom_params.get("customer_name")
+                            if customer_name:
+                                domain_prompt = f"The customer you are speaking to is named {customer_name}. Greet them by name naturally.\n\n{domain_prompt}"
+
                             sales_system_prompt = f"{base_prompt}\n{domain_prompt}"
 
                             sales_executor = SalesToolExecutor(catalog_path=sales_config)
@@ -550,8 +574,14 @@ async def audio_stream(websocket: WebSocket):
                                 "domain": "sales"
                             }
                             logger.info(f"[{call_sid}] Sales agent mode activated (catalog: {sales_config})")
+                            logger.info(f"[{call_sid}] >>> Sales prompt prefix: {sales_system_prompt[:200]}...")
                         except Exception as e:
                             logger.error(f"[{call_sid}] Error loading sales agent config: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    logger.info(f"[{call_sid}] >>> Final dynamic_kwargs keys: {list(dynamic_kwargs.keys())}, domain={dynamic_kwargs.get('domain', 'NONE')}")
+
 
                     # Launch the streaming pipeline in the background
                     pipeline_task = asyncio.create_task(
@@ -860,7 +890,7 @@ async def mic_stream(websocket: WebSocket):
             logger.error(f"[{session_id}] Error loading dynamic config for client {client_id}: {e}")
 
     # Sales Agent Mode: load tools from JSON catalog (no DB required)
-    sales_config = os.getenv("SALES_AGENT_CONFIG") or "data/sales_products.json"
+    sales_config = os.getenv("SALES_AGENT_CONFIG") or "client_configs/sales_products.json"
     if client_id == "sales" or (not dynamic_kwargs and os.getenv("SALES_AGENT_CONFIG")):
         try:
             from app.services.sales_executor import SalesToolExecutor

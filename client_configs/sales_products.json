@@ -1,0 +1,78 @@
+{
+  "company": {
+    "name": "Nova Telecom",
+    "description": "Leading provider of high-speed Wi-Fi, Fiber Internet, and home entertainment bundles."
+  },
+  "categories": [
+    "Internet Plans",
+    "Bundles",
+    "Hardware Add-ons"
+  ],
+  "products": [
+    {
+      "id": "WIFI-100",
+      "name": "Nova Basic 100Mbps",
+      "category": "Internet Plans",
+      "price": "$39.99/month",
+      "in_stock": true,
+      "rating": 4.2,
+      "description": "Reliable 100Mbps Wi-Fi plan perfect for light browsing, social media, and SD streaming on 1-2 devices."
+    },
+    {
+      "id": "WIFI-500",
+      "name": "Nova Stream 500Mbps",
+      "category": "Internet Plans",
+      "price": "$59.99/month",
+      "in_stock": true,
+      "rating": 4.7,
+      "description": "Fast 500Mbps plan ideal for families, HD streaming on multiple devices, and smooth video calls.",
+      "discount": "First month free"
+    },
+    {
+      "id": "WIFI-1G",
+      "name": "Nova Gamer Pro 1Gbps Fiber",
+      "category": "Internet Plans",
+      "price": "$89.99/month",
+      "in_stock": true,
+      "rating": 4.9,
+      "description": "Ultra-fast 1 Gigabit Fiber internet. Essential for hardcore gamers, 4K streaming, and heavy smart home usage with ultra-low latency.",
+      "discount": "Includes free router upgrade"
+    },
+    {
+      "id": "HW-ROUTER-MESH",
+      "name": "Nova Whole-Home Mesh System",
+      "category": "Hardware Add-ons",
+      "price": "$9.99/month or $120 upfront",
+      "in_stock": true,
+      "rating": 4.8,
+      "description": "Eliminate dead zones with our powerful 3-pack mesh Wi-Fi system. Perfect for large houses over 2000 sq ft."
+    },
+    {
+      "id": "HW-EXTENDER",
+      "name": "Nova Range Extender",
+      "category": "Hardware Add-ons",
+      "price": "$4.99/month or $40 upfront",
+      "in_stock": false,
+      "rating": 3.9,
+      "description": "Simple plug-in Wi-Fi extender for a single room."
+    }
+  ],
+  "bundles": [
+    {
+      "id": "BNDL-FAMILY",
+      "name": "The Family Entertainment Bundle",
+      "products": ["WIFI-500"],
+      "description": "Includes Nova Stream 500Mbps and Nova TV Basic Package (100+ Channels).",
+      "bundle_price": "$79.99/month",
+      "savings": "Saves $20/month compared to buying separately"
+    },
+    {
+      "id": "BNDL-ULTIMATE",
+      "name": "The Ultimate Home Bundle",
+      "products": ["WIFI-1G", "HW-ROUTER-MESH"],
+      "description": "Get the Gamer Pro 1Gbps Fiber and the Mesh System rental for free!",
+      "bundle_price": "$89.99/month",
+      "savings": "Saves $9.99/month"
+    }
+  ]
+}

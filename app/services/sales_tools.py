@@ -32,7 +32,7 @@ def get_sales_tool_declarations() -> list:
                 "properties": {
                     "query": {
                         "type": "STRING",
-                        "description": "Search keyword (e.g., 'earbuds', 'waterproof', 'fitness', 'charger').",
+                        "description": "Search keyword (e.g., 'fiber', 'mesh', 'gigabit', 'gamer').",
                     }
                 },
                 "required": ["query"],
@@ -49,7 +49,7 @@ def get_sales_tool_declarations() -> list:
                 "properties": {
                     "product_id": {
                         "type": "STRING",
-                        "description": "Product ID (e.g., 'TNS-001') or product name (e.g., 'Nova Smart Hub Pro').",
+                        "description": "Product ID (e.g., 'WIFI-1G') or product name (e.g., 'Nova Gamer Pro 1Gbps Fiber').",
                     }
                 },
                 "required": ["product_id"],
@@ -59,14 +59,14 @@ def get_sales_tool_declarations() -> list:
             "name": "get_products_by_category",
             "description": (
                 "List all products in a specific category. "
-                "Available categories: Smart Home, Audio, Wearables, Accessories."
+                "Available categories: Internet Plans, Bundles, Hardware Add-ons."
             ),
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
                     "category": {
                         "type": "STRING",
-                        "description": "Category name: 'Smart Home', 'Audio', 'Wearables', or 'Accessories'.",
+                        "description": "Category name: 'Internet Plans', 'Bundles', or 'Hardware Add-ons'.",
                     }
                 },
                 "required": ["category"],
@@ -111,7 +111,7 @@ def get_sales_tool_declarations() -> list:
                 "properties": {
                     "use_case": {
                         "type": "STRING",
-                        "description": "What the user needs the product for (e.g., 'working out', 'home automation', 'travel').",
+                        "description": "What the user needs the internet for (e.g., 'gaming', '4K streaming', 'working from home').",
                     },
                     "budget": {
                         "type": "STRING",

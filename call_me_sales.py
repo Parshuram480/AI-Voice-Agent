@@ -7,11 +7,11 @@ Usage:
 This script:
 1. Sets the SALES_AGENT_CONFIG env var so the server loads the sales tools
 2. Calls your phone via Twilio
-3. The AI sales agent pitches TechNova Solutions products to you
+3. The AI sales agent pitches Nova Telecom Wi-Fi plans to you
 
 Prerequisites:
 - Server running: uvicorn app.main:app --reload --port 8000
-- SALES_AGENT_CONFIG=data/sales_products.json in your .env
+- SALES_AGENT_CONFIG=client_configs/sales_products.json in your .env
 - Ngrok tunnel active and NGROK_URL set in .env
 """
 
@@ -28,7 +28,7 @@ load_dotenv()
 # if not sales_config:
 #     print("⚠️  SALES_AGENT_CONFIG is not set in your .env file!")
 #     print("   Add this line to your .env:")
-#     print("   SALES_AGENT_CONFIG=data/sales_products.json")
+#     print("   SALES_AGENT_CONFIG=client_configs/sales_products.json")
 #     print()
 #     print("   Then restart your server (uvicorn app.main:app --reload --port 8000)")
 #     sys.exit(1)
@@ -38,6 +38,7 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 NGROK_URL = os.getenv("NGROK_URL")
 MY_CELL_PHONE = os.getenv("MY_CELL_PHONE")
+CUSTOMER_NAME = os.getenv("CUSTOMER_NAME", "Ajit Yadav")
 
 # Validate required vars
 missing = []
@@ -62,15 +63,20 @@ if MY_CELL_PHONE == "+919999999999":
     sys.exit(1)
 
 # Ensure NGROK_URL points to /voice endpoint and includes client_id=sales
-voice_url = NGROK_URL.rstrip("/")
+voice_url = NGROK_URL.strip().rstrip("/")
 if not voice_url.endswith("/voice"):
-    if not voice_url.endswith("/voice"):
-        voice_url = voice_url.rstrip("/") + "/voice"
+    voice_url = voice_url + "/voice"
 
-voice_url += "?client_id=sales"
+import urllib.parse
+encoded_name = urllib.parse.quote(CUSTOMER_NAME)
+
+if "?" in voice_url:
+    voice_url += f"&client_id=sales&customer_name={encoded_name}"
+else:
+    voice_url += f"?client_id=sales&customer_name={encoded_name}"
 
 print("=" * 50)
-print("  TechNova Sales Agent -- Outbound Call")
+print("  Nova Telecom Sales Agent -- Outbound Call")
 print("=" * 50)
 print(f"  Calling: {MY_CELL_PHONE}")
 # print(f"  Catalog: {sales_config}")
@@ -88,13 +94,12 @@ call = client.calls.create(
 
 print(f"\n[SUCCESS] Call initiated! Call SID: {call.sid}")
 print("Your phone should ring in a few seconds...")
-print("The sales agent will pitch TechNova products to you!")
+print("The sales agent will pitch Nova Telecom Wi-Fi plans to you!")
 print("\nProducts in catalog:")
-print("  - Nova Smart Hub Pro -- $129.99 (Smart Home)")
-print("  - Nova Wireless Earbuds X1 -- $79.99 (Audio)")
-print("  - Nova FitBand Ultra -- $149.99 (Wearables)")
-print("  - Nova Portable Charger 20K -- $39.99 (Accessories)")
-print("  - Nova Smart Bulb Kit -- $49.99 (Smart Home)")
-print("  - Nova Bluetooth Speaker Max -- $99.99 (Audio)")
-print("  - Nova Smartwatch Series 5 -- $249.99 (Wearables)")
-print("  - Nova USB-C Hub 8-in-1 -- $59.99 (Accessories)")
+print("  - Nova Basic 100Mbps -- $39.99/month (Internet Plans)")
+print("  - Nova Stream 500Mbps -- $59.99/month (Internet Plans)")
+print("  - Nova Gamer Pro 1Gbps Fiber -- $89.99/month (Internet Plans)")
+print("  - Nova Whole-Home Mesh System -- $9.99/month (Hardware Add-ons)")
+print("  - Nova Range Extender -- $4.99/month (Hardware Add-ons)")
+print("  - The Family Entertainment Bundle -- $79.99/month (Bundles)")
+print("  - The Ultimate Home Bundle -- $89.99/month (Bundles)")
