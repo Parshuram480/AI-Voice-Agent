@@ -8,8 +8,14 @@ import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArro
 import CloseIcon from '@mui/icons-material/Close';
 import { useNavigate } from 'react-router-dom';
 import Alert from '@mui/material/Alert';
+import CircularProgress from '@mui/material/CircularProgress';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
+
 import NoCodeDbConfigWizard from '../components/NoCodeDbConfigWizard';
+import EditProfileModal from '../components/EditProfileModal';
 import { authService } from '../services/authService';
+import { domainService } from '../services/domainService';
 
 interface Client {
   id: number;
@@ -19,19 +25,31 @@ interface Client {
   phone?: string;
 }
 
+interface Domain {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+}
+
 interface DashboardProps {
   client: Client;
   domainName: string;
   onLogout: () => void;
+  onProfileUpdate: (updatedClient: Client, newDomainName: string) => void;
 }
 
-export default function DashboardPage({ client, domainName, onLogout }: DashboardProps) {
+export default function DashboardPage({ client, domainName, onLogout, onProfileUpdate }: DashboardProps) {
   const navigate = useNavigate();
 
   const [dbConfig, setDbConfig] = useState<any>(null);
   const [domainData, setDomainData] = useState<any>(null);
   const [isEditing, setIsEditing] = useState(false);
-  const [, setLoadingConfig] = useState(true);
+  const [loadingConfig, setLoadingConfig] = useState(true);
+
+  // States managed locally
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [domains, setDomains] = useState<Domain[]>([]);
 
   const loadConfig = async () => {
     setLoadingConfig(true);
@@ -54,6 +72,19 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
     loadConfig();
   }, []);
 
+  // Fetch list of active industry domains on load
+  useEffect(() => {
+    async function loadDomains() {
+      try {
+        const data = await domainService.getDomains();
+        setDomains(data);
+      } catch (err) {
+        console.error('Failed to load domains', err);
+      }
+    }
+    loadDomains();
+  }, []);
+
   // Parse UI metadata if available
   let parsedMetadata: any = null;
   if (domainData?.ui_config_metadata) {
@@ -68,6 +99,15 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
 
   const isConfigured = Boolean(dbConfig && dbConfig.db_name && dbConfig.db_name !== 'placeholder.db');
 
+  if (loadingConfig) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-8 min-h-[60vh] flex flex-col justify-center items-center gap-4">
+        <CircularProgress sx={{ color: '#8b5cf6' }} />
+        <p className="text-slate-400 text-sm animate-pulse">Loading dashboard configurations...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
@@ -79,39 +119,57 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
             Manage settings and launch your AI Voice Agent console
           </p>
         </div>
-        <Button
-          variant="outlined"
-          color="inherit"
-          size="small"
-          onClick={onLogout}
-          startIcon={<LogoutIcon />}
-          className="cursor-pointer"
-        >
-          Sign Out
-        </Button>
+        <div className="flex gap-3">
+          <Button
+            variant="outlined"
+            color="inherit"
+            size="small"
+            onClick={onLogout}
+            startIcon={<LogoutIcon />}
+            className="cursor-pointer"
+          >
+            Sign Out
+          </Button>
+        </div>
       </header>
 
       <div className="space-y-8 animate-slide-up">
         {/* Profile Card */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 bg-slate-900/50 backdrop-blur-xl border border-slate-800/85 rounded-2xl p-6 shadow-xl select-none">
-          <div className="space-y-1">
-            <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Company</span>
-            <span className="block text-base font-bold text-slate-100">{client.company_name}</span>
+        <div className="relative bg-slate-900/50 backdrop-blur-xl border border-slate-800/85 rounded-2xl p-6 shadow-xl select-none">
+          <div className="absolute top-4 right-4">
+            <Tooltip title="Edit Profile">
+              <IconButton
+                onClick={() => setShowProfileModal(true)}
+                color="primary"
+                className="cursor-pointer bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 p-2 text-violet-400 hover:text-violet-300 transition-colors duration-300"
+                sx={{ borderRadius: '12px' }}
+                aria-label="edit profile details"
+              >
+                <EditIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
           </div>
-          <div className="space-y-1">
-            <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Contact</span>
-            <span className="block text-base font-bold text-slate-100">{client.client_name}</span>
-          </div>
-          <div className="space-y-1">
-            <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Domain</span>
-            <span className="block text-base font-bold text-emerald-400">{domainName}</span>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 sm:pt-0">
+            <div className="space-y-1">
+              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Company</span>
+              <span className="block text-base font-bold text-slate-100">{client.company_name}</span>
+            </div>
+            <div className="space-y-1">
+              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Contact</span>
+              <span className="block text-base font-bold text-slate-100">{client.client_name}</span>
+            </div>
+            <div className="space-y-1">
+              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Domain</span>
+              <span className="block text-base font-bold text-emerald-400">{domainName}</span>
+            </div>
           </div>
         </div>
 
         {/* Launch Button Room */}
         <div className="text-center py-4 bg-slate-900/40 border border-slate-800 rounded-2xl">
           <Button
-            onClick={() => navigate('/agent-mode-select')}
+            onClick={() => navigate('/agent-call-console')}
             variant="contained"
             color="primary"
             size="large"
@@ -251,6 +309,16 @@ export default function DashboardPage({ client, domainName, onLogout }: Dashboar
           </div>
         )}
       </div>
+
+      {/* Extracted Edit Profile dialog Modal component */}
+      <EditProfileModal
+        open={showProfileModal}
+        onClose={() => setShowProfileModal(false)}
+        client={client}
+        domainName={domainName}
+        domains={domains}
+        onSaveSuccess={onProfileUpdate}
+      />
     </div>
   );
 }

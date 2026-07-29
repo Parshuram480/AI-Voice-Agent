@@ -361,3 +361,30 @@ class SystemDatabase:
                 ui_config_metadata = EXCLUDED.ui_config_metadata
             """, client_id, domain_id, dynamic_config, ui_config_metadata)
 
+    async def update_client_profile(self, client_id: int, company_name: str, client_name: str, email: str, phone: Optional[str], domain_id: int):
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                # 1. Update basic client profile details
+                await conn.execute("""
+                UPDATE clients
+                SET company_name = $1, client_name = $2, email = $3, phone = $4
+                WHERE id = $5
+                """, company_name, client_name, email, phone, client_id)
+
+                # 2. Update client domain mapping mapping
+                await conn.execute("""
+                UPDATE client_domain_mappings
+                SET domain_id = $1
+                WHERE client_id = $2
+                """, domain_id, client_id)
+
+                await tx.commit()
+            except Exception as e:
+                await tx.rollback()
+                logger.error(f"Failed to execute profile updates: {e}")
+                raise e
+
+
