@@ -326,11 +326,14 @@ async def audio_stream(websocket: WebSocket):
     logger.info(f"[AUDIO STREAM WS] Raw client_id_str from ws query params: {client_id_str}")
     client_id = None
     if client_id_str and client_id_str != "None":
-        try:
-            client_id = int(client_id_str)
-        except ValueError:
-            logger.error(f"[AUDIO STREAM WS] ValueError converting client_id_str to int: {client_id_str}")
-            pass
+        if client_id_str == "sales":
+            client_id = "sales"
+        else:
+            try:
+                client_id = int(client_id_str)
+            except ValueError:
+                logger.error(f"[AUDIO STREAM WS] ValueError converting client_id_str to int: {client_id_str}")
+                pass
             
     if client_id is None:
         client_id = getattr(websocket.app.state, "last_active_client_id", None)
@@ -480,7 +483,7 @@ async def audio_stream(websocket: WebSocket):
                         outbound_task = asyncio.create_task(_outbound_audio_loop())
 
                     dynamic_kwargs = {}
-                    if client_id:
+                    if client_id and client_id != "sales":
                         try:
                             from app.system_database import SystemDatabase
                             sys_db = SystemDatabase()
@@ -523,6 +526,32 @@ async def audio_stream(websocket: WebSocket):
                                     logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
                         except Exception as e:
                             logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
+
+                    # Sales Agent Mode: load tools from JSON catalog (no DB required)
+                    sales_config = os.getenv("SALES_AGENT_CONFIG") or "data/sales_products.json"
+                    if client_id == "sales" or (not dynamic_kwargs and os.getenv("SALES_AGENT_CONFIG")):
+                        try:
+                            from app.services.sales_executor import SalesToolExecutor
+                            from app.services.sales_tools import get_sales_tool_declarations
+                            from app.utils.prompt_loader import get_prompts
+
+                            prompts_yaml = get_prompts()
+                            base_prompt = prompts_yaml.get("multimodal", {}).get("base_prompt", "")
+                            domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get("sales", "")
+                            sales_system_prompt = f"{base_prompt}\n{domain_prompt}"
+
+                            sales_executor = SalesToolExecutor(catalog_path=sales_config)
+                            sales_tools = get_sales_tool_declarations()
+
+                            dynamic_kwargs = {
+                                "dynamic_tools": sales_tools,
+                                "dynamic_executor": sales_executor,
+                                "system_prompt": sales_system_prompt,
+                                "domain": "sales"
+                            }
+                            logger.info(f"[{call_sid}] Sales agent mode activated (catalog: {sales_config})")
+                        except Exception as e:
+                            logger.error(f"[{call_sid}] Error loading sales agent config: {e}")
 
                     # Launch the streaming pipeline in the background
                     pipeline_task = asyncio.create_task(
@@ -754,10 +783,13 @@ async def mic_stream(websocket: WebSocket):
     client_id_str = websocket.query_params.get("client_id")
     client_id = None
     if client_id_str and client_id_str != "null" and client_id_str != "undefined":
-        try:
-            client_id = int(client_id_str)
-        except ValueError:
-            pass
+        if client_id_str == "sales":
+            client_id = "sales"
+        else:
+            try:
+                client_id = int(client_id_str)
+            except ValueError:
+                pass
 
     # Pre-seed session state with client_id
     await session_manager.get_or_create(session_id, client_id=client_id)
@@ -789,7 +821,7 @@ async def mic_stream(websocket: WebSocket):
             return
 
     dynamic_kwargs = {}
-    if client_id:
+    if client_id and client_id != "sales":
         try:
             from app.system_database import SystemDatabase
             sys_db = SystemDatabase()
@@ -826,6 +858,32 @@ async def mic_stream(websocket: WebSocket):
                     logger.info(f"[{session_id}] Configured dynamic tools for client {client_id}")
         except Exception as e:
             logger.error(f"[{session_id}] Error loading dynamic config for client {client_id}: {e}")
+
+    # Sales Agent Mode: load tools from JSON catalog (no DB required)
+    sales_config = os.getenv("SALES_AGENT_CONFIG") or "data/sales_products.json"
+    if client_id == "sales" or (not dynamic_kwargs and os.getenv("SALES_AGENT_CONFIG")):
+        try:
+            from app.services.sales_executor import SalesToolExecutor
+            from app.services.sales_tools import get_sales_tool_declarations
+            from app.utils.prompt_loader import get_prompts
+
+            prompts_yaml = get_prompts()
+            base_prompt = prompts_yaml.get("multimodal", {}).get("base_prompt", "")
+            domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get("sales", "")
+            sales_system_prompt = f"{base_prompt}\n{domain_prompt}"
+
+            sales_executor = SalesToolExecutor(catalog_path=sales_config)
+            sales_tools = get_sales_tool_declarations()
+
+            dynamic_kwargs = {
+                "dynamic_tools": sales_tools,
+                "dynamic_executor": sales_executor,
+                "system_prompt": sales_system_prompt,
+                "domain": "sales"
+            }
+            logger.info(f"[{session_id}] Sales agent mode activated (catalog: {sales_config})")
+        except Exception as e:
+            logger.error(f"[{session_id}] Error loading sales agent config: {e}")
 
     # Launch the continuous conversation pipeline in background
     pipeline_task = asyncio.create_task(

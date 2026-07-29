@@ -174,7 +174,8 @@ class GeminiLivePipeline:
             self.order_service,
             dynamic_tools=dynamic_tools,
             dynamic_executor=dynamic_executor,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            domain=kwargs.get("domain") or self.domain
         )
         
         # Connect to Gemini

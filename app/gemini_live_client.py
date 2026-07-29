@@ -86,7 +86,8 @@ class GeminiLiveClient:
         order_service: OrderService,
         dynamic_tools: list = None,
         dynamic_executor = None,
-        system_prompt: str = None
+        system_prompt: str = None,
+        domain: str = None
     ):
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -102,11 +103,29 @@ class GeminiLiveClient:
         self.dynamic_tools = dynamic_tools
         self.dynamic_executor = dynamic_executor
         
+        # Ensure sales tools/executor/prompt are defaulted if domain is sales to prevent DB fallback
+        if domain == "sales":
+            if self.dynamic_tools is None:
+                from app.services.sales_tools import get_sales_tool_declarations
+                self.dynamic_tools = get_sales_tool_declarations()
+            if self.dynamic_executor is None:
+                from app.services.sales_executor import SalesToolExecutor
+                self.dynamic_executor = SalesToolExecutor()
+            if not system_prompt:
+                prompts = get_prompts()
+                base_prompt = prompts.get("multimodal", {}).get("base_prompt", "")
+                domain_prompt = prompts.get("multimodal", {}).get("domains", {}).get("sales", "")
+                system_prompt = f"{base_prompt}\n{domain_prompt}"
+
         if system_prompt:
             self.system_prompt = system_prompt + CALL_FLOW_INSTRUCTIONS
         else:
             prompts = get_prompts()
             self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.") + CALL_FLOW_INSTRUCTIONS
+
+        logger.info(f"[GEMINI CLIENT INIT] Initialized client with model={self.model}, voice={self.voice}, domain={domain}")
+        logger.info(f"[GEMINI CLIENT INIT] Tools: {[t.get('name') for t in (self.dynamic_tools or [])]}")
+        logger.info(f"[GEMINI CLIENT INIT] Prompt prefix: {self.system_prompt[:250]}...")
 
 
 
