@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).parent.parent
 ENV_PATH = ROOT_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 import audioop
 import uuid
 from pathlib import Path
