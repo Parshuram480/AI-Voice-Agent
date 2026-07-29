@@ -133,9 +133,10 @@ class FillerAudioService:
             logger.info(f"Generating {len(tasks)} missing filler clips via Gemini Live WebSocket API...")
             
             # Process sequentially to respect strict free-tier rate limits (e.g. 10 requests)
-            for category, lat_type, phrase, filepath in tasks:
+            for i, (category, lat_type, phrase, filepath) in enumerate(tasks, 1):
                 try:
                     await self._generate_and_cache(client, category, lat_type, phrase, filepath)
+                    logger.info(f"Generated clip {i}/{len(tasks)}: '{phrase}'")
                     await asyncio.sleep(2) # Brief pause between sequential requests
                 except Exception as e:
                     if "429" in str(e):
@@ -191,8 +192,8 @@ class FillerAudioService:
                     from app.audio_utils import wav_bytes_to_pcm
                     try:
                         pcm_data, _, _, _ = wav_bytes_to_pcm(bytes(audio_data))
-                    except Exception as e:
-                        logger.warning(f"Failed to extract PCM from Live response (might already be raw PCM): {e}")
+                    except Exception:
+                        # Live API returns raw PCM directly, so wav_bytes_to_pcm will fail. This is expected.
                         pcm_data = bytes(audio_data)
                         
                     # Save to disk as WAV (which wraps the raw PCM cleanly)
