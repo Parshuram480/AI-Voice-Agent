@@ -127,17 +127,22 @@ class FillerAudioService:
                         self._cache[category][lat_type].append(pcm_data)
                     else:
                         # Generate and save
-                        tasks.append(self._generate_and_cache(client, category, lat_type, phrase, filepath))
+                        tasks.append((category, lat_type, phrase, filepath))
         
         if tasks:
-            logger.info(f"Generating {len(tasks)} missing filler clips via Gemini TTS...")
-            # We don't parallelize too aggressively to avoid rate limits on startup
-            for chunk in [tasks[i:i+5] for i in range(0, len(tasks), 5)]:
-                results = await asyncio.gather(*chunk, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, Exception):
-                        logger.error(f"Failed to generate filler clip: {r}")
-                await asyncio.sleep(1) # rate limit buffer
+            logger.info(f"Generating {len(tasks)} missing filler clips via Gemini Live WebSocket API...")
+            
+            # Process sequentially to respect strict free-tier rate limits (e.g. 10 requests)
+            for category, lat_type, phrase, filepath in tasks:
+                try:
+                    await self._generate_and_cache(client, category, lat_type, phrase, filepath)
+                    await asyncio.sleep(2) # Brief pause between sequential requests
+                except Exception as e:
+                    if "429" in str(e):
+                        logger.error(f"Rate limit exceeded (429) while generating '{phrase}'. Stopping filler generation for this startup to allow the server to boot. Restart later to generate the rest.")
+                        break # Stop generating the rest to avoid hanging the startup
+                    else:
+                        logger.error(f"Failed to generate filler clip for '{phrase}': {e}")
             
             logger.info(f"Finished generating clips.")
         else:
@@ -146,47 +151,71 @@ class FillerAudioService:
         self.is_ready = True
 
     async def _generate_and_cache(self, client, category: str, lat_type: str, phrase: str, filepath: Path):
-        """Generates a single clip using Gemini TTS preview."""
-        # Using the TTS preview model to guarantee identical voice profile
-        model_name = "gemini-2.5-flash-preview-tts"
+        """Generates a single clip using Gemini Live API, with retries for errors."""
+        model_name = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
         
-        try:
-            # We use asyncio.to_thread because the genai client is synchronous in this usage
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=model_name,
-                contents=phrase,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    system_instruction=types.Content(
-                        parts=[types.Part(text="You are a text-to-speech engine. Generate audio for the user's text exactly as written, and do not generate any text response.")]
-                    ),
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice_name)
-                        )
-                    )
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice_name)
                 )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part(text="You are a text-to-speech engine. The user will provide a phrase. You must read it back EXACTLY as written, with no extra commentary, no introductions, and no acknowledgement. Just say the phrase.")]
             )
-            
-            audio_data = response.candidates[0].content.parts[0].inline_data.data
-            
-            # The TTS model returns a WAV file (including RIFF header). We need to extract the raw PCM.
-            from app.audio_utils import wav_bytes_to_pcm
+        )
+        
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                pcm_data, _, _, _ = wav_bytes_to_pcm(audio_data)
+                async with client.aio.live.connect(model=model_name, config=config) as session:
+                    await session.send(input=phrase, end_of_turn=True)
+                    
+                    audio_data = bytearray()
+                    async for response in session.receive():
+                        server_content = response.server_content
+                        if server_content is not None:
+                            model_turn = server_content.model_turn
+                            if model_turn is not None:
+                                for part in model_turn.parts:
+                                    if part.inline_data and part.inline_data.data:
+                                        audio_data.extend(part.inline_data.data)
+                            
+                            if server_content.turn_complete:
+                                break
+                                
+                    if not audio_data:
+                        raise ValueError("Received no audio data for phrase")
+                        
+                    from app.audio_utils import wav_bytes_to_pcm
+                    try:
+                        pcm_data, _, _, _ = wav_bytes_to_pcm(bytes(audio_data))
+                    except Exception as e:
+                        logger.warning(f"Failed to extract PCM from Live response (might already be raw PCM): {e}")
+                        pcm_data = bytes(audio_data)
+                        
+                    # Save to disk as WAV (which wraps the raw PCM cleanly)
+                    await asyncio.to_thread(self._save_wav, filepath, pcm_data)
+                    
+                    # Save raw PCM to memory
+                    self._cache[category][lat_type].append(pcm_data)
+                    return  # Success, exit the retry loop
+                    
             except Exception as e:
-                logger.warning(f"Failed to extract PCM from TTS response (might already be raw PCM): {e}")
-                pcm_data = audio_data
-            
-            # Save to disk as WAV (which wraps the raw PCM cleanly)
-            await asyncio.to_thread(self._save_wav, filepath, pcm_data)
-            
-            # Save raw PCM to memory
-            self._cache[category][lat_type].append(pcm_data)
-        except Exception as e:
-            logger.error(f"Error generating TTS for phrase '{phrase}': {e}")
-            raise e
+                error_msg = str(e)
+                if "429" in error_msg:
+                    sleep_time = 10
+                    logger.warning(f"Rate limited (429) for phrase '{phrase}', retrying in {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(sleep_time)
+                elif "500" in error_msg:
+                    sleep_time = 5
+                    logger.warning(f"Google API 500 error for '{phrase}', retrying in {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    if attempt == max_retries - 1:
+                        raise e
+                    await asyncio.sleep(2)
 
     def _save_wav(self, filepath: Path, pcm_data: bytes):
         with wave.open(str(filepath), "wb") as wf:
