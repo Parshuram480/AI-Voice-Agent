@@ -299,8 +299,11 @@ async def voice_webhook(request: Request):
 
     # Extract customer_name from query parameter if present
     customer_name = request.query_params.get("customer_name")
+    
+    # Extract language from query parameter if present
+    language = request.query_params.get("language")
 
-    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}, customer_name: {customer_name}")
+    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}, customer_name: {customer_name}, language: {language}")
     
     # Build the WebSocket URL dynamically based on the incoming request host
     # If the request comes through ngrok (https), we use wss://
@@ -312,7 +315,7 @@ async def voice_webhook(request: Request):
     if client_id:
         ws_url += f"?client_id={client_id}"
 
-    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name)
+    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name, language=language)
     logger.info(f"Voice webhook called — streaming to {ws_url}")
 
     return Response(content=twiml, media_type="application/xml")
@@ -487,7 +490,10 @@ async def audio_stream(websocket: WebSocket):
                 if "client_id" in start_custom_params:
                     client_id = start_custom_params["client_id"]
                     
-                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
+                # Extract language globally for all pipelines
+                language = start_custom_params.get("language", "en")
+                    
+                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}")
 
                 async def _startup_pipeline():
                     nonlocal pipeline_task, outbound_task
@@ -534,11 +540,16 @@ async def audio_stream(websocket: WebSocket):
                                         dyn_cfg["identity"]["verification_column"]
                                     )
                                     prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                    
+                                    if language != "en":
+                                        prompt = f"You must speak strictly in {language}. Even if the user speaks English, reply in {language}.\n\n{prompt}"
+                                        
                                     dynamic_kwargs = {
                                         "dynamic_tools": tools,
                                         "dynamic_executor": executor,
                                         "system_prompt": prompt,
-                                        "domain": dyn_cfg["domain"]
+                                        "domain": dyn_cfg["domain"],
+                                        "language": language
                                     }
                                     logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
                         except Exception as e:
@@ -562,6 +573,9 @@ async def audio_stream(websocket: WebSocket):
                             if customer_name:
                                 domain_prompt = f"The customer you are speaking to is named {customer_name}. Greet them by name naturally.\n\n{domain_prompt}"
 
+                            if language != "en":
+                                domain_prompt = f"You must speak strictly in {language}. Even if the user speaks English, reply in {language}.\n\n{domain_prompt}"
+
                             sales_system_prompt = f"{base_prompt}\n{domain_prompt}"
 
                             sales_executor = SalesToolExecutor(catalog_path=sales_config)
@@ -571,7 +585,8 @@ async def audio_stream(websocket: WebSocket):
                                 "dynamic_tools": sales_tools,
                                 "dynamic_executor": sales_executor,
                                 "system_prompt": sales_system_prompt,
-                                "domain": "sales"
+                                "domain": "sales",
+                                "language": language
                             }
                             logger.info(f"[{call_sid}] Sales agent mode activated (catalog: {sales_config})")
                             logger.info(f"[{call_sid}] >>> Sales prompt prefix: {sales_system_prompt[:200]}...")

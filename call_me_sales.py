@@ -21,7 +21,7 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 
 # Load credentials from your .env file
-load_dotenv()
+load_dotenv(override=True)
 
 # # Verify sales config is set
 # sales_config = os.getenv("SALES_AGENT_CONFIG")
@@ -38,7 +38,8 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 NGROK_URL = os.getenv("NGROK_URL")
 MY_CELL_PHONE = os.getenv("MY_CELL_PHONE")
-CUSTOMER_NAME = os.getenv("CUSTOMER_NAME", "Ajit Yadav")
+CUSTOMER_NAME = os.getenv("CUSTOMER_NAME", "Alex")
+LANGUAGE = os.getenv("LANGUAGE", "en")
 
 # Validate required vars
 missing = []
@@ -69,11 +70,12 @@ if not voice_url.endswith("/voice"):
 
 import urllib.parse
 encoded_name = urllib.parse.quote(CUSTOMER_NAME)
+encoded_lang = urllib.parse.quote(LANGUAGE)
 
 if "?" in voice_url:
-    voice_url += f"&client_id=sales&customer_name={encoded_name}"
+    voice_url += f"&client_id=sales&customer_name={encoded_name}&language={encoded_lang}"
 else:
-    voice_url += f"?client_id=sales&customer_name={encoded_name}"
+    voice_url += f"?client_id=sales&customer_name={encoded_name}&language={encoded_lang}"
 
 print("=" * 50)
 print("  Nova Telecom Sales Agent -- Outbound Call")

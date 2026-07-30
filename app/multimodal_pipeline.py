@@ -132,6 +132,9 @@ class GeminiLivePipeline:
         total_output_tokens = 0
         last_speech_time = None
         
+        # Extract per-call language from kwargs
+        call_language = kwargs.get("language", "en")
+        
         # Filler State
         filler_start_time = None
         played_fillers_meta = []
@@ -175,7 +178,8 @@ class GeminiLivePipeline:
             dynamic_tools=dynamic_tools,
             dynamic_executor=dynamic_executor,
             system_prompt=system_prompt,
-            domain=kwargs.get("domain") or self.domain
+            domain=kwargs.get("domain") or self.domain,
+            language=kwargs.get("language", "en")
         )
         
         # Connect to Gemini
@@ -257,7 +261,7 @@ class GeminiLivePipeline:
                                                 
                                                 # Inject universal filler immediately on VAD silence (60% chance)
                                                 if self.filler_service and on_tts_audio and not universal_filler_played_this_turn and not is_speaking and time.perf_counter() >= filler_debounce_until and random.random() < 0.75:
-                                                    filler_data = self.filler_service.select_filler("universal", "fast")
+                                                    filler_data = self.filler_service.select_filler("universal", "fast", language=call_language)
                                                     if filler_data:
                                                         pcm_bytes, s_rate = filler_data
                                                         logger.info(f"[{resolved_session_id}] Injecting universal filler audio on VAD silence")
@@ -508,7 +512,7 @@ class GeminiLivePipeline:
                                             filler_cat = tool_meta.get("filler_category", "thinking")
                                             latency_type = tool_meta.get("expected_latency", "fast")
                                             
-                                            filler_data = self.filler_service.select_filler(filler_cat, latency_type)
+                                            filler_data = self.filler_service.select_filler(filler_cat, latency_type, language=call_language)
                                             if filler_data:
                                                 pcm_bytes, s_rate = filler_data
                                                 logger.info(f"Injecting filler audio for tool {fc.name} (category: {filler_cat}, latency: {latency_type})")
@@ -517,7 +521,6 @@ class GeminiLivePipeline:
                                                 chunk_size = 960
                                                 for i in range(0, len(pcm_bytes), chunk_size):
                                                     on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
-                                                
                                                 # Calculate exact audio duration for dynamic debounce to prevent multiple tool fillers overlapping
                                                 duration_sec = (len(pcm_bytes) / 2) / s_rate
                                                 filler_debounce_until = time.perf_counter() + duration_sec + 0.5
@@ -529,7 +532,7 @@ class GeminiLivePipeline:
                                                     else:
                                                         cached_perceived_ttfa = 0.0
                                                 # Always append metadata to show the tool filler was used
-                                                played_fillers_meta.append(self.filler_service.get_filler_metadata(filler_cat, latency_type))
+                                                played_fillers_meta.append(self.filler_service.get_filler_metadata(filler_cat, latency_type, language=call_language))
                                                 
                                         # Execute the tool
                                         tool_response = await session_client.execute_tool_call(

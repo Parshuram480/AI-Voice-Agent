@@ -44,7 +44,7 @@ class TwilioHandler:
     # -------------------------------------------------------------------------
     # TwiML Generation
     # -------------------------------------------------------------------------
-    def generate_stream_twiml(self, ws_url: str, client_id: str = None, customer_name: str = None) -> str:
+    def generate_stream_twiml(self, ws_url: str, client_id: str = None, customer_name: str = None, language: str = None) -> str:
         """
         Generate TwiML to connect the call to a media stream.
 
@@ -55,6 +55,7 @@ class TwilioHandler:
             ws_url: Full WebSocket URL (e.g. "wss://example.ngrok.app/audio-stream").
             client_id: Optional client ID to pass via customParameters.
             customer_name: Optional customer name to pass via customParameters.
+            language: Optional language to pass via customParameters.
 
         Returns:
             TwiML XML string.
@@ -69,6 +70,8 @@ class TwilioHandler:
             stream.append(Parameter(name="client_id", value=client_id))
         if customer_name:
             stream.append(Parameter(name="customer_name", value=customer_name))
+        if language:
+            stream.append(Parameter(name="language", value=language))
         connect.append(stream)
         response.append(connect)
 
