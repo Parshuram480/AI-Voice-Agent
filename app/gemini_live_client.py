@@ -128,12 +128,39 @@ class GeminiLiveClient:
             
         # --- GENDER & PERSONA ---
         VOICE_GENDERS = {
-            "Puck": "male",
+            # Male Voices
+            "Achird": "male",
+            "Algenib": "male",
+            "Algieba": "male",
+            "Alnilam": "male",
             "Charon": "male",
+            "Enceladus": "male",
             "Fenrir": "male",
-            "Kore": "female",
+            "Iapetus": "male",
+            "Orus": "male",
+            "Puck": "male",
+            "Rasalgethi": "male",
+            "Sadachbia": "male",
+            "Sadaltager": "male",
+            "Schedar": "male",
+            "Umbriel": "male",
+            "Zubenelgenubi": "male",
+            
+            # Female Voices
+            "Achernar": "female",
             "Aoede": "female",
-            "Achernar": "female"
+            "Autonoe": "female",
+            "Callirrhoe": "female",
+            "Despina": "female",
+            "Erinome": "female",
+            "Gacrux": "female",
+            "Kore": "female",
+            "Laomedeia": "female",
+            "Leda": "female",
+            "Pulcherrima": "female",
+            "Sulafat": "female",
+            "Vindemiatrix": "female",
+            "Zephyr": "female"
         }
         gender = VOICE_GENDERS.get(self.voice, "male")
         
@@ -280,7 +307,7 @@ class GeminiLiveClient:
             reason = args.get("reason", "unknown")
             logger.info(f"[CALL FLOW] out_of_scope tool triggered (count={count}, reason={reason})")
             
-            if count >= 2 and self.domain != "sales":
+            if count >= 2 and self.domain not in ("sales", "realestate"):
                 state["should_end"] = True
                 msg = "This is the second out-of-scope question. The call must now be terminated. Say goodbye and then call end_call."
                     
@@ -294,8 +321,8 @@ class GeminiLiveClient:
                     }
                 )
             else:
-                if self.domain == "sales":
-                    msg = "This is an out-of-scope question (e.g. tech support, or a product we do not offer). DO NOT threaten to hang up. Gracefully pivot the conversation back to the products or services we do offer."
+                if self.domain in ("sales", "realestate"):
+                    msg = "This is an out-of-scope question (e.g. tech support, or something we do not offer). DO NOT threaten to hang up. Gracefully pivot the conversation back to the products or properties we do offer."
                 else:
                     msg = "This is the first out-of-scope question. Warn the user: 'I can only help you with questions related to our service. Please ask about that, or I will have to end the call.'"
                     

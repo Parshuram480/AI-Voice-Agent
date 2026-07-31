@@ -555,19 +555,57 @@ async def audio_stream(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
 
-                    sales_config = os.getenv("SALES_AGENT_CONFIG") or "client_configs/sales_products.json"
-                    is_sales = client_id == "sales"
-                    has_sales_env = bool(os.getenv("SALES_AGENT_CONFIG"))
-                    logger.info(f"[{call_sid}] >>> Sales check: client_id={client_id!r}, is_sales={is_sales}, dynamic_kwargs_empty={not dynamic_kwargs}, has_sales_env={has_sales_env}")
-                    if is_sales or (not dynamic_kwargs and has_sales_env):
+                    DOMAIN_REGISTRY = {
+                        "sales": {
+                            "config_env": "SALES_AGENT_CONFIG",
+                            "default_config": "client_configs/sales_products.json",
+                            "executor_module": "app.services.sales_executor",
+                            "executor_class": "SalesToolExecutor",
+                            "tools_module": "app.services.sales_tools",
+                            "tools_func": "get_sales_tool_declarations",
+                            "prompt_key": "sales",
+                        },
+                        "realestate": {
+                            "config_env": "REALESTATE_AGENT_CONFIG",
+                            "default_config": "client_configs/realestate_listings.json",
+                            "executor_module": "app.services.realestate_executor",
+                            "executor_class": "RealEstateToolExecutor",
+                            "tools_module": "app.services.realestate_tools",
+                            "tools_func": "get_realestate_tool_declarations",
+                            "prompt_key": "realestate",
+                        },
+                    }
+
+                    # Resolve domain
+                    active_domain = None
+                    if client_id in DOMAIN_REGISTRY:
+                        active_domain = client_id
+                    elif not dynamic_kwargs:
+                        # Fallback: check if any domain env var is set
+                        for domain, info in DOMAIN_REGISTRY.items():
+                            if os.getenv(info["config_env"]):
+                                active_domain = domain
+                                break
+
+                    if not dynamic_kwargs and active_domain:
+                        domain_info = DOMAIN_REGISTRY[active_domain]
+                        domain_config = os.getenv(domain_info["config_env"]) or domain_info["default_config"]
+                        
+                        logger.info(f"[{call_sid}] >>> Domain check: active_domain={active_domain!r}, client_id={client_id!r}, domain_info={domain_info}")
                         try:
-                            from app.services.sales_executor import SalesToolExecutor
-                            from app.services.sales_tools import get_sales_tool_declarations
+                            import importlib
+                            
+                            executor_module = importlib.import_module(domain_info["executor_module"])
+                            ExecutorClass = getattr(executor_module, domain_info["executor_class"])
+                            
+                            tools_module = importlib.import_module(domain_info["tools_module"])
+                            get_tools_func = getattr(tools_module, domain_info["tools_func"])
+                            
                             from app.utils.prompt_loader import get_prompts
 
                             prompts_yaml = get_prompts()
                             base_prompt = prompts_yaml.get("multimodal", {}).get("base_prompt", "")
-                            domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get("sales", "")
+                            domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get(domain_info["prompt_key"], "")
                             
                             customer_name = start_custom_params.get("customer_name")
                             if customer_name:
@@ -576,22 +614,22 @@ async def audio_stream(websocket: WebSocket):
                             if language != "en":
                                 domain_prompt = f"You must speak strictly in {language}. Even if the user speaks English, reply in {language}.\n\n{domain_prompt}"
 
-                            sales_system_prompt = f"{base_prompt}\n{domain_prompt}"
+                            system_prompt = f"{base_prompt}\n{domain_prompt}"
 
-                            sales_executor = SalesToolExecutor(catalog_path=sales_config)
-                            sales_tools = get_sales_tool_declarations()
+                            executor = ExecutorClass(catalog_path=domain_config)
+                            tools = get_tools_func()
 
                             dynamic_kwargs = {
-                                "dynamic_tools": sales_tools,
-                                "dynamic_executor": sales_executor,
-                                "system_prompt": sales_system_prompt,
-                                "domain": "sales",
+                                "dynamic_tools": tools,
+                                "dynamic_executor": executor,
+                                "system_prompt": system_prompt,
+                                "domain": domain_info["prompt_key"],
                                 "language": language
                             }
-                            logger.info(f"[{call_sid}] Sales agent mode activated (catalog: {sales_config})")
-                            logger.info(f"[{call_sid}] >>> Sales prompt prefix: {sales_system_prompt[:200]}...")
+                            logger.info(f"[{call_sid}] {active_domain} agent mode activated (catalog: {domain_config})")
+                            logger.info(f"[{call_sid}] >>> {active_domain} prompt prefix: {system_prompt[:200]}...")
                         except Exception as e:
-                            logger.error(f"[{call_sid}] Error loading sales agent config: {e}")
+                            logger.error(f"[{call_sid}] Error loading {active_domain} agent config: {e}")
                             import traceback
                             traceback.print_exc()
 
