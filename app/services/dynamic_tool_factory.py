@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 class DynamicToolFactory:
     """Generates Gemini function declarations and SQL maps from schema."""
-    MAX_TOOLS = 7
+    MAX_TOOLS = 12
 
     def __init__(self, config: Dict[str, Any], schema_metadata: Dict[str, Any]):
         self.config = config

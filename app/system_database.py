@@ -124,6 +124,58 @@ class SystemDatabase:
             ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS dynamic_config TEXT;
             """)
 
+            # 5. Schema migration: ensure correct UNIQUE constraints (self-healing)
+            #    Legacy schema had UNIQUE(client_id, path_type) which breaks ON CONFLICT (client_id).
+            #    We drop the legacy composite constraints and ensure simple UNIQUE(client_id) exists.
+            await conn.execute("""
+            ALTER TABLE client_domain_mappings
+                DROP CONSTRAINT IF EXISTS client_domain_mappings_client_id_path_type_key;
+            """)
+            await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'client_domain_mappings_client_id_key'
+                      AND conrelid = 'client_domain_mappings'::regclass
+                ) THEN
+                    -- Remove duplicate rows keeping the one with config data
+                    DELETE FROM client_domain_mappings a
+                    USING client_domain_mappings b
+                    WHERE a.client_id = b.client_id
+                      AND a.id < b.id
+                      AND (a.dynamic_config IS NULL OR b.dynamic_config IS NOT NULL);
+                    ALTER TABLE client_domain_mappings
+                        ADD CONSTRAINT client_domain_mappings_client_id_key UNIQUE (client_id);
+                END IF;
+            END
+            $$;
+            """)
+
+            await conn.execute("""
+            ALTER TABLE client_database_configurations
+                DROP CONSTRAINT IF EXISTS client_database_configurations_client_id_path_type_key;
+            """)
+            await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'client_database_configurations_client_id_key'
+                      AND conrelid = 'client_database_configurations'::regclass
+                ) THEN
+                    -- Remove duplicate rows keeping the latest
+                    DELETE FROM client_database_configurations a
+                    USING client_database_configurations b
+                    WHERE a.client_id = b.client_id
+                      AND a.id < b.id;
+                    ALTER TABLE client_database_configurations
+                        ADD CONSTRAINT client_database_configurations_client_id_key UNIQUE (client_id);
+                END IF;
+            END
+            $$;
+            """)
+
         # Seed standard domains
         await self._seed_domains()
 

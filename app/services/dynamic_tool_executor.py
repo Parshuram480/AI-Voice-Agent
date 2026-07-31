@@ -57,10 +57,12 @@ class DynamicToolExecutor:
                     }
                 else:
                     row = rows[0]
-                    # Convert date/time to string
+                    # Convert date/time to string, and Decimal to float
                     for k, v in row.items():
                         if isinstance(v, (datetime.date, datetime.datetime, datetime.time)):
                             row[k] = v.isoformat()
+                        elif isinstance(v, decimal.Decimal):
+                            row[k] = float(v)
 
                     response_data = {
                         "verified": True,
