@@ -1,1 +1,101 @@
 @import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-slate-50: var(--slate-50);
+  --color-slate-100: var(--slate-100);
+  --color-slate-200: var(--slate-200);
+  --color-slate-300: var(--slate-300);
+  --color-slate-400: var(--slate-400);
+  --color-slate-500: var(--slate-500);
+  --color-slate-600: var(--slate-600);
+  --color-slate-700: var(--slate-700);
+  --color-slate-800: var(--slate-800);
+  --color-slate-850: var(--slate-850);
+  --color-slate-900: var(--slate-900);
+  --color-slate-950: var(--slate-950);
+
+  --color-emerald-400: var(--emerald-400);
+  --color-emerald-950: var(--emerald-950);
+  --color-emerald-800: var(--emerald-800);
+
+  --color-violet-400: var(--violet-400);
+  --color-violet-950: var(--violet-950);
+  --color-violet-800: var(--violet-800);
+
+  --color-amber-400: var(--amber-400);
+  --color-amber-950: var(--amber-950);
+  --color-amber-800: var(--amber-800);
+
+  --color-red-400: var(--red-400);
+  --color-red-950: var(--red-950);
+  --color-red-900: var(--red-900);
+  --color-red-800: var(--red-800);
+}
+
+:root {
+  /* Light mode variables */
+  --slate-50: #020617;
+  --slate-100: #0f172a;
+  --slate-200: #1e293b;
+  --slate-300: #334155;
+  --slate-400: #475569;
+  --slate-500: #64748b;
+  --slate-600: #94a3b8;
+  --slate-700: #cbd5e1;
+  --slate-800: #e2e8f0;
+  --slate-850: #f1f5f9;
+  --slate-900: #ffffff;
+  --slate-950: #f8fafc;
+
+  --emerald-400: #059669;
+  --emerald-950: #d1fae5;
+  --emerald-800: #a7f3d0;
+
+  --violet-400: #7c3aed;
+  --violet-950: #ede9fe;
+  --violet-800: #ddd6fe;
+
+  --amber-400: #d97706;
+  --amber-950: #fef3c7;
+  --amber-800: #fde68a;
+
+  --red-400: #dc2626;
+  --red-950: #fee2e2;
+  --red-900: #fca5a5;
+  --red-800: #fecaca;
+}
+
+.dark {
+  /* Dark mode variables */
+  --slate-50: #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+  --slate-700: #334155;
+  --slate-800: #1e293b;
+  --slate-850: #182235;
+  --slate-900: #0f172a;
+  --slate-950: #020617;
+
+  --emerald-400: #34d399;
+  --emerald-950: #064e3b;
+  --emerald-800: #065f46;
+
+  --violet-400: #a78bfa;
+  --violet-950: #2e1065;
+  --violet-800: #5b21b6;
+
+  --amber-400: #fbbf24;
+  --amber-950: #78350f;
+  --amber-800: #92400e;
+
+  --red-400: #f87171;
+  --red-950: #450a0a;
+  --red-900: #7f1d1d;
+  --red-800: #991b1b;
+}

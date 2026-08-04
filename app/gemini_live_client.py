@@ -18,10 +18,11 @@ except ImportError:
 
 from google import genai
 from google.genai import types
+from google.genai.types import AudioTranscriptionConfig
 
 from app.services.verification_service import VerificationService
 from app.services.order_service import OrderService
-from app.services.agent_service import AGENT_SYSTEM_PROMPT
+from app.utils.prompt_loader import get_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,44 @@ def _patched_ws_connect(*args, **kwargs):
 websockets.asyncio.client.connect = _patched_ws_connect
 
 
+# Global call-flow tool declarations shared across all modes
+GLOBAL_TOOL_DECLARATIONS = [
+    {
+        "name": "end_call",
+        "description": "Call this tool when the conversation is naturally finished — the user has received all the information they need and says goodbye, thanks you, or indicates they are done. This will gracefully end the phone call.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        }
+    },
+    {
+        "name": "out_of_scope",
+        "description": "Call this tool when the user asks a question that is completely unrelated to the service domain (e.g. general knowledge, weather, jokes, math). Do NOT use this for questions that are even tangentially related to the business.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "reason": {"type": "STRING", "description": "Brief description of the off-topic question."}
+            },
+            "required": ["reason"]
+        }
+    }
+]
+
+# Prompt instructions injected into every system prompt for call flow control
+CALL_FLOW_INSTRUCTIONS = """
+
+--- CALL FLOW CONTROL ---
+You have two special tools for managing the phone call lifecycle:
+
+1. **end_call**: Use this IMMEDIATELY after you deliver your final goodbye message when the user indicates they are done (e.g. "thank you", "that's all", "bye", "nothing else"). Say goodbye FIRST, then call end_call.
+2. **out_of_scope**: Use this when the user asks something completely unrelated to the service (e.g. "what is the capital of France?", "tell me a joke"). 
+   - On the FIRST out-of-scope question: warn the user politely that you can only help with service-related queries.
+   - On the SECOND out-of-scope question: inform the user the call is ending, then call end_call.
+
+CRITICAL: When the user says goodbye or thanks you and has no more questions, you MUST call the end_call tool. Do not just say goodbye and wait.
+"""
+
+
 class GeminiLiveClient:
     """Manages a real-time, low-latency audio session with Gemini Live API."""
 
@@ -45,6 +84,9 @@ class GeminiLiveClient:
         self,
         verification_service: VerificationService,
         order_service: OrderService,
+        dynamic_tools: list = None,
+        dynamic_executor = None,
+        system_prompt: str = None
     ):
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -57,18 +99,31 @@ class GeminiLiveClient:
         self.verification_service = verification_service
         self.order_service = order_service
         
+        self.dynamic_tools = dynamic_tools
+        self.dynamic_executor = dynamic_executor
+        
+        if system_prompt:
+            self.system_prompt = system_prompt + CALL_FLOW_INSTRUCTIONS
+        else:
+            prompts = get_prompts()
+            self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.") + CALL_FLOW_INSTRUCTIONS
+
+
+
 
     def _get_config(self) -> types.LiveConnectConfig:
         """Build the configuration for the live session."""
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
+            input_audio_transcription=AudioTranscriptionConfig(),
+            output_audio_transcription=AudioTranscriptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
                 )
             ),
             system_instruction=types.Content(
-                parts=[types.Part(text=AGENT_SYSTEM_PROMPT)]
+                parts=[types.Part(text=self.system_prompt)]
             )
         )
 
@@ -84,7 +139,8 @@ class GeminiLiveClient:
             # might not have a simple 'tools' parameter mapping in all versions.
             # Actually, types.LiveConnectConfig supports 'tools'. Let's add it properly.
             
-            tool_declarations = [
+            # Use dynamic tools if in dynamic mode, else fallback to hardcoded e-commerce tools
+            base_tools = self.dynamic_tools if self.dynamic_tools is not None else [
                 {
                     "name": "verify_user",
                     "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call if DOB is missing.",
@@ -109,21 +165,31 @@ class GeminiLiveClient:
                     }
                 }
             ]
+            # Always append global call-flow tools
+            tool_declarations = (base_tools or []) + GLOBAL_TOOL_DECLARATIONS
             
-            # Recreate config with tools
+            # Recreate config with tools + optimized server-side VAD for low latency
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
-                input_audio_transcription=types.AudioTranscriptionConfig(),
-                output_audio_transcription=types.AudioTranscriptionConfig(),
+                input_audio_transcription=AudioTranscriptionConfig(),
+                output_audio_transcription=AudioTranscriptionConfig(),
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
                     )
                 ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text=AGENT_SYSTEM_PROMPT)]
+                realtime_input_config=types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(
+                        disabled=False,
+                        start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                        end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                        silence_duration_ms=1200,
+                    )
                 ),
-                tools=[{"function_declarations": tool_declarations}]
+                system_instruction=types.Content(
+                    parts=[types.Part(text=self.system_prompt)]
+                ),
+                tools=[{"function_declarations": tool_declarations}] if tool_declarations else None
             )
             
             return self.client.aio.live.connect(
@@ -148,6 +214,48 @@ class GeminiLiveClient:
         """
         logger.info(f"Executing tool call: {name} with args {args}")
         
+        # Handle global call-flow tools (end_call, out_of_scope) regardless of mode
+        if name == "end_call":
+            logger.info("[CALL FLOW] end_call tool triggered — marking session for termination")
+            state["should_end"] = True
+            return types.FunctionResponse(
+                name=name,
+                id=tool_call_id,
+                response={"success": True, "message": "Call will be terminated after your goodbye message."}
+            )
+        
+        if name == "out_of_scope":
+            count = state.get("out_of_scope_count", 0) + 1
+            state["out_of_scope_count"] = count
+            reason = args.get("reason", "unknown")
+            logger.info(f"[CALL FLOW] out_of_scope tool triggered (count={count}, reason={reason})")
+            
+            if count >= 2:
+                state["should_end"] = True
+                return types.FunctionResponse(
+                    name=name,
+                    id=tool_call_id,
+                    response={
+                        "warning_level": "terminate",
+                        "out_of_scope_count": count,
+                        "message": "This is the second out-of-scope question. The call must now be terminated. Say goodbye and then call end_call."
+                    }
+                )
+            else:
+                return types.FunctionResponse(
+                    name=name,
+                    id=tool_call_id,
+                    response={
+                        "warning_level": "warning",
+                        "out_of_scope_count": count,
+                        "message": "This is the first out-of-scope question. Warn the user: 'I can only help you with questions related to our service. Please ask about that, or I will have to end the call.'"
+                    }
+                )
+        
+        # Delegate to Dynamic Executor if in dynamic mode
+        if self.dynamic_executor is not None:
+            return await self.dynamic_executor.execute(tool_call_id, name, args, state)
+            
         try:
             if name == "verify_user":
                 user_name = args.get("name", "")

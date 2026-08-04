@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
+from app.utils.prompt_loader import get_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,9 @@ class AnalyticsService:
         total_input_tokens: int,
         total_output_tokens: int,
         average_latency: float,
-        user_id: int = None
+        user_id: int = None,
+        client_id: str = None,
+        domain: str = None
     ) -> None:
         """
         Process the completed call by generating a summary/intent and storing it in DB.
@@ -50,20 +53,12 @@ class AnalyticsService:
                     text_to_summarize += f"{role}: {content}\n"
                 
                 if text_to_summarize.strip():
+                    prompts_yaml = get_prompts()
+                    system_content = prompts_yaml.get("summarization", {}).get("conversation_summary", "Summarize the call.")
                     prompt = [
                         {
                             "role": "system", 
-                            "content": (
-                                "You are an AI assistant that analyzes customer service calls. "
-                                "Read the conversation and return a JSON object with EXACTLY two keys: 'summary' and 'intent'.\n"
-                                "1. 'summary': A detailed, human-like professional summary of the entire conversation capturing all key details, context, and outcomes. Write it as a natural paragraph around 3-5 sentences.\n"
-                                "2. 'intent': A 1-4 word classification of the user's primary goal. Choose from or adapt this taxonomy:\n"
-                                "   - Core E-commerce: 'Order Status', 'Order Modification', 'Returns/Refunds', 'Product Inquiry', 'Account/Billing'\n"
-                                "   - Support: 'Authentication', 'Escalation to Human', 'Technical Support'\n"
-                                "   - Behavior: 'Small Talk', 'Frustration/Complaint', 'Irrelevant/Prank', 'Silent/Dropped'\n"
-                                "   If none fit perfectly, create a highly descriptive 1-4 word intent.\n"
-                                "CRITICAL: You must output ONLY a valid JSON object. Use double quotes around all keys and string values."
-                            )
+                            "content": system_content
                         },
                         {"role": "user", "content": f"Conversation:\n{text_to_summarize}"}
                     ]
@@ -98,10 +93,25 @@ class AnalyticsService:
                     except Exception as e:
                         logger.error(f"Failed to generate summary/intent for {session_id}: {e}")
 
+            # Calculate token costs
+            # Gemini: $3 per 1M input, $12 per 1M output
+            gemini_input_cost = (total_input_tokens / 1_000_000) * 3.0
+            gemini_output_cost = (total_output_tokens / 1_000_000) * 12.0
+            
+            # Groq: $0 (as requested)
+            groq_input_cost = 0.0
+            groq_output_cost = 0.0
+            
+            total_input_cost = gemini_input_cost + groq_input_cost
+            total_output_cost = gemini_output_cost + groq_output_cost
+            total_cost = total_input_cost + total_output_cost
+
             # Prepare the log record
             log_data = {
                 "session_id": session_id,
                 "user_id": user_id,
+                "client_id": client_id,
+                "domain": domain,
                 "pipeline_mode": pipeline_mode,
                 "history": history,
                 "summary": summary,
@@ -113,7 +123,10 @@ class AnalyticsService:
                 "summary_output_tokens": summary_output_tokens,
                 "summary_input_output_tokens": summary_input_tokens + summary_output_tokens,
                 "total_tokens": total_input_tokens + total_output_tokens + summary_input_tokens + summary_output_tokens,
-                "average_latency": average_latency
+                "average_latency": average_latency,
+                "total_input_cost": total_input_cost,
+                "total_output_cost": total_output_cost,
+                "total_cost": total_cost
             }
 
             # Save to database

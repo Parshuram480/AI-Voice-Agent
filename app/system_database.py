@@ -5,6 +5,8 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import asyncpg
+from app.utils.prompt_loader import get_prompts
+from app.utils.encryption import encrypt, decrypt
 
 logger = logging.getLogger(__name__)
 
@@ -114,135 +116,89 @@ class SystemDatabase:
                 id                  SERIAL PRIMARY KEY,
                 client_id           INTEGER NOT NULL UNIQUE REFERENCES clients(id) ON DELETE CASCADE,
                 domain_id           INTEGER NOT NULL REFERENCES domains(id),
-                verification_query  TEXT NOT NULL,
-                data_query          TEXT NOT NULL,
+                dynamic_config      TEXT,
+                ui_config_metadata  TEXT,
                 status              VARCHAR(50) DEFAULT 'Active'
             );
+            ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS ui_config_metadata TEXT;
+            ALTER TABLE client_domain_mappings ADD COLUMN IF NOT EXISTS dynamic_config TEXT;
+            """)
+
+            # 5. Schema migration: ensure correct UNIQUE constraints (self-healing)
+            #    Legacy schema had UNIQUE(client_id, path_type) which breaks ON CONFLICT (client_id).
+            #    We drop the legacy composite constraints and ensure simple UNIQUE(client_id) exists.
+            await conn.execute("""
+            ALTER TABLE client_domain_mappings
+                DROP CONSTRAINT IF EXISTS client_domain_mappings_client_id_path_type_key;
+            """)
+            await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'client_domain_mappings_client_id_key'
+                      AND conrelid = 'client_domain_mappings'::regclass
+                ) THEN
+                    -- Remove duplicate rows keeping the one with config data
+                    DELETE FROM client_domain_mappings a
+                    USING client_domain_mappings b
+                    WHERE a.client_id = b.client_id
+                      AND a.id < b.id
+                      AND (a.dynamic_config IS NULL OR b.dynamic_config IS NOT NULL);
+                    ALTER TABLE client_domain_mappings
+                        ADD CONSTRAINT client_domain_mappings_client_id_key UNIQUE (client_id);
+                END IF;
+            END
+            $$;
+            """)
+
+            await conn.execute("""
+            ALTER TABLE client_database_configurations
+                DROP CONSTRAINT IF EXISTS client_database_configurations_client_id_path_type_key;
+            """)
+            await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'client_database_configurations_client_id_key'
+                      AND conrelid = 'client_database_configurations'::regclass
+                ) THEN
+                    -- Remove duplicate rows keeping the latest
+                    DELETE FROM client_database_configurations a
+                    USING client_database_configurations b
+                    WHERE a.client_id = b.client_id
+                      AND a.id < b.id;
+                    ALTER TABLE client_database_configurations
+                        ADD CONSTRAINT client_database_configurations_client_id_key UNIQUE (client_id);
+                END IF;
+            END
+            $$;
             """)
 
         # Seed standard domains
         await self._seed_domains()
 
     async def _seed_domains(self):
+        prompts = get_prompts()
+        cascade_prompts = prompts.get("cascade", {})
+        
         # Healthcare prompts & schema
-        hc_llm1_prompt = """You are the first point of contact for a healthcare patient assistant. Speak in 1-2 short sentences. No markdown, no emojis, no symbols. This is spoken over the phone.
+        hc_llm1_prompt = cascade_prompts.get("llm1_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("healthcare", "")
+        hc_llm2_prompt = cascade_prompts.get("llm2_base", "") + "\n" + prompts.get("multimodal", {}).get("domains", {}).get("healthcare", "")
 
-TOPICS YOU ALLOW:
-- Greetings like "Hello" or "Hi" — reply politely and briefly.
-- Audio checks like "Can you hear me?" — reply "Yes, I can hear you."
-- Any requests about checking appointment details, schedules, or patient record status.
-
-TOPICS YOU REFUSE:
-- General knowledge questions (weather, math, news, facts, people, etc). Say: "I can only help with patient record and appointment questions."
-- Requests to check someone else's records (a friend, spouse, coworker, etc). Say: "I can only help with your own account."
-- NOTE: If the user says something like "tell me what is my appointment status", DO NOT refuse them. Simply follow the VERIFICATION STEPS.
-
-TOOL RULES:
-- Never write JSON, tags, or function names out loud. Only use the tool_calls mechanism.
-- Never guess or make up patient details. If a detail isn't in the tool output, say you don't have that information.
-- Only call get_patient_records if the patient is verified.
-
-VERIFICATION STEPS (only for unverified users, do these in order):
-1. Ask: "Can I have your full name please?"
-2. Ask: "Can I have your date of birth please?"
-3. Once you have both name and date of birth, say: "So your name is [name] and your date of birth is [date], is that correct?"
-4. Wait for their confirmation.
-   - If they say Yes (or confirm it is correct): call verify_user now.
-   - If they say No, or say that something is wrong: ask "Which one is wrong, your name or your date of birth?"
-     - If they say the name is wrong, ask only for the correct name.
-     - If they say the date of birth is wrong, ask only for the correct date of birth.
-     - After getting the correction, go back to step 3.
--- Never call verify_user unless the user has explicitly confirmed BOTH pieces of info in step 3."""
-
-        hc_llm2_prompt = """You are a helpful medical assistant. 
-You are speaking over the phone. Speak in 1-2 short sentences. No markdown, no emojis, no symbols.
-You have just received information from a backend tool (e.g. appointment list or verification result).
-Your job is to read the tool output and formulate a polite, conversational reply to the user based on the tool result.
-If the tool says verification failed, explain why politely and ask for their information again.
-If the tool provides appointment details, summarize them briefly and politely. For example: "Your appointment with Dr. Sarah Connor is scheduled for July 20, 2026."
-DO NOT invent information. DO NOT write JSON or tags out loud."""
-
-        hc_tools = [
+        # Generic Base Tools for all domains
+        base_tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "verify_user",
-                    "description": "Verifies patient account AND fetches their records automatically. REQUIRES BOTH full name and DOB. NEVER call this tool until the user has explicitly answered 'Yes' to confirm their Name and DOB.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Patient's full name."},
-                            "dob": {"type": "string", "description": "YYYY-MM-DD. Ask for missing info (e.g. year) if incomplete."}
-                        },
-                        "required": ["name", "dob"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_patient_records",
-                    "description": "Fetches medical records and appointments for verified patient. CRITICAL: NEVER call this tool if the user is not verified yet.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Optional. Automatically ignored by backend."},
-                            "dob": {"type": "string", "description": "Optional. Automatically ignored by backend."}
-                        }
-                    }
-                }
-            }
-        ]
-
-        # Order Tracking prompts & schema
-        ot_llm1_prompt = """You are the first point of contact for an order system. Speak in 1-2 short sentences. No markdown, no emojis, no symbols. This is spoken over the phone.
-
-TOPICS YOU ALLOW:
-- Greetings like "Hello" or "Hi" — reply politely and briefly.
-- Audio checks like "Can you hear me?" — reply "Yes, I can hear you."
-- Any requests about order status, tracking, or delivery.
-
-TOPICS YOU REFUSE:
-- General knowledge questions (weather, math, news, facts, people, etc). Say: "I can only help with order related questions."
-- Requests to check someone else's order (a friend, spouse, coworker, etc). Say: "I can only help with your own account."
-- NOTE: If the user says something like "tell me what is my orders status", DO NOT refuse them. Simply follow the VERIFICATION STEPS.
-
-TOOL RULES:
-- Never write JSON, tags, or function names out loud. Only use the tool_calls mechanism.
-- Never guess or make up order details (like costs or prices). If a detail isn't in the tool output, say you don't have that information.
-- Only call get_order_status if the user is verified.
-
-VERIFICATION STEPS (only for unverified users, do these in order):
-1. Ask: "Can I have your full name please?"
-2. Ask: "Can I have your date of birth please?"
-3. Once you have both name and date of birth, say: "So your name is [name] and your date of birth is [date], is that correct?"
-4. Wait for their confirmation.
-   - If they say Yes (or confirm it is correct): call verify_user now.
-   - If they say No, or say that something is wrong (e.g. "My name is wrong"): ask "Which one is wrong, your name or your date of birth?"
-     - If they say the name is wrong, ask only for the correct name.
-     - If they say the date of birth is wrong, ask only for the correct date of birth.
-     - After getting the correction, go back to step 3.
--- Never call verify_user unless the user has explicitly confirmed BOTH pieces of info in step 3."""
-
-        ot_llm2_prompt = """You are a helpful customer support agent for an order system. 
-You are speaking over the phone. Speak in 1-2 short sentences. No markdown, no emojis, no symbols.
-You have just received information from a backend tool (e.g. order status or verification result).
-Your job is to read the tool output and formulate a polite, conversational reply to the user based on the tool result.
-If the tool says verification failed, explain why politely and ask for their information again.
-If the tool provides order details, summarize them briefly and politely.
-DO NOT invent information. DO NOT write JSON or tags out loud."""
-
-        ot_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "verify_user",
-                    "description": "Verifies account AND fetches their orders automatically. REQUIRES BOTH full name and DOB. NEVER call this tool until the user has explicitly answered 'Yes' to confirm their Name and DOB.",
+                    "description": "Verifies user account AND fetches their records automatically. REQUIRES BOTH the defined name and verification fields. NEVER call this tool until the user has explicitly confirmed their verification details.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "User's full name."},
-                            "dob": {"type": "string", "description": "YYYY-MM-DD. Ask for missing info (e.g. year) if incomplete."}
+                            "dob": {"type": "string", "description": "Verification field (e.g. YYYY-MM-DD or Phone number)."}
                         },
                         "required": ["name", "dob"]
                     }
@@ -251,8 +207,8 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
             {
                 "type": "function",
                 "function": {
-                    "name": "get_order_status",
-                    "description": "Fetches latest orders for verified user. CRITICAL: NEVER call this tool if the user is not verified yet.",
+                    "name": "get_records",
+                    "description": "Fetches associated records and data for the verified user. CRITICAL: NEVER call this tool if the user is not verified yet.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -276,7 +232,7 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
                 "Medical patient assistant for checking appointments and patient records.",
                 hc_llm1_prompt,
                 hc_llm2_prompt,
-                json.dumps(hc_tools)
+                json.dumps(base_tools)
             )
 
             # Order Tracking Seed
@@ -287,9 +243,9 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
             """,
                 "Order Tracking",
                 "Customer support voice agent for tracking and checking order delivery status.",
-                ot_llm1_prompt,
-                ot_llm2_prompt,
-                json.dumps(ot_tools)
+                f"{prompts.get('cascade', {}).get('llm1_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get('order tracking', '')}",
+                f"{prompts.get('cascade', {}).get('llm2_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get('order tracking', '')}",
+                json.dumps(base_tools)
             )
 
             # Other domains
@@ -305,12 +261,16 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
                 ("Ecommerce", "Store cart status check and support")
             ]
             for name, desc in other_domains:
+                domain_key = name.lower()
                 await conn.execute("""
                 INSERT INTO domains (name, description, system_prompt_llm1, system_prompt_llm2, tools_schema)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (name) DO NOTHING
                 """,
-                    name, desc, ot_llm1_prompt, ot_llm2_prompt, json.dumps(ot_tools)
+                    name, desc, 
+                    f"{prompts.get('cascade', {}).get('llm1_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get(domain_key, '')}", 
+                    f"{prompts.get('cascade', {}).get('llm2_base', '')}\n{prompts.get('multimodal', {}).get('domains', {}).get(domain_key, '')}", 
+                    json.dumps(base_tools)
                 )
 
     async def get_domains(self) -> List[Dict[str, Any]]:
@@ -351,30 +311,19 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
                     db_config.get("port"),
                     db_config["db_name"],
                     db_config.get("username"),
-                    db_config.get("password"),
+                    encrypt(db_config.get("password")),
                     db_config.get("schema_name"),
                     1 if db_config.get("enable_ssl") else 0,
                     1 if db_config.get("trust_server_certificate") else 0,
                     db_config.get("connection_timeout", 5),
-                    db_config.get("connection_string")
+                    encrypt(db_config.get("connection_string"))
                 )
 
-                # 3. Mappings queries
-                domain_name = await conn.fetchval("SELECT name FROM domains WHERE id = $1", domain_id)
-                if not domain_name:
-                    domain_name = "Order Tracking"
-
-                if domain_name == "Healthcare":
-                    v_query = "SELECT id, full_name, date_of_birth, phone FROM patients WHERE LOWER(full_name) = ? AND date_of_birth = ? AND deleted_at IS NULL LIMIT 1"
-                    d_query = "SELECT appointment_date, doctor_name, reason, status FROM appointments WHERE patient_id = ? AND deleted_at IS NULL ORDER BY appointment_date DESC"
-                else:
-                    v_query = "SELECT id, full_name, date_of_birth, phone FROM customers WHERE LOWER(full_name) = ? AND date_of_birth = ? AND deleted_at IS NULL LIMIT 1"
-                    d_query = "SELECT order_number, status, estimated_arrival, items_summary FROM orders WHERE customer_id = ? AND deleted_at IS NULL ORDER BY created_at DESC"
-
+                # 3. Mappings queries (Legacy seeding removed for dynamic config)
                 await conn.execute("""
-                INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query)
-                VALUES ($1, $2, $3, $4)
-                """, client_id, domain_id, v_query, d_query)
+                INSERT INTO client_domain_mappings (client_id, domain_id)
+                VALUES ($1, $2)
+                """, client_id, domain_id)
 
                 await tx.commit()
                 return client_id
@@ -399,7 +348,12 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM client_database_configurations WHERE client_id = $1", client_id)
-            return dict(row) if row else None
+            if not row:
+                return None
+            config = dict(row)
+            config["password"] = decrypt(config.get("password"))
+            config["connection_string"] = decrypt(config.get("connection_string"))
+            return config
 
     async def save_client_db_config(self, client_id: int, db_config: Dict[str, Any]):
         pool = await self._get_conn()
@@ -428,12 +382,12 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
                 db_config.get("port"),
                 db_config["db_name"],
                 db_config.get("username"),
-                db_config.get("password"),
+                encrypt(db_config.get("password")),
                 db_config.get("schema_name"),
                 1 if db_config.get("enable_ssl") else 0,
                 1 if db_config.get("trust_server_certificate") else 0,
                 db_config.get("connection_timeout", 5),
-                db_config.get("connection_string")
+                encrypt(db_config.get("connection_string"))
             )
 
     async def get_client_domain_mapping(self, client_id: int) -> Optional[Dict[str, Any]]:
@@ -447,14 +401,42 @@ DO NOT invent information. DO NOT write JSON or tags out loud."""
             """, client_id)
             return dict(row) if row else None
 
-    async def update_client_domain_mapping(self, client_id: int, domain_id: int, verification_query: str, data_query: str):
+    async def update_client_domain_mapping(self, client_id: int, domain_id: int, dynamic_config: str, ui_config_metadata: Optional[str] = None):
         pool = await self._get_conn()
         async with pool.acquire() as conn:
             await conn.execute("""
-            INSERT INTO client_domain_mappings (client_id, domain_id, verification_query, data_query)
+            INSERT INTO client_domain_mappings (client_id, domain_id, dynamic_config, ui_config_metadata)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (client_id) DO UPDATE SET
                 domain_id = EXCLUDED.domain_id,
-                verification_query = EXCLUDED.verification_query,
-                data_query = EXCLUDED.data_query
-            """, client_id, domain_id, verification_query, data_query)
+                dynamic_config = EXCLUDED.dynamic_config,
+                ui_config_metadata = EXCLUDED.ui_config_metadata
+            """, client_id, domain_id, dynamic_config, ui_config_metadata)
+
+    async def update_client_profile(self, client_id: int, company_name: str, client_name: str, email: str, phone: Optional[str], domain_id: int):
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                # 1. Update basic client profile details
+                await conn.execute("""
+                UPDATE clients
+                SET company_name = $1, client_name = $2, email = $3, phone = $4
+                WHERE id = $5
+                """, company_name, client_name, email, phone, client_id)
+
+                # 2. Update client domain mapping mapping
+                await conn.execute("""
+                UPDATE client_domain_mappings
+                SET domain_id = $1
+                WHERE client_id = $2
+                """, domain_id, client_id)
+
+                await tx.commit()
+            except Exception as e:
+                await tx.rollback()
+                logger.error(f"Failed to execute profile updates: {e}")
+                raise e
+
+

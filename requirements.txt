@@ -27,3 +27,6 @@ langsmith
 openai
 pyodbc
 pymysql
+PyYAML>=6.0.1
+cryptography>=41.0.0
+python-jose[cryptography]

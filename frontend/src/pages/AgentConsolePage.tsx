@@ -6,6 +6,7 @@ import MicIcon from '@mui/icons-material/Mic';
 import StopIcon from '@mui/icons-material/Stop';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import { useNavigate } from 'react-router-dom';
 const WS_BASE = 'ws://localhost:8000';
 
 interface Client {
@@ -20,7 +21,6 @@ interface AgentConsoleProps {
   client: Client;
   domainName: string;
   pipelineMode: string;
-  onBackToDashboard: () => void;
 }
 
 interface LogEntry {
@@ -29,7 +29,8 @@ interface LogEntry {
   message: string;
 }
 
-export default function AgentConsolePage({ client, domainName, pipelineMode, onBackToDashboard }: AgentConsoleProps) {
+export default function AgentConsolePage({ client, domainName, pipelineMode }: AgentConsoleProps) {
+  const navigate = useNavigate();
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [phase, setPhase] = useState<'IDLE' | 'LISTENING' | 'SPEECH_DETECTED' | 'ENDPOINTING' | 'PROCESSING' | 'SPEAKING' | 'INTERRUPTED' | 'ENDED'>('IDLE');
   const [stageStates, setStageStates] = useState<Record<string, 'idle' | 'active' | 'done' | 'error'>>({
@@ -405,11 +406,11 @@ export default function AgentConsolePage({ client, domainName, pipelineMode, onB
         <Button 
           variant="outlined"
           color="inherit"
-          onClick={onBackToDashboard} 
+          onClick={() => navigate('/agent-mode-select')} 
           startIcon={<ArrowBackIcon />}
           className="cursor-pointer"
         >
-          Back to Dashboard
+          Back to Modes
         </Button>
       </header>
 

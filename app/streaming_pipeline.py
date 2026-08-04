@@ -94,13 +94,6 @@ class StreamingVoicePipeline:
       - Multi-turn (new): process_continuous() runs a conversation loop
     """
 
-    SYSTEM_PROMPT = (
-        "You are a helpful, friendly customer support voice agent. "
-        "Assist callers with order status and general questions. "
-        "Keep responses to 1-2 sentences since they'll be spoken aloud. "
-        "Be warm, professional, direct. No markdown or formatting."
-    )
-
     def __init__(
         self,
         groq_client: GroqClient,
@@ -519,7 +512,9 @@ class StreamingVoicePipeline:
                 total_input_tokens=total_input_tokens,
                 total_output_tokens=total_output_tokens,
                 average_latency=avg_latency,
-                user_id=user_id
+                user_id=user_id,
+                client_id=kwargs.get("client_id"),
+                domain=kwargs.get("domain")
             )
         )
 
@@ -527,6 +522,7 @@ class StreamingVoicePipeline:
             "session_id": resolved_session_id,
             "total_turns": turn_index,
             "all_timings": all_timings,
+            "should_end": session_ended,
         }
 
     # =====================================================================

@@ -1,23 +1,33 @@
 """HTTP API routes for authentication and configuration."""
 
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Any, Dict, List
 from pathlib import Path
-from fastapi import APIRouter, Request, Response, HTTPException, status
+from fastapi import APIRouter, Request, Response, HTTPException, status, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 
 from app.schemas.requests import SimulateRequest
 from app.system_database import SystemDatabase, verify_password
 from app.dynamic_db_client import DynamicDbClient
+from app.services.email_service import EmailService
 
 logger = logging.getLogger(__name__)
 AUDIO_CACHE_DIR = Path("audio_cache")
 
 # Initialize central System Database
 system_db = SystemDatabase()
+email_service = EmailService()
 
 # --- Pydantic Schemas ---
+class SendOtpRequest(BaseModel):
+    email: str
+    client_name: str
+
+class VerifyOtpRequest(BaseModel):
+    email: str
+    otp: str
+
 class RegisterRequest(BaseModel):
     company_name: str
     client_name: str
@@ -40,6 +50,13 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class UpdateProfileRequest(BaseModel):
+    company_name: str
+    client_name: str
+    email: str
+    phone: Optional[str] = None
+    domain_id: int
+
 class DbConfigRequest(BaseModel):
     db_type: str
     server_name: Optional[str] = None
@@ -55,6 +72,50 @@ class DbConfigRequest(BaseModel):
 class CallRequest(BaseModel):
     phone_number: str
     client_id: Optional[int] = None
+
+class IntrospectRequest(BaseModel):
+    db_type: str
+    server_name: Optional[str] = None
+    port: Optional[int] = None
+    db_name: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    connection_timeout: Optional[int] = 5
+
+
+
+
+
+class SaveRulesRequest(BaseModel):
+    db_config: DbConfigRequest
+    domain_id: int
+    identity: dict[str, Any]
+    selected_tables: dict[str, list[str]]
+    client_id: Optional[int] = None
+    ui_config_metadata: Optional[dict[str, Any]] = None
+
+
+from app.auth_jwt import create_access_token, verify_and_get_client_id
+
+
+def get_authenticated_client_id(request: Request) -> int:
+    """Extracts client_id from Authorization Bearer JWT token header or session cookie."""
+    # 1. Bearer Token Header
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token_str = auth_header.split(" ", 1)[1].strip()
+        client_id = verify_and_get_client_id(token_str)
+        if client_id is not None:
+            return client_id
+
+    # 2. Session Cookie Fallback
+    cookie_str = request.cookies.get("session_token")
+    if cookie_str:
+        client_id = verify_and_get_client_id(cookie_str)
+        if client_id is not None:
+            return client_id
+
+    raise HTTPException(status_code=401, detail="Unauthorized: Missing, invalid, or expired JWT token.")
 
 
 def create_api_router(
@@ -76,8 +137,36 @@ def create_api_router(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @router.post("/api/auth/send-otp")
+    async def send_otp(req: SendOtpRequest):
+        """Generate and send an OTP validation code to a client's email."""
+        try:
+            existing = await system_db.get_client_by_email(req.email)
+            if existing:
+                raise HTTPException(status_code=400, detail="Email is already registered.")
+
+            await email_service.send_otp_email(req.email, req.client_name)
+            return {"success": True, "message": "Verification code sent successfully."}
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/auth/verify-otp")
+    async def verify_otp(req: VerifyOtpRequest):
+        """Verify the OTP validation code submitted by the user."""
+        try:
+            is_valid = email_service.verify_otp(req.email, req.otp)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+            return {"success": True, "message": "Email verified successfully."}
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @router.post("/api/auth/register")
-    async def register_tenant(req: RegisterRequest):
+    async def register_tenant(req: RegisterRequest, response: Response):
         """Register a new SaaS client tenant with database configuration."""
         try:
             # Check if email already registered
@@ -107,7 +196,14 @@ def create_api_router(
             }
 
             client_id = await system_db.register_client(client_data, db_config, req.domain_id)
-            return {"success": True, "client_id": client_id, "message": "Registration successful."}
+            jwt_token = create_access_token(client_id=client_id, email=req.email)
+            response.set_cookie(key="session_token", value=jwt_token, httponly=True, samesite="lax")
+            return {
+                "success": True,
+                "token": jwt_token,
+                "client_id": client_id,
+                "message": "Registration successful."
+            }
         except HTTPException as he:
             raise he
         except Exception as e:
@@ -116,7 +212,7 @@ def create_api_router(
 
     @router.post("/api/auth/login")
     async def login_tenant(req: LoginRequest, response: Response):
-        """Authenticates client and sets cookie session token."""
+        """Authenticates client and sets token/cookie."""
         client = await system_db.get_client_by_email(req.email)
         if not client:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -127,15 +223,20 @@ def create_api_router(
         if client["status"] != "Active":
             raise HTTPException(status_code=403, detail="Account is disabled.")
 
-        # Set session cookie (valid for 1 day)
+        jwt_token = create_access_token(client_id=client["id"], email=client["email"])
         response.set_cookie(
             key="session_token",
-            value=str(client["id"]),
+            value=jwt_token,
             httponly=True,
-            max_age=86400,
+            max_age=86400 * 7,
             samesite="lax"
         )
-        return {"success": True, "message": "Login successful."}
+        return {
+            "success": True,
+            "token": jwt_token,
+            "client_id": client["id"],
+            "message": "Login successful."
+        }
 
     @router.post("/api/auth/logout")
     async def logout_tenant(response: Response):
@@ -143,15 +244,51 @@ def create_api_router(
         response.delete_cookie(key="session_token")
         return {"success": True, "message": "Logged out successfully."}
 
+    @router.put("/api/auth/profile")
+    async def update_profile(req: UpdateProfileRequest, request: Request):
+        """Update client profile and industry domain details."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        # Check if the new email is already taken by another user
+        existing = await system_db.get_client_by_email(req.email)
+        if existing and existing["id"] != client_id:
+            raise HTTPException(status_code=400, detail="Email is already taken by another account.")
+
+        try:
+            await system_db.update_client_profile(
+                client_id=client_id,
+                company_name=req.company_name,
+                client_name=req.client_name,
+                email=req.email,
+                phone=req.phone,
+                domain_id=req.domain_id
+            )
+            # Retrieve updated client data
+            updated_client = await system_db.get_client_by_id(client_id)
+            updated_client.pop("password_hash", None)
+            
+            # Retrieve new domain name
+            domains = await system_db.get_domains()
+            domain_name = next((d["name"] for d in domains if d["id"] == req.domain_id), "Unknown")
+            
+            return {
+                "success": True, 
+                "message": "Profile updated successfully.",
+                "client": updated_client,
+                "domain_name": domain_name
+            }
+        except Exception as e:
+            logger.error(f"Error updating profile: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @router.get("/api/auth/me")
     async def get_current_client(request: Request):
-        """Retrieves details of the currently logged-in client."""
-        client_id_str = request.cookies.get("session_token")
-        if not client_id_str:
-            raise HTTPException(status_code=401, detail="Unauthorized session.")
-        
+        """Retrieves details of the currently logged-in client via token or cookie."""
         try:
-            client_id = int(client_id_str)
+            client_id = get_authenticated_client_id(request)
             request.app.state.last_active_client_id = client_id
             client = await system_db.get_client_by_id(client_id)
             if not client:
@@ -160,26 +297,27 @@ def create_api_router(
             db_config = await system_db.get_client_db_config(client_id)
             mapping = await system_db.get_client_domain_mapping(client_id)
             
-            # Strip sensitive data before returning
             client.pop("password_hash", None)
             if db_config:
                 db_config.pop("password", None)
             
             import os
             pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
+            jwt_token = create_access_token(client_id=client_id, email=client.get("email", ""))
             return {
+                "token": jwt_token,
                 "client": client,
                 "db_config": db_config,
                 "pipeline_mode": pipeline_mode,
                 "domain": {
                     "id": mapping["domain_id"] if mapping else None,
                     "name": mapping["domain_name"] if mapping else None,
-                    "verification_query": mapping["verification_query"] if mapping else None,
-                    "data_query": mapping["data_query"] if mapping else None
+                    "dynamic_config": mapping["dynamic_config"] if mapping else None,
+                    "ui_config_metadata": mapping["ui_config_metadata"] if mapping else None,
                 } if mapping else None
             }
         except ValueError:
-            raise HTTPException(status_code=401, detail="Invalid session cookie.")
+            raise HTTPException(status_code=401, detail="Invalid token format.")
 
     @router.post("/api/tenant/test-connection")
     async def test_db_connection(req: DbConfigRequest):
@@ -230,6 +368,133 @@ def create_api_router(
             await system_db.save_client_db_config(client_id, config)
             return {"success": True, "message": "Database configuration saved successfully."}
         except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/tenant/upload-sqlite")
+    async def upload_sqlite_db(file: UploadFile = File(...)):
+        """Uploads an SQLite database file (.db, .sqlite) to the server."""
+        try:
+            filename = file.filename or "uploaded_database.db"
+            if not (filename.endswith(".db") or filename.endswith(".sqlite") or filename.endswith(".sqlite3")):
+                filename += ".db"
+                
+            upload_dir = Path("uploads/db_files")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            save_path = upload_dir / filename
+            content = await file.read()
+            with open(save_path, "wb") as f:
+                f.write(content)
+                
+            db_path_str = str(save_path).replace("\\", "/")
+            return {
+                "success": True,
+                "db_name": db_path_str,
+                "message": f"Database '{filename}' uploaded successfully."
+            }
+        except Exception as e:
+            logger.error(f"Error uploading SQLite database: {e}")
+            raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+
+    @router.post("/api/tenant/db-config/introspect")
+    async def introspect_db_schema(req: IntrospectRequest):
+        """Introspects database schema to extract tables and column names."""
+        config = {
+            "db_type": req.db_type,
+            "db_name": req.db_name,
+            "server_name": req.server_name,
+            "port": req.port,
+            "username": req.username,
+            "password": req.password,
+            "connection_timeout": req.connection_timeout
+        }
+        client = DynamicDbClient(config)
+        success, message = await client.test_connection()
+        if not success:
+            return {"success": False, "message": message, "schema": {}}
+        
+        schema = await client.introspect_schema_full()
+        return {"success": True, "message": "Database introspected successfully.", "schema": schema}
+
+
+
+
+
+    @router.post("/api/tenant/db-config/save-rules")
+    async def save_db_rules(req: SaveRulesRequest, request: Request, response: Response):
+        """Saves DB configuration, SQL rules, and UI metadata for tenant."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            if req.client_id:
+                client_id = req.client_id
+                response.set_cookie(key="session_token", value=str(client_id), httponly=True, samesite="lax")
+            else:
+                raise
+                
+        try:
+            existing = await system_db.get_client_db_config(client_id)
+            
+            passwd = req.db_config.password
+            if not passwd and existing:
+                passwd = existing.get("password")
+                
+            config = {
+                "db_type": req.db_config.db_type,
+                "server_name": req.db_config.server_name,
+                "port": req.db_config.port,
+                "db_name": req.db_config.db_name,
+                "username": req.db_config.username,
+                "password": passwd,
+                "schema_name": req.db_config.schema_name,
+                "enable_ssl": req.db_config.enable_ssl,
+                "trust_server_certificate": req.db_config.trust_server_certificate,
+                "connection_timeout": req.db_config.connection_timeout
+            }
+            await system_db.save_client_db_config(client_id, config)
+            
+            import json
+            dynamic_config_dict = {
+                "identity": req.identity,
+                "selected_tables": req.selected_tables
+            }
+            dyn_json = json.dumps(dynamic_config_dict)
+            meta_json = json.dumps(req.ui_config_metadata) if req.ui_config_metadata else None
+            await system_db.update_client_domain_mapping(
+                client_id=client_id,
+                domain_id=req.domain_id,
+                dynamic_config=dyn_json,
+                ui_config_metadata=meta_json
+            )
+            return {"success": True, "message": "Database and AI voice agent rules saved successfully!"}
+        except Exception as e:
+            logger.error(f"Error saving rules: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/tenant/refresh-schema")
+    async def refresh_schema(request: Request):
+        """Force-refresh the schema metadata for the logged-in tenant's database."""
+        client_id_str = request.cookies.get("session_token")
+        if not client_id_str:
+            raise HTTPException(status_code=401, detail="Unauthorized session.")
+        
+        try:
+            client_id = int(client_id_str)
+            db_config = await system_db.get_client_db_config(client_id)
+            if not db_config:
+                raise HTTPException(status_code=404, detail="No database configuration found.")
+            
+            from app.services.schema_service import SchemaService
+            schema_service = SchemaService(dict(db_config))
+            metadata = await schema_service.refresh()
+            
+            return {
+                "success": True,
+                "tables_found": list(metadata["tables"].keys()),
+                "relationships_found": len(metadata["relationships"]),
+            }
+        except Exception as e:
+            logger.error(f"Error refreshing schema: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/api/twilio/call")

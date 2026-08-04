@@ -5,14 +5,18 @@ import FormControl from '@mui/material/FormControl';
 import InputLabel from '@mui/material/InputLabel';
 import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Checkbox from '@mui/material/Checkbox';
 import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
-import WifiIcon from '@mui/icons-material/Wifi';
-import AssignmentIndIcon from '@mui/icons-material/AssignmentInd';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogContentText from '@mui/material/DialogContentText';
+import DialogActions from '@mui/material/DialogActions';
+import Snackbar from '@mui/material/Snackbar';
 
-const API_BASE = 'http://localhost:8000';
+import { useNavigate } from 'react-router-dom';
+import { authService } from '../services/authService';
+import { domainService } from '../services/domainService';
 
 interface Domain {
   id: number;
@@ -21,62 +25,50 @@ interface Domain {
   status: string;
 }
 
-interface RegisterProps {
-  onRegisterSuccess: () => void;
-  onGoToLogin: () => void;
-}
-
-export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: RegisterProps) {
+export default function RegisterPage() {
+  const navigate = useNavigate();
   const [companyName, setCompanyName] = useState('');
   const [clientName, setClientName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [phone, setPhone] = useState('');
-  const [domainId, setDomainId] = useState<number | ''>('');
+  const [domainId, setDomainId] = useState<number>(1);
   const [domains, setDomains] = useState<Domain[]>([]);
 
-  // DB Config
-  const [dbType, setDbType] = useState('sqlite');
-  const [dbName, setDbName] = useState('healthcare_client.db');
-  const [serverAddress, setServerAddress] = useState('');
-  const [port, setPort] = useState<number | ''>('');
-  const [username, setUsername] = useState('');
-  const [passwordDb, setPasswordDb] = useState('');
-  const [schemaName, setSchemaName] = useState('');
-  const [enableSsl, setEnableSsl] = useState(false);
-  const [trustCert, setTrustCert] = useState(false);
-  const [timeout, setTimeoutSec] = useState(5);
+  // Validation errors state
+  const [errors, setErrors] = useState<{
+    companyName?: string;
+    clientName?: string;
+    email?: string;
+    password?: string;
+    confirmPassword?: string;
+  }>({});
 
-  const [statusMsg, setStatusMsg] = useState('');
-  const [statusType, setStatusType] = useState<'success' | 'error' | ''>('');
-  const [testingConnection, setTestingConnection] = useState(false);
+  // Floating toaster notification state
+  const [toast, setToast] = useState<{
+    open: boolean;
+    message: string;
+    severity: 'success' | 'error' | 'info' | 'warning';
+  }>({
+    open: false,
+    message: '',
+    severity: 'success',
+  });
+
   const [submitting, setSubmitting] = useState(false);
 
-  const handleDomainChange = (selectedId: number, currentDomains: Domain[] = domains) => {
-    setDomainId(selectedId);
-    const selectedDomain = currentDomains.find(d => d.id === selectedId);
-    if (selectedDomain) {
-      if (selectedDomain.name === 'Order Tracking') {
-        setDbType('postgresql');
-        setDbName('voice_agent');
-        setPort(5432);
-        setUsername('postgres');
-        setServerAddress('localhost');
-      } else if (selectedDomain.name === 'Healthcare') {
-        setDbType('sqlite');
-        setDbName('healthcare_client.db');
-        setPort('');
-        setUsername('');
-        setServerAddress('');
-      }
-    }
-  };
+  // OTP Verification flow state
+  const [showOtpModal, setShowOtpModal] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpError, setOtpError] = useState('');
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
+  const [resendingOtp, setResendingOtp] = useState(false);
 
   useEffect(() => {
     async function loadDomains() {
       try {
-        const response = await fetch(`${API_BASE}/api/domains`);
-        const data = await response.json();
+        const data = await domainService.getDomains();
         data.sort((a: Domain, b: Domain) => {
           if (a.name === 'Healthcare') return -1;
           if (b.name === 'Healthcare') return 1;
@@ -86,7 +78,7 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
         });
         setDomains(data);
         if (data.length > 0) {
-          handleDomainChange(data[0].id, data);
+          setDomainId(data[0].id);
         }
       } catch (err) {
         console.error('Failed to load domains', err);
@@ -95,379 +87,402 @@ export default function RegisterPage({ onRegisterSuccess, onGoToLogin }: Registe
     loadDomains();
   }, []);
 
-  const handleDbTypeChange = (type: string) => {
-    setDbType(type);
-    if (type === 'sqlite') {
-      setDbName('healthcare_client.db');
-    } else {
-      setDbName('voice_agent');
-      if (type === 'postgresql') setPort(5432);
-      else if (type === 'mysql') setPort(3306);
-      else if (type === 'sql server') setPort(1433);
+  const showToast = (message: string, severity: 'success' | 'error' | 'info' | 'warning') => {
+    setToast({ open: true, message, severity });
+  };
+
+  const handleCloseToast = (_event?: React.SyntheticEvent | Event, reason?: string) => {
+    if (reason === 'clickaway') return;
+    setToast((prev) => ({ ...prev, open: false }));
+  };
+
+  const validateForm = () => {
+    const newErrors: typeof errors = {};
+    if (!companyName.trim()) {
+      newErrors.companyName = 'Company name is required';
     }
-  };
-
-  const getDbConfigObject = () => {
-    return {
-      db_type: dbType,
-      server_name: serverAddress || null,
-      port: port ? Number(port) : null,
-      db_name: dbName,
-      username: username || null,
-      password: passwordDb || null,
-      schema_name: schemaName || null,
-      enable_ssl: enableSsl,
-      trust_server_certificate: trustCert,
-      connection_timeout: timeout
-    };
-  };
-
-  const handleTestConnection = async () => {
-    setStatusMsg('');
-    setStatusType('');
-    setTestingConnection(true);
-    try {
-      const config = getDbConfigObject();
-      const response = await fetch(`${API_BASE}/api/tenant/test-connection`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      const data = await response.json();
-      if (data.success) {
-        setStatusType('success');
-        setStatusMsg('Database connection test successful!');
-      } else {
-        setStatusType('error');
-        setStatusMsg('Connection failed: ' + data.message);
-      }
-    } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg('Error testing connection: ' + err.message);
-    } finally {
-      setTestingConnection(false);
+    if (!clientName.trim()) {
+      newErrors.clientName = 'Contact full name is required';
     }
+    if (!email.trim()) {
+      newErrors.email = 'Email address is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      newErrors.email = 'Please enter a valid email address';
+    }
+    if (!password) {
+      newErrors.password = 'Password is required';
+    } else if (password.length < 6) {
+      newErrors.password = 'Password must be at least 6 characters';
+    }
+    if (!confirmPassword) {
+      newErrors.confirmPassword = 'Confirm password is required';
+    } else if (password !== confirmPassword) {
+      newErrors.confirmPassword = 'Passwords do not match';
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setStatusMsg('');
-    setStatusType('');
+    if (!validateForm()) {
+      showToast('Please fill all the required fields', 'error');
+      return;
+    }
+
     setSubmitting(true);
-
-    const config = getDbConfigObject();
-    const payload = {
-      company_name: companyName,
-      client_name: clientName,
-      email,
-      password,
-      phone: phone || null,
-      domain_id: Number(domainId),
-      db_type: config.db_type,
-      server_name: config.server_name,
-      port: config.port,
-      db_name: config.db_name,
-      username: config.username,
-      password_db: config.password,
-      schema_name: config.schema_name,
-      enable_ssl: config.enable_ssl,
-      trust_server_certificate: config.trust_server_certificate,
-      connection_timeout: config.connection_timeout
-    };
-
     try {
-      const response = await fetch(`${API_BASE}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setStatusType('success');
-        setStatusMsg('Registration successful! Redirecting to login...');
-        setTimeout(() => {
-          onRegisterSuccess();
-        }, 1500);
+      // Step 1: Request OTP code send
+      const res = await authService.sendOtp(email, clientName);
+      if (res.success) {
+        setOtpError('');
+        setOtpCode('');
+        setShowOtpModal(true);
+        showToast('Verification code sent successfully to your email!', 'success');
       } else {
-        setStatusType('error');
-        setStatusMsg('Registration failed: ' + (data.detail || 'Unknown error'));
+        showToast(res.detail || 'Failed to dispatch verification email.', 'error');
       }
     } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg('Error registering: ' + err.message);
+      showToast(err.message || 'Error requesting verification code.', 'error');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const isSqlite = dbType === 'sqlite';
+  const handleVerifyAndRegister = async () => {
+    setOtpError('');
+    if (!otpCode.trim() || otpCode.length !== 6) {
+      setOtpError('Please enter a valid 6-digit verification code.');
+      return;
+    }
+
+    setVerifyingOtp(true);
+    try {
+      // Step 2: Validate OTP Code on server
+      const verifyRes = await authService.verifyOtp(email, otpCode);
+      if (verifyRes.success) {
+        // Step 3: Complete actual registration
+        const payload = {
+          company_name: companyName,
+          client_name: clientName,
+          email,
+          password,
+          phone,
+          domain_id: domainId,
+          // Placeholder settings to keep Pydantic schemas content
+          db_type: 'sqlite',
+          db_name: 'placeholder.db',
+          server_name: '',
+          port: 5432,
+          username: '',
+          password_db: '',
+          schema_name: '',
+          enable_ssl: false,
+          trust_server_certificate: false,
+          connection_timeout: 5,
+        };
+
+        const regRes = await authService.register(payload);
+        if (regRes.success && regRes.token) {
+          localStorage.setItem('auth_token', regRes.token);
+          setShowOtpModal(false);
+          showToast('Account created successfully!', 'success');
+          setTimeout(() => navigate('/'), 1200);
+        } else {
+          setOtpError(regRes.detail || 'Registration failed after validation.');
+          showToast(regRes.detail || 'Registration failed.', 'error');
+        }
+      } else {
+        setOtpError(verifyRes.detail || 'Invalid or expired passcode.');
+        showToast(verifyRes.detail || 'OTP verification failed.', 'error');
+      }
+    } catch (err: any) {
+      setOtpError(err.message || 'Verification failed. Please retry.');
+      showToast(err.message || 'Error verifying OTP.', 'error');
+    } finally {
+      setVerifyingOtp(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    setResendingOtp(true);
+    setOtpError('');
+    try {
+      const res = await authService.sendOtp(email, clientName);
+      if (res.success) {
+        setOtpError('A new verification code has been sent to your email.');
+        showToast('Verification code resent successfully.', 'success');
+      } else {
+        setOtpError(res.detail || 'Resend request failed.');
+        showToast(res.detail || 'Resend request failed.', 'error');
+      }
+    } catch (err: any) {
+      setOtpError(err.message || 'Error resending verification code.');
+      showToast(err.message || 'Error resending verification code.', 'error');
+    } finally {
+      setResendingOtp(false);
+    }
+  };
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8">
-      <header className="text-center mb-8">
-        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-500 bg-clip-text text-transparent mb-2">
-          Tenant Registration
-        </h1>
-        <p className="text-slate-400 text-sm md:text-base uppercase tracking-wider font-semibold">
-          Register your company and configure your AI Voice Agent database
-        </p>
-      </header>
+    <div className="min-h-screen py-12 px-4 flex flex-col justify-center items-center">
+      <div className="w-full max-w-xl space-y-8 animate-slide-up">
+        <div className="text-center">
+          <h1 className="text-4xl font-extrabold bg-gradient-to-r from-violet-400 via-pink-500 to-emerald-400 bg-clip-text text-transparent pb-2">
+            Create Client Account
+          </h1>
+          <p className="text-slate-400 text-sm mt-1">
+            Register your company details and choose your voice agent domain to get started.
+          </p>
+        </div>
 
-      <div className="bg-slate-900/50 backdrop-blur-xl border border-slate-800/85 rounded-2xl p-6 md:p-8 shadow-2xl shadow-slate-950/60">
-        <form onSubmit={handleSubmit} className="space-y-8">
+        {/* Client Account Form */}
+        <form onSubmit={handleRegisterSubmit} noValidate className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
+          <h3 className="text-lg font-bold text-slate-100 border-b border-slate-800 pb-3">
+            Account & Company Details
+          </h3>
 
-          {/* Section 1: Client Info */}
-          <div>
-            <h2 className="text-md font-bold text-violet-400 uppercase tracking-wider border-b border-slate-800 pb-2 mb-6 select-none">
-              Client Details
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <TextField
-                label="Company Name"
-                placeholder="Acme Corp"
-                variant="outlined"
-                fullWidth
-                value={companyName}
-                onChange={e => setCompanyName(e.target.value)}
-                required
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Contact Name"
-                placeholder="John Doe"
-                variant="outlined"
-                fullWidth
-                value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                required
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Email Address"
-                placeholder="john@acme.com"
-                type="email"
-                variant="outlined"
-                fullWidth
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Password"
-                placeholder="••••••••"
-                type="password"
-                variant="outlined"
-                fullWidth
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Phone Number (Optional)"
-                placeholder="+15551234567"
-                variant="outlined"
-                fullWidth
-                value={phone}
-                onChange={e => setPhone(e.target.value)}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <FormControl fullWidth required>
-                <InputLabel shrink id="domain-select-label">Select Agent Domain</InputLabel>
-                <Select
-                  labelId="domain-select-label"
-                  label="Select Agent Domain"
-                  value={domainId}
-                  displayEmpty
-                  onChange={e => handleDomainChange(Number(e.target.value))}
-                  notched
-                >
-                  {domains.map(d => (
-                    <MenuItem key={d.id} value={d.id}>{d.name} — {d.description}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </div>
-          </div>
-
-          {/* Section 2: Database Config */}
-          <div>
-            <h2 className="text-md font-bold text-violet-400 uppercase tracking-wider border-b border-slate-800 pb-2 mb-2 select-none">
-              Client Database Configuration
-            </h2>
-            <p className="text-slate-400 text-sm mb-6 select-none">
-              Specify the connection settings for the database hosting your business records.
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <FormControl fullWidth required>
-                <InputLabel shrink id="db-type-label">Database Type</InputLabel>
-                <Select
-                  labelId="db-type-label"
-                  label="Database Type"
-                  value={dbType}
-                  onChange={e => handleDbTypeChange(e.target.value as string)}
-                  notched
-                >
-                  <MenuItem value="sqlite">SQLite</MenuItem>
-                  <MenuItem value="postgresql">PostgreSQL</MenuItem>
-                  <MenuItem value="mysql">MySQL</MenuItem>
-                  <MenuItem value="sql server">SQL Server</MenuItem>
-                  <MenuItem value="oracle">Oracle</MenuItem>
-                </Select>
-              </FormControl>
-              <TextField
-                label="Database Name / Path"
-                placeholder="healthcare_client.db"
-                variant="outlined"
-                fullWidth
-                value={dbName}
-                onChange={e => setDbName(e.target.value)}
-                required
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Server Address"
-                placeholder="localhost"
-                variant="outlined"
-                fullWidth
-                value={serverAddress}
-                onChange={e => setServerAddress(e.target.value)}
-                disabled={isSqlite}
-                sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Port"
-                placeholder="5432"
-                type="number"
-                variant="outlined"
-                fullWidth
-                value={port}
-                onChange={e => setPort(e.target.value ? Number(e.target.value) : '')}
-                disabled={isSqlite}
-                sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Username"
-                placeholder="postgres"
-                variant="outlined"
-                fullWidth
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                disabled={isSqlite}
-                sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Password"
-                placeholder="••••••••"
-                type="password"
-                variant="outlined"
-                fullWidth
-                value={passwordDb}
-                onChange={e => setPasswordDb(e.target.value)}
-                disabled={isSqlite}
-                sx={{ opacity: isSqlite ? 0.45 : 1.0 }}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Schema Name (Optional)"
-                placeholder="public"
-                variant="outlined"
-                fullWidth
-                value={schemaName}
-                onChange={e => setSchemaName(e.target.value)}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <TextField
-                label="Timeout (Seconds)"
-                type="number"
-                variant="outlined"
-                fullWidth
-                value={timeout}
-                onChange={e => setTimeoutSec(Number(e.target.value))}
-                slotProps={{ inputLabel: { shrink: true } }}
-              />
-              <div className="flex items-center space-x-3 pt-3">
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={enableSsl}
-                      onChange={e => setEnableSsl(e.target.checked)}
-                      color="primary"
-                    />
-                  }
-                  label="Enable SSL"
-                />
-              </div>
-              <div className="flex items-center space-x-3 pt-3">
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={trustCert}
-                      onChange={e => setTrustCert(e.target.checked)}
-                      color="primary"
-                    />
-                  }
-                  label="Trust Server Certificate"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-4 pt-4">
-            <Button
-              type="button"
-              variant="outlined"
-              color="inherit"
-              size="large"
-              onClick={handleTestConnection}
-              disabled={testingConnection}
-              startIcon={testingConnection ? <CircularProgress size={20} color="inherit" /> : <WifiIcon />}
-              className="flex-1 cursor-pointer"
-              sx={{ py: 1.5 }}
-            >
-              {testingConnection ? 'Testing...' : 'Test Connection'}
-            </Button>
-            <Button
-              type="submit"
-              variant="contained"
-              color="primary"
-              size="large"
-              disabled={submitting}
-              startIcon={submitting ? <CircularProgress size={20} color="inherit" /> : <AssignmentIndIcon />}
-              className="flex-1 cursor-pointer"
-              sx={{
-                py: 1.5,
-                background: 'linear-gradient(to right, #7c3aed, #db2777)',
-                '&:hover': {
-                  background: 'linear-gradient(to right, #6d28d9, #be185d)',
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+            <TextField
+              size="small"
+              fullWidth
+              label="Company Name"
+              value={companyName}
+              onChange={(e) => {
+                const val = e.target.value;
+                setCompanyName(val);
+                if (val.trim()) {
+                  setErrors((prev) => ({ ...prev, companyName: undefined }));
                 }
               }}
-            >
-              {submitting ? 'Registering...' : 'Register & Save'}
-            </Button>
+              error={Boolean(errors.companyName)}
+              helperText={errors.companyName}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              label="Contact Full Name"
+              value={clientName}
+              onChange={(e) => {
+                const val = e.target.value;
+                setClientName(val);
+                if (val.trim()) {
+                  setErrors((prev) => ({ ...prev, clientName: undefined }));
+                }
+              }}
+              error={Boolean(errors.clientName)}
+              helperText={errors.clientName}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              type="email"
+              label="Email Address"
+              value={email}
+              onChange={(e) => {
+                const val = e.target.value;
+                setEmail(val);
+                if (val.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
+                  setErrors((prev) => ({ ...prev, email: undefined }));
+                }
+              }}
+              error={Boolean(errors.email)}
+              helperText={errors.email}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              label="Phone Number"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              type="password"
+              label="Account Password"
+              value={password}
+              onChange={(e) => {
+                const val = e.target.value;
+                setPassword(val);
+                if (val && val.length >= 6) {
+                  setErrors((prev) => ({ ...prev, password: undefined }));
+                }
+                if (confirmPassword && val === confirmPassword) {
+                  setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                }
+              }}
+              error={Boolean(errors.password)}
+              helperText={errors.password}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              type="password"
+              label="Confirm Password"
+              value={confirmPassword}
+              onChange={(e) => {
+                const val = e.target.value;
+                setConfirmPassword(val);
+                if (val && val === password) {
+                  setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                }
+              }}
+              error={Boolean(errors.confirmPassword)}
+              helperText={errors.confirmPassword}
+            />
+
+            <FormControl fullWidth size="small" className="sm:col-span-2">
+              <InputLabel id="domain-select-label">Industry Domain</InputLabel>
+              <Select
+                labelId="domain-select-label"
+                value={domainId}
+                label="Industry Domain"
+                onChange={(e) => setDomainId(Number(e.target.value))}
+              >
+                {domains.map((d) => (
+                  <MenuItem key={d.id} value={d.id}>
+                    {d.name} — {d.description}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
           </div>
 
-          {statusMsg && (
-            <Alert severity={statusType === 'success' ? 'success' : 'error'} variant="outlined" sx={{ width: '105%' }}>
-              {statusMsg}
-            </Alert>
-          )}
+          <Button
+            type="submit"
+            fullWidth
+            variant="contained"
+            disabled={submitting}
+            startIcon={submitting && <CircularProgress size={16} color="inherit" />}
+            sx={{
+              py: 1.2,
+              borderRadius: '12px',
+              fontWeight: 600,
+              background: 'linear-gradient(to right, #8b5cf6, #ec4899)',
+              boxShadow: '0 4px 14px 0 rgba(139, 92, 246, 0.4)',
+            }}
+          >
+            {submitting ? 'Sending verification code...' : 'Register Account'}
+          </Button>
         </form>
 
-        <p className="mt-8 text-center text-slate-400 text-sm">
+        <div className="text-center text-sm text-slate-400">
           Already registered?{' '}
-          <button
-            onClick={onGoToLogin}
-            className="text-violet-400 hover:text-violet-300 font-semibold focus:outline-none transition-colors duration-200 cursor-pointer"
-          >
-            Sign in here
-          </button>
-        </p>
+          <Button color="primary" onClick={() => navigate('/login')} className="cursor-pointer">
+            Sign In Here
+          </Button>
+        </div>
       </div>
+
+      {/* Verification Code dialog Modal */}
+      <Dialog
+        open={showOtpModal}
+        onClose={() => setShowOtpModal(false)}
+        sx={{
+          '& .MuiPaper-root': {
+            background: '#0f172a',
+            border: '1px solid #1e293b',
+            color: '#cbd5e1',
+            borderRadius: '24px',
+            paddingLeft: '16px',
+            paddingRight: '16px',
+            paddingTop: '8px',
+            paddingBottom: '8px',
+            maxWidth: '440px',
+            width: '100%',
+          },
+        }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, color: '#f1f5f9', pb: 1 }}>
+          Verify Email Address
+        </DialogTitle>
+        
+        <DialogContent>
+          <DialogContentText sx={{ color: '#94a3b8', fontSize: '0.875rem', mb: 3 }}>
+            We've sent a 6-digit verification code to your email <strong>{email}</strong>. Enter the passcode below to verify and activate your profile.
+          </DialogContentText>
+          
+          <TextField
+            autoFocus
+            fullWidth
+            label="Verification Code (OTP)"
+            variant="outlined"
+            size="medium"
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            slotProps={{
+              htmlInput: {
+                maxLength: 6,
+                style: {
+                  textAlign: 'center',
+                  letterSpacing: '8px',
+                  fontSize: '1.25rem',
+                  fontFamily: 'monospace',
+                  color: '#f8fafc',
+                },
+              }
+            }}
+          />
+
+          {otpError && (
+            <Alert
+              severity={otpError.includes('sent') ? 'info' : 'error'}
+              sx={{ mt: 2, borderRadius: '12px' }}
+            >
+              {otpError}
+            </Alert>
+          )}
+        </DialogContent>
+
+        <DialogActions sx={{ px: 3, pb: 3, flexDirection: 'column', gap: 2 }}>
+          <Button
+            onClick={handleVerifyAndRegister}
+            fullWidth
+            variant="contained"
+            disabled={verifyingOtp}
+            startIcon={verifyingOtp && <CircularProgress size={16} color="inherit" />}
+            sx={{
+              py: 1.2,
+              borderRadius: '12px',
+              fontWeight: 600,
+              background: 'linear-gradient(to right, #10b981, #059669)',
+              '&:hover': {
+                background: 'linear-gradient(to right, #059669, #047857)',
+              },
+            }}
+          >
+            {verifyingOtp ? 'Verifying & Registering...' : 'Verify & Register'}
+          </Button>
+
+          <Button
+            onClick={handleResendOtp}
+            variant="text"
+            disabled={resendingOtp}
+            sx={{ color: '#8b5cf6', fontSize: '0.8rem', textTransform: 'none' }}
+          >
+            {resendingOtp ? 'Resending Code...' : 'Resend Verification Code'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Floating Snackbar Toaster Notifications */}
+      <Snackbar
+        open={toast.open}
+        autoHideDuration={4000}
+        onClose={handleCloseToast}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert
+          onClose={handleCloseToast}
+          severity={toast.severity}
+          variant="filled"
+          sx={{ width: '100%', borderRadius: '12px' }}
+        >
+          {toast.message}
+        </Alert>
+      </Snackbar>
     </div>
   );
 }

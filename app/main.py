@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).parent.parent
 ENV_PATH = ROOT_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 import audioop
 import uuid
 from pathlib import Path
@@ -134,6 +134,7 @@ streaming_pipeline: StreamingVoicePipeline = None  # type: ignore
 session_manager: SessionManager = None  # type: ignore
 agent_service: AgentService = None  # type: ignore
 rephraser: LLMRephraser = None  # type: ignore
+filler_service = None
 
 # =============================================================================
 # Startup / Shutdown
@@ -142,7 +143,7 @@ rephraser: LLMRephraser = None  # type: ignore
 async def startup():
     """Initialize all services on server startup."""
     global groq_client_1, groq_client_2, cartesia_client, db_client, twilio_handler, pipeline, streaming_pipeline
-    global session_manager, agent_service, rephraser
+    global session_manager, agent_service, rephraser, filler_service
 
     logger.info("=" * 60)
     logger.info("  Voice Agent v2 — Streaming Pipeline — Starting up")
@@ -207,10 +208,25 @@ async def startup():
     pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
     
     if pipeline_mode == "multimodal":
-        from app.gemini_live_client import GeminiLiveClient
         from app.multimodal_pipeline import GeminiLivePipeline
-        gemini_client = GeminiLiveClient(verification_service, order_service)
-        streaming_pipeline = GeminiLivePipeline(gemini_client, db_client)
+        from app.services.filler_audio_service import FillerAudioService
+
+        use_filler_words = os.getenv("USE_FILLER_WORDS", "true").lower() in ("1", "true", "yes", "on")
+        if use_filler_words:
+            filler_service = FillerAudioService()
+            await filler_service.initialize()
+            logger.info("✓ Filler audio service initialized")
+        else:
+            filler_service = None
+            logger.info("✓ Filler audio service disabled via env var")
+
+        # Instantiate pipeline
+        streaming_pipeline = GeminiLivePipeline(
+            verification_service,
+            order_service,
+            db_client,
+            filler_service=filler_service
+        )
         logger.info("✓ Multimodal (Gemini Live) pipeline initialized")
     else:
         # Initialize streaming pipeline
@@ -336,20 +352,51 @@ async def audio_stream(websocket: WebSocket):
         resample_state = None
         logger.info("[OUTBOUND LOOP] Started outbound audio stream task")
         while True:
-            wav_bytes = await outbound_audio_queue.get()
-            if wav_bytes is None:
+            audio_item = await outbound_audio_queue.get()
+            if audio_item is None:
                 logger.info("[OUTBOUND LOOP] Received Sentinel None, stopping outbound task")
                 break
                 
-            logger.info(f"[OUTBOUND LOOP] Dequeued {len(wav_bytes)} wav bytes. stream_sid={stream_sid}")
+            if audio_item == "CLEAR":
+                logger.info("[OUTBOUND LOOP] Clear signal received. Flushing pending audio.")
+                while not outbound_audio_queue.empty():
+                    try:
+                        outbound_audio_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                # Reset resample state so the new audio stream doesn't click
+                resample_state = None
+                
+                # Tell Twilio to immediately stop playing any buffered audio (crucial for interruptions)
+                if stream_sid:
+                    try:
+                        await twilio_handler.clear_stream(websocket, stream_sid)
+                        logger.info("[OUTBOUND LOOP] Sent Twilio clear event.")
+                    except Exception as e:
+                        logger.warning(f"Failed to send clear to Twilio: {e}")
+                
+                continue
+                
             if not stream_sid:
                 logger.warning("[OUTBOUND LOOP] stream_sid is not yet set, discarding chunk")
                 continue
 
             try:
-                pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
-                if not pcm_bytes:
-                    continue
+                if isinstance(audio_item, tuple):
+                    # Direct PCM tuple: (pcm_bytes, sample_rate)
+                    pcm_bytes, sample_rate = audio_item
+                    sample_width = 2
+                    channels = 1
+                else:
+                    # Legacy WAV bytes (from Cartesia etc)
+                    wav_bytes = audio_item
+                    pcm_bytes, sample_rate, sample_width, channels = wav_bytes_to_pcm(wav_bytes)
+                    if not pcm_bytes:
+                        continue
+                        
+                # Ensure pcm_bytes is a whole number of frames to prevent audioop crash
+                if len(pcm_bytes) % sample_width != 0:
+                    pcm_bytes += b'\x00' * (sample_width - (len(pcm_bytes) % sample_width))
 
                 if sample_width != 2:
                     pcm_bytes = audioop.lin2lin(pcm_bytes, sample_width, 2)
@@ -370,16 +417,16 @@ async def audio_stream(websocket: WebSocket):
                 ok = await twilio_handler.send_audio_to_stream(websocket, pcm_bytes, stream_sid)
                 if ok:
                     stream_audio_sent = True
+                    logger.info(f"[OUTBOUND LOOP] Successfully sent {len(pcm_bytes)} bytes to Twilio.")
             except Exception as e:
                 logger.error(f"CRITICAL ERROR in _outbound_audio_loop: {e}")
                 import traceback
                 traceback.print_exc()
 
-    def on_tts_audio(audio_bytes: bytes):
-        logger.info(f"[MAIN ON_TTS_AUDIO] Received {len(audio_bytes)} bytes. use_stream_audio_out={use_stream_audio_out}")
+    def on_tts_audio(audio_data):
         if not use_stream_audio_out:
             return
-        outbound_audio_queue.put_nowait(audio_bytes)
+        outbound_audio_queue.put_nowait(audio_data)
 
     def on_stt_text(text: str):
         logger.info(f"Twilio Call STT: {text}")
@@ -424,29 +471,103 @@ async def audio_stream(websocket: WebSocket):
                 call_sid = data.get("start", {}).get("callSid")
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}")
 
-                # Seeding the session state with client_id
-                await session_manager.get_or_create(call_sid, client_id=client_id)
+                async def _startup_pipeline():
+                    nonlocal pipeline_task, outbound_task
+                    # Seeding the session state with client_id
+                    await session_manager.get_or_create(call_sid, client_id=client_id)
 
-                if use_stream_audio_out and not outbound_task:
-                    outbound_task = asyncio.create_task(_outbound_audio_loop())
+                    if use_stream_audio_out and not outbound_task:
+                        outbound_task = asyncio.create_task(_outbound_audio_loop())
 
-                # Launch the streaming pipeline in the background
-                pipeline_task = asyncio.create_task(
-                    streaming_pipeline.process_stream(
-                        audio_queue=audio_queue,
-                        call_sid=call_sid,
-                        on_stt_text=on_stt_text,
-                        on_llm_token=on_llm_token,
-                        on_tts_audio=on_tts_audio if use_stream_audio_out else None,
-                        on_stage=on_stage,
-                        on_phase_change=on_phase_change,
-                        on_turn_done=on_turn_done,
-                        update_call_with_audio=not use_stream_audio_out,
-                        session_id=call_sid,
-                        twilio_ws=websocket,
-                        stream_sid=stream_sid,
+                    dynamic_kwargs = {}
+                    if client_id:
+                        try:
+                            from app.system_database import SystemDatabase
+                            sys_db = SystemDatabase()
+                            client_mapping = await sys_db.get_client_domain_mapping(client_id)
+                            if client_mapping and client_mapping.get("dynamic_config"):
+                                dyn_cfg = json.loads(client_mapping["dynamic_config"])
+                                db_config = await sys_db.get_client_db_config(client_id)
+                                if db_config:
+                                    dyn_cfg["database"] = db_config
+                                    dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+                                    
+                                    from app.services.schema_service import SchemaService
+                                    from app.services.dynamic_tool_factory import DynamicToolFactory
+                                    from app.services.dynamic_tool_executor import DynamicToolExecutor
+                                    from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                                    
+                                    schema_service = SchemaService(db_config)
+                                    schema_metadata = await schema_service.get_schema_metadata()
+                                    
+                                    tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                                    tools, exec_map = tool_factory.generate_tools()
+                                    
+                                    from app.dynamic_db_client import DynamicDbClient
+                                    dyn_db_client = DynamicDbClient(db_config)
+                                    
+                                    executor = DynamicToolExecutor(
+                                        dyn_db_client, 
+                                        exec_map, 
+                                        dyn_cfg["identity"]["table"],
+                                        dyn_cfg["identity"]["name_column"],
+                                        dyn_cfg["identity"]["verification_column"]
+                                    )
+                                    prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                    dynamic_kwargs = {
+                                        "dynamic_tools": tools,
+                                        "dynamic_executor": executor,
+                                        "system_prompt": prompt,
+                                        "domain": dyn_cfg["domain"]
+                                    }
+                                    logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
+                        except Exception as e:
+                            logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
+
+                    # Launch the streaming pipeline in the background
+                    pipeline_task = asyncio.create_task(
+                        streaming_pipeline.process_stream(
+                            audio_queue=audio_queue,
+                            call_sid=call_sid,
+                            on_stt_text=on_stt_text,
+                            on_llm_token=on_llm_token,
+                            on_tts_audio=on_tts_audio if use_stream_audio_out else None,
+                            on_stage=on_stage,
+                            on_phase_change=on_phase_change,
+                            on_turn_done=on_turn_done,
+                            update_call_with_audio=not use_stream_audio_out,
+                            session_id=call_sid,
+                            twilio_ws=websocket,
+                            stream_sid=stream_sid,
+                            client_id=client_id,
+                            **dynamic_kwargs
+                        )
                     )
-                )
+
+                asyncio.create_task(_startup_pipeline())
+
+                # Background watcher: hang up Twilio when pipeline signals should_end
+                async def _watch_pipeline_end():
+                    try:
+                        # Wait for pipeline_task to be initialized to avoid TypeError/race condition
+                        while pipeline_task is None:
+                            await asyncio.sleep(0.05)
+                        result = await pipeline_task
+                        if result and result.get("should_end"):
+                            logger.info(f"[{call_sid}] Pipeline finished with should_end=True. Waiting for outbound audio to drain...")
+                            # Wait for outbound audio queue to drain so goodbye audio plays
+                            while not outbound_audio_queue.empty():
+                                await asyncio.sleep(0.1)
+                            # Let the last few syllables play out
+                            await asyncio.sleep(2.0)
+                            logger.info(f"[{call_sid}] Hanging up Twilio call now.")
+                            await twilio_handler.end_call(call_sid)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"[{call_sid}] Pipeline watcher error: {e}")
+                
+                pipeline_watcher_task = asyncio.create_task(_watch_pipeline_end())
 
             elif event == "media":
                 # Decode base64 μ-law audio → PCM → 16kHz
@@ -480,6 +601,18 @@ async def audio_stream(websocket: WebSocket):
                 if use_stream_audio_out and call_sid and result.get("audio_url") and not stream_audio_sent:
                     await twilio_handler.update_call_with_audio(call_sid, result["audio_url"])
                 logger.info(f"Twilio pipeline result: {result.get('reply_text', '')[:80]}")
+                
+                # Automatically hang up if requested by pipeline
+                if result and result.get("should_end"):
+                    logger.info(f"[{call_sid}] Pipeline requested end of call. Waiting for outbound audio to play...")
+                    # Wait for outbound queue to drain
+                    while not outbound_audio_queue.empty():
+                        await asyncio.sleep(0.1)
+                    # Let the last few syllables play
+                    await asyncio.sleep(2.0)
+                    if call_sid:
+                        logger.info(f"[{call_sid}] Hanging up the Twilio call now.")
+                        await twilio_handler.end_call(call_sid)
             except asyncio.TimeoutError:
                 logger.error("Twilio pipeline timed out")
                 pipeline_task.cancel()
@@ -601,6 +734,17 @@ async def mic_stream(websocket: WebSocket):
             "type": "turn_done",
             "result": send_result,
         })
+        
+        # If should_end is True, close the WebSocket after a short delay
+        if result.get("should_end"):
+            logger.info("Pipeline requested session end. Closing WebSocket shortly.")
+            async def close_after_delay():
+                await asyncio.sleep(2.5)
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+            asyncio.create_task(close_after_delay())
 
     # Session ID management
     session_id = websocket.query_params.get("session_id")
@@ -644,6 +788,45 @@ async def mic_stream(websocket: WebSocket):
             logger.info(f"Websocket listener disconnected for session {session_id}")
             return
 
+    dynamic_kwargs = {}
+    if client_id:
+        try:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_mapping = await sys_db.get_client_domain_mapping(client_id)
+            if client_mapping and client_mapping.get("dynamic_config"):
+                dyn_cfg = json.loads(client_mapping["dynamic_config"])
+                db_config = await sys_db.get_client_db_config(client_id)
+                if db_config:
+                    dyn_cfg["database"] = db_config
+                    dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+                    from app.services.schema_service import SchemaService
+                    from app.services.dynamic_tool_factory import DynamicToolFactory
+                    from app.services.dynamic_tool_executor import DynamicToolExecutor
+                    from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                    
+                    schema_service = SchemaService(db_config)
+                    schema_metadata = await schema_service.get_schema_metadata()
+                    tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                    tools, exec_map = tool_factory.generate_tools()
+                    
+                    from app.dynamic_db_client import DynamicDbClient
+                    dyn_db_client = DynamicDbClient(db_config)
+                    executor = DynamicToolExecutor(
+                        dyn_db_client, exec_map, dyn_cfg["identity"]["table"],
+                        dyn_cfg["identity"]["name_column"], dyn_cfg["identity"]["verification_column"]
+                    )
+                    prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                    dynamic_kwargs = {
+                        "dynamic_tools": tools,
+                        "dynamic_executor": executor,
+                        "system_prompt": prompt,
+                        "domain": dyn_cfg["domain"]
+                    }
+                    logger.info(f"[{session_id}] Configured dynamic tools for client {client_id}")
+        except Exception as e:
+            logger.error(f"[{session_id}] Error loading dynamic config for client {client_id}: {e}")
+
     # Launch the continuous conversation pipeline in background
     pipeline_task = asyncio.create_task(
         streaming_pipeline.process_continuous(
@@ -657,6 +840,8 @@ async def mic_stream(websocket: WebSocket):
             session_id=session_id,
             barge_in_event=barge_in_event,
             langsmith_extra={"metadata": {"session_id": session_id, "thread_id": session_id}},
+            client_id=client_id,
+            **dynamic_kwargs
         )
     )
 
