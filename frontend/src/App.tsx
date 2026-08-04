@@ -13,6 +13,7 @@ import DashboardPage from './pages/DashboardPage';
 import AgentModeSelectPage from './pages/AgentModeSelectPage';
 import AgentConsolePage from './pages/AgentConsolePage';
 import AgentCallConsolePage from './pages/AgentCallConsolePage';
+import OutreachCallConsolePage from './pages/OutreachCallConsolePage';
 import { authService } from './services/authService';
 
 interface Client {
@@ -239,6 +240,16 @@ export default function App() {
                   domainName={domainName}
                   pipelineMode={pipelineMode}
                 />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/outreach-console" 
+            element={
+              client ? (
+                <OutreachCallConsolePage />
               ) : (
                 <Navigate to="/login" replace />
               )

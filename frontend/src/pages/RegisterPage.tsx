@@ -23,6 +23,7 @@ interface Domain {
   name: string;
   description: string;
   status: string;
+  path_type: string;
 }
 
 export default function RegisterPage() {
@@ -33,6 +34,7 @@ export default function RegisterPage() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [phone, setPhone] = useState('');
+  const [pathType, setPathType] = useState('customer_support');
   const [domainId, setDomainId] = useState<number>(1);
   const [domains, setDomains] = useState<Domain[]>([]);
 
@@ -77,8 +79,9 @@ export default function RegisterPage() {
           return a.name.localeCompare(b.name);
         });
         setDomains(data);
-        if (data.length > 0) {
-          setDomainId(data[0].id);
+        const filtered = data.filter((d: Domain) => d.path_type === 'customer_support');
+        if (filtered.length > 0) {
+          setDomainId(filtered[0].id);
         }
       } catch (err) {
         console.error('Failed to load domains', err);
@@ -334,14 +337,35 @@ export default function RegisterPage() {
             />
 
             <FormControl fullWidth size="small" className="sm:col-span-2">
-              <InputLabel id="domain-select-label">Industry Domain</InputLabel>
+              <InputLabel id="path-select-label">Pipeline Path</InputLabel>
+              <Select
+                labelId="path-select-label"
+                value={pathType}
+                label="Pipeline Path"
+                onChange={(e) => {
+                  const newPath = e.target.value;
+                  setPathType(newPath);
+                  // Update domainId to the first available in the new path
+                  const filtered = domains.filter((d) => d.path_type === newPath);
+                  if (filtered.length > 0) {
+                    setDomainId(filtered[0].id);
+                  }
+                }}
+              >
+                <MenuItem value="customer_support">Customer Support</MenuItem>
+                <MenuItem value="outreach">Outreach</MenuItem>
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth size="small" className="sm:col-span-2">
+              <InputLabel id="domain-select-label">Industry Sub-domain</InputLabel>
               <Select
                 labelId="domain-select-label"
                 value={domainId}
-                label="Industry Domain"
+                label="Industry Sub-domain"
                 onChange={(e) => setDomainId(Number(e.target.value))}
               >
-                {domains.map((d) => (
+                {domains.filter((d) => d.path_type === pathType).map((d) => (
                   <MenuItem key={d.id} value={d.id}>
                     {d.name} — {d.description}
                   </MenuItem>

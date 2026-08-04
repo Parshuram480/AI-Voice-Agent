@@ -37,7 +37,7 @@ FILLER_PHRASES = {
             "fast": []
         },
         "universal": {
-            "fast": ["Hmm.", "Mm-hmm.", "Okay.", "Ah."],
+            "fast": ["Hmm.", "Mm-hmm.", "Okay.", "Ah.", "Right.", "I see.", "Got it.", "Yeah.", "Interesting.", "Sure.", "Oh."],
             "medium": [],
             "slow": []
         }

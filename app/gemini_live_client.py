@@ -304,10 +304,10 @@ class GeminiLiveClient:
         if name == "out_of_scope":
             count = state.get("out_of_scope_count", 0) + 1
             state["out_of_scope_count"] = count
-            reason = args.get("reason", "unknown")
-            logger.info(f"[CALL FLOW] out_of_scope tool triggered (count={count}, reason={reason})")
+            # Ensure domain check is case-insensitive
+            current_domain = str(self.domain).lower() if self.domain else ""
             
-            if count >= 2 and self.domain not in ("sales", "realestate"):
+            if count >= 2 and current_domain not in ("sales", "realestate", "outreach"):
                 state["should_end"] = True
                 msg = "This is the second out-of-scope question. The call must now be terminated. Say goodbye and then call end_call."
                     
@@ -321,7 +321,7 @@ class GeminiLiveClient:
                     }
                 )
             else:
-                if self.domain in ("sales", "realestate"):
+                if current_domain in ("sales", "realestate", "outreach"):
                     msg = "This is an out-of-scope question (e.g. tech support, or something we do not offer). DO NOT threaten to hang up. Gracefully pivot the conversation back to the products or properties we do offer."
                 else:
                     msg = "This is the first out-of-scope question. Warn the user: 'I can only help you with questions related to our service. Please ask about that, or I will have to end the call.'"

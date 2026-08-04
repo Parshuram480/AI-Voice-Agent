@@ -11,6 +11,7 @@ from app.schemas.requests import SimulateRequest
 from app.system_database import SystemDatabase, verify_password
 from app.dynamic_db_client import DynamicDbClient
 from app.services.email_service import EmailService
+import os
 
 logger = logging.getLogger(__name__)
 AUDIO_CACHE_DIR = Path("audio_cache")
@@ -94,6 +95,19 @@ class SaveRulesRequest(BaseModel):
     client_id: Optional[int] = None
     ui_config_metadata: Optional[dict[str, Any]] = None
 
+class OutreachConfigRequest(BaseModel):
+    db_config: DbConfigRequest
+    campaign_type: str
+    product_table: str
+    selected_columns: list[str]
+    company_name: str
+    closing_goal: str
+    ui_config_metadata: Optional[dict[str, Any]] = None
+
+class OutreachCallRequest(BaseModel):
+    phone_number: str
+    customer_name: str
+    language: Optional[str] = "en"
 
 from app.auth_jwt import create_access_token, verify_and_get_client_id
 
@@ -312,6 +326,7 @@ def create_api_router(
                 "domain": {
                     "id": mapping["domain_id"] if mapping else None,
                     "name": mapping["domain_name"] if mapping else None,
+                    "path_type": mapping["path_type"] if mapping else None,
                     "dynamic_config": mapping["dynamic_config"] if mapping else None,
                     "ui_config_metadata": mapping["ui_config_metadata"] if mapping else None,
                 } if mapping else None
@@ -346,8 +361,16 @@ def create_api_router(
         
         try:
             client_id = int(client_id_str)
+            client = await system_db.get_client_by_id(client_id)
+            if not client:
+                raise HTTPException(status_code=401, detail="Client not found.")
+            active_path = client.get("active_path", "customer_support")
+            active_domain_id = client.get("active_domain_id")
+            if not active_domain_id:
+                raise HTTPException(status_code=400, detail="No active domain selected.")
+
             # Fetch existing configuration to preserve passwords if field is blank
-            existing = await system_db.get_client_db_config(client_id)
+            existing = await system_db.get_client_db_config(client_id, domain_id=active_domain_id)
             
             passwd = req.password
             if not passwd and existing:
@@ -365,7 +388,7 @@ def create_api_router(
                 "trust_server_certificate": req.trust_server_certificate,
                 "connection_timeout": req.connection_timeout
             }
-            await system_db.save_client_db_config(client_id, config)
+            await system_db.save_client_db_config(client_id, config, domain_id=active_domain_id, path_type=active_path)
             return {"success": True, "message": "Database configuration saved successfully."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -433,7 +456,12 @@ def create_api_router(
                 raise
                 
         try:
-            existing = await system_db.get_client_db_config(client_id)
+            client = await system_db.get_client_by_id(client_id)
+            if not client:
+                raise HTTPException(status_code=401, detail="Client not found.")
+            active_path = client.get("active_path", "customer_support")
+
+            existing = await system_db.get_client_db_config(client_id, domain_id=req.domain_id)
             
             passwd = req.db_config.password
             if not passwd and existing:
@@ -451,7 +479,7 @@ def create_api_router(
                 "trust_server_certificate": req.db_config.trust_server_certificate,
                 "connection_timeout": req.db_config.connection_timeout
             }
-            await system_db.save_client_db_config(client_id, config)
+            await system_db.save_client_db_config(client_id, config, domain_id=req.domain_id, path_type=active_path)
             
             import json
             dynamic_config_dict = {
@@ -464,7 +492,8 @@ def create_api_router(
                 client_id=client_id,
                 domain_id=req.domain_id,
                 dynamic_config=dyn_json,
-                ui_config_metadata=meta_json
+                ui_config_metadata=meta_json,
+                path_type=active_path
             )
             return {"success": True, "message": "Database and AI voice agent rules saved successfully!"}
         except Exception as e:
@@ -495,6 +524,257 @@ def create_api_router(
             }
         except Exception as e:
             logger.error(f"Error refreshing schema: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # -------------------------------------------------------------------------
+    # Outreach APIs
+    # -------------------------------------------------------------------------
+
+    @router.post("/api/outreach/save-config")
+    async def save_outreach_config(req: OutreachConfigRequest, request: Request):
+        client_id = get_authenticated_client_id(request)
+        try:
+            client = await system_db.get_client_by_id(client_id)
+            if not client:
+                raise HTTPException(status_code=401, detail="Client not found.")
+            
+            # Outreach config should always be saved under the 'outreach' path_type
+            path_type = "outreach"
+
+            # 2. Get the correct outreach domain ID based on the campaign type
+            pool = await system_db._get_conn()
+            async with pool.acquire() as conn:
+                domain_name = "B2B Sales" if req.campaign_type == "sales" else "Real Estate"
+                row = await conn.fetchrow("SELECT id FROM domains WHERE path_type = 'outreach' AND name = $1", domain_name)
+                if not row:
+                    row = await conn.fetchrow("SELECT id FROM domains WHERE path_type = 'outreach' LIMIT 1")
+                if not row:
+                    raise HTTPException(status_code=500, detail="No outreach domains found in database.")
+                domain_id = row["id"]
+            
+            # 1. Save DB Config
+            existing = await system_db.get_client_db_config(client_id, domain_id=domain_id)
+            passwd = req.db_config.password
+            if not passwd and existing:
+                passwd = existing.get("password")
+                
+            config = {
+                "db_type": req.db_config.db_type,
+                "server_name": req.db_config.server_name,
+                "port": req.db_config.port,
+                "db_name": req.db_config.db_name,
+                "username": req.db_config.username,
+                "password": passwd,
+                "schema_name": req.db_config.schema_name,
+                "enable_ssl": req.db_config.enable_ssl,
+                "trust_server_certificate": req.db_config.trust_server_certificate,
+                "connection_timeout": req.db_config.connection_timeout
+            }
+            await system_db.save_client_db_config(client_id, config, domain_id=domain_id, path_type=path_type)
+            
+            import json
+            dynamic_config_dict = {
+                "pipeline_type": "outreach",
+                "campaign_type": req.campaign_type,
+                "product_table": req.product_table,
+                "selected_columns": req.selected_columns,
+                "company_name": req.company_name,
+                "closing_goal": req.closing_goal
+            }
+            dyn_json = json.dumps(dynamic_config_dict)
+            meta_json = json.dumps(req.ui_config_metadata) if req.ui_config_metadata else None
+            
+            await system_db.update_client_domain_mapping(
+                client_id=client_id,
+                domain_id=domain_id,
+                dynamic_config=dyn_json,
+                ui_config_metadata=meta_json,
+                path_type=path_type
+            )
+            return {"success": True, "message": "Outreach config saved successfully!"}
+        except Exception as e:
+            logger.error(f"Error saving outreach config: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get("/api/outreach/config")
+    async def get_outreach_config(request: Request):
+        client_id = get_authenticated_client_id(request)
+        try:
+            mapping = await system_db.get_client_domain_mapping(client_id, path_type="outreach")
+            if not mapping or not mapping.get("dynamic_config"):
+                return {"config": None}
+            
+            import json
+            dyn_cfg = json.loads(mapping["dynamic_config"])
+            if dyn_cfg.get("pipeline_type") != "outreach":
+                return {"config": None}
+                
+            return {"config": dyn_cfg, "ui_config_metadata": json.loads(mapping.get("ui_config_metadata") or "{}")}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/outreach/generate-dummy")
+    async def generate_dummy_db(request: Request):
+        try:
+            req_data = await request.json()
+            campaign_type = req_data.get("campaign_type", "sales")
+            
+            import sqlite3
+            import os
+            from pathlib import Path
+            
+            db_path = f"dummy_{campaign_type}_db.sqlite"
+            if os.path.exists(db_path):
+                os.remove(db_path)
+                
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            if campaign_type == "real_estate":
+                cursor.execute('''
+                    CREATE TABLE properties (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        category TEXT,
+                        price TEXT,
+                        status TEXT,
+                        bedrooms INTEGER,
+                        bathrooms REAL,
+                        sqft INTEGER,
+                        lot_size TEXT,
+                        year_built INTEGER,
+                        address TEXT,
+                        neighborhood TEXT,
+                        description TEXT,
+                        features TEXT,
+                        nearby TEXT,
+                        hoa_fee TEXT,
+                        property_tax TEXT,
+                        open_house TEXT,
+                        rating REAL,
+                        discount TEXT
+                    )
+                ''')
+                
+                json_path = os.path.join("client_configs", "realestate_listings.json")
+                if os.path.exists(json_path):
+                    import json
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    for prop in data.get("properties", []):
+                        features_str = json.dumps(prop.get("features", [])) if "features" in prop else None
+                        nearby_str = json.dumps(prop.get("nearby", {})) if "nearby" in prop else None
+                        
+                        cursor.execute(
+                            "INSERT INTO properties VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                prop.get("id"),
+                                prop.get("name"),
+                                prop.get("category"),
+                                prop.get("price"),
+                                prop.get("status"),
+                                prop.get("bedrooms"),
+                                prop.get("bathrooms"),
+                                prop.get("sqft"),
+                                prop.get("lot_size"),
+                                prop.get("year_built"),
+                                prop.get("address"),
+                                prop.get("neighborhood"),
+                                prop.get("description"),
+                                features_str,
+                                nearby_str,
+                                prop.get("hoa_fee"),
+                                prop.get("property_tax"),
+                                prop.get("open_house"),
+                                prop.get("rating"),
+                                prop.get("discount")
+                            )
+                        )
+                schema = {"properties": ["id", "name", "category", "price", "status", "bedrooms", "bathrooms", "sqft", "lot_size", "year_built", "address", "neighborhood", "description", "features", "nearby", "hoa_fee", "property_tax", "open_house", "rating", "discount"]}
+            else:
+                cursor.execute('''
+                    CREATE TABLE products (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        category TEXT,
+                        price TEXT,
+                        in_stock BOOLEAN,
+                        rating REAL,
+                        description TEXT,
+                        discount TEXT
+                    )
+                ''')
+                
+                json_path = os.path.join("client_configs", "sales_products.json")
+                if os.path.exists(json_path):
+                    import json
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    for prod in data.get("products", []):
+                        cursor.execute(
+                            "INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                prod.get("id"),
+                                prod.get("name"),
+                                prod.get("category"),
+                                prod.get("price"),
+                                prod.get("in_stock"),
+                                prod.get("rating"),
+                                prod.get("description"),
+                                prod.get("discount")
+                            )
+                        )
+                schema = {"products": ["id", "name", "category", "price", "in_stock", "rating", "description", "discount"]}
+                
+            conn.commit()
+            conn.close()
+            
+            return {
+                "success": True, 
+                "db_path": str(Path(db_path).absolute()),
+                "schema": schema
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/api/outreach/call")
+    async def make_outreach_call(req: OutreachCallRequest, request: Request):
+        client_id = get_authenticated_client_id(request)
+        try:
+            th = get_twilio_handler() if get_twilio_handler else None
+            if not th:
+                raise HTTPException(status_code=500, detail="Twilio handler is not initialized.")
+            
+            ngrok_url = os.getenv("NGROK_URL", "")
+            if not ngrok_url:
+                raise HTTPException(status_code=500, detail="NGROK_URL is not configured.")
+                
+            import urllib.parse
+            encoded_name = urllib.parse.quote(req.customer_name)
+            encoded_lang = urllib.parse.quote(req.language or "en")
+            
+            # Build voice_url — handle NGROK_URL that may already contain /voice
+            if "/voice" in ngrok_url:
+                voice_url = ngrok_url
+                if "?" in voice_url:
+                    voice_url += f"&client_id={client_id}&customer_name={encoded_name}&language={encoded_lang}&pipeline_type=outreach"
+                else:
+                    voice_url += f"?client_id={client_id}&customer_name={encoded_name}&language={encoded_lang}&pipeline_type=outreach"
+            else:
+                voice_url = f"{ngrok_url.rstrip('/')}/voice?client_id={client_id}&customer_name={encoded_name}&language={encoded_lang}&pipeline_type=outreach"
+            
+            call_sid = th._client.calls.create(
+                to=req.phone_number,
+                from_=os.getenv("TWILIO_PHONE_NUMBER"),
+                url=voice_url,
+                method="POST"
+            ).sid
+            
+            return {"success": True, "call_sid": call_sid}
+        except Exception as e:
+            logger.error(f"Error making outreach call: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/api/twilio/call")

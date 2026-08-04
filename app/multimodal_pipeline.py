@@ -188,11 +188,25 @@ class GeminiLivePipeline:
             async with session_client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
-
-                
                 # Trigger the agent to speak first based on the domain context
                 domain_name = kwargs.get("domain", "default").replace("_", " ")
-                initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
+                pipeline_type = kwargs.get("pipeline_type", "customer_support")
+                company_name = kwargs.get("company_name")
+                
+                logger.info(f"[{resolved_session_id}] Initial prompt context: pipeline_type={pipeline_type!r}, domain={domain_name!r}, company_name={company_name!r}")
+                
+                if pipeline_type == "outreach":
+                    initial_prompt = (
+                        f"[CALL CONNECTED] You have just dialed this person. YOU initiated this call — they did NOT call you. "
+                        f"You are making a proactive outbound sales call on behalf of {company_name or 'the company'}. "
+                        f"Do NOT say 'How can I help you?' or 'Thanks for calling' — that is wrong because YOU called THEM. "
+                        f"Instead, introduce yourself confidently, mention {company_name or 'the company'} by name, and immediately begin your sales pitch "
+                        f"following your Telemarketing Protocol instructions. Start with the 30-Second Hook."
+                    )
+                else:
+                    initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
+                
+                logger.info(f"[{resolved_session_id}] Sending initial prompt: {initial_prompt[:150]}...")
                 await session.send(input=initial_prompt, end_of_turn=True)
                 
                 # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
@@ -503,7 +517,7 @@ class GeminiLivePipeline:
                                             on_stage("conversation", "running", f"Gemini executing tool: {fc.name}")
                                     
                                         # Filler Audio Injection
-                                        if self.filler_service and on_tts_audio and not is_speaking and not current_agent_text and fc.name != "end_call":
+                                        if self.filler_service and on_tts_audio and not is_speaking and not current_agent_text and fc.name != "end_call" and time.perf_counter() >= filler_debounce_until:
                                             executor = kwargs.get("dynamic_executor")
                                             tool_meta = {}
                                             if executor and hasattr(executor, "execution_map") and executor.execution_map:

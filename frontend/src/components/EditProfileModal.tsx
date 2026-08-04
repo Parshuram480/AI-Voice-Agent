@@ -29,6 +29,7 @@ interface Domain {
   name: string;
   description: string;
   status: string;
+  path_type: string;
 }
 
 interface EditProfileModalProps {
@@ -52,6 +53,7 @@ export default function EditProfileModal({
   const [clientName, setClientName] = useState(client.client_name);
   const [email, setEmail] = useState(client.email);
   const [phone, setPhone] = useState(client.phone || '');
+  const [pathType, setPathType] = useState('customer_support');
   const [domainId, setDomainId] = useState<number>(1);
   const [submitting, setSubmitting] = useState(false);
 
@@ -83,6 +85,7 @@ export default function EditProfileModal({
       setErrors({});
       const currentDom = domains.find((d) => d.name === domainName);
       if (currentDom) {
+        setPathType(currentDom.path_type || 'customer_support');
         setDomainId(currentDom.id);
       }
     }
@@ -134,7 +137,7 @@ export default function EditProfileModal({
       if (res.success && res.client) {
         showToast('Profile updated successfully!', 'success');
         onSaveSuccess(res.client, res.domain_name);
-        setTimeout(() => onClose(), 1000);
+        onClose();
       } else {
         showToast(res.detail || 'Failed to update profile.', 'error');
       }
@@ -230,14 +233,34 @@ export default function EditProfileModal({
             />
 
             <FormControl fullWidth size="small">
-              <InputLabel id="edit-profile-domain-label">Industry Domain</InputLabel>
+              <InputLabel id="edit-path-label">Pipeline Path</InputLabel>
+              <Select
+                labelId="edit-path-label"
+                value={pathType}
+                label="Pipeline Path"
+                onChange={(e) => {
+                  const newPath = e.target.value;
+                  setPathType(newPath);
+                  const filtered = domains.filter((d) => d.path_type === newPath);
+                  if (filtered.length > 0) {
+                    setDomainId(filtered[0].id);
+                  }
+                }}
+              >
+                <MenuItem value="customer_support">Customer Support</MenuItem>
+                <MenuItem value="outreach">Outreach</MenuItem>
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth size="small">
+              <InputLabel id="edit-profile-domain-label">Industry Sub-domain</InputLabel>
               <Select
                 labelId="edit-profile-domain-label"
                 value={domainId}
-                label="Industry Domain"
+                label="Industry Sub-domain"
                 onChange={(e) => setDomainId(Number(e.target.value))}
               >
-                {domains.map((d) => (
+                {domains.filter((d) => d.path_type === pathType).map((d) => (
                   <MenuItem key={d.id} value={d.id}>
                     {d.name} — {d.description}
                   </MenuItem>

@@ -302,8 +302,24 @@ async def voice_webhook(request: Request):
     
     # Extract language from query parameter if present
     language = request.query_params.get("language")
+    
+    # Extract pipeline_type from query parameter if present
+    pipeline_type = request.query_params.get("pipeline_type")
 
-    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}, customer_name: {customer_name}, language: {language}")
+    if not client_id:
+        try:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            pool = await sys_db._get_conn()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT id FROM clients ORDER BY id ASC LIMIT 1")
+                if row:
+                    client_id = str(row["id"])
+                    logger.info(f"No client_id provided in webhook, defaulted to {client_id}")
+        except Exception as e:
+            logger.error(f"Failed to fetch default client_id: {e}")
+
+    logger.info(f"[VOICE WEBHOOK] Resolved client_id: {client_id}, customer_name: {customer_name}, language: {language}, pipeline_type: {pipeline_type}")
     
     # Build the WebSocket URL dynamically based on the incoming request host
     # If the request comes through ngrok (https), we use wss://
@@ -315,7 +331,7 @@ async def voice_webhook(request: Request):
     if client_id:
         ws_url += f"?client_id={client_id}"
 
-    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name, language=language)
+    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name, language=language, pipeline_type=pipeline_type)
     logger.info(f"Voice webhook called — streaming to {ws_url}")
 
     return Response(content=twiml, media_type="application/xml")
@@ -492,8 +508,10 @@ async def audio_stream(websocket: WebSocket):
                     
                 # Extract language globally for all pipelines
                 language = start_custom_params.get("language", "en")
+                customer_name = start_custom_params.get("customer_name")
+                pipeline_type = start_custom_params.get("pipeline_type")
                     
-                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}")
+                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}, customer_name={customer_name}, pipeline_type={pipeline_type}")
 
                 async def _startup_pipeline():
                     nonlocal pipeline_task, outbound_task
@@ -508,39 +526,56 @@ async def audio_stream(websocket: WebSocket):
                     dynamic_kwargs = {}
                     if client_id and client_id != "sales":
                         try:
-                            from app.system_database import SystemDatabase
-                            sys_db = SystemDatabase()
-                            client_mapping = await sys_db.get_client_domain_mapping(client_id)
-                            if client_mapping and client_mapping.get("dynamic_config"):
-                                dyn_cfg = json.loads(client_mapping["dynamic_config"])
-                                db_config = await sys_db.get_client_db_config(client_id)
-                                if db_config:
-                                    dyn_cfg["database"] = db_config
-                                    dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+                            if str(client_id).isdigit():
+                                from app.system_database import SystemDatabase
+                                sys_db = SystemDatabase()
+                                client_mapping = await sys_db.get_client_domain_mapping(int(client_id), path_type=pipeline_type)
+                                if client_mapping and client_mapping.get("dynamic_config"):
+                                    dyn_cfg = json.loads(client_mapping["dynamic_config"])
+                                    db_config = await sys_db.get_client_db_config(int(client_id), path_type=pipeline_type)
+                                    if db_config:
+                                        dyn_cfg["database"] = db_config
+                                        dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+                                        dyn_cfg["company_name"] = dyn_cfg.get("company_name") or client_mapping.get("company_name", "our company")
+                                        dyn_cfg["system_prompt"] = client_mapping.get("system_prompt_llm1")
                                     
                                     from app.services.schema_service import SchemaService
-                                    from app.services.dynamic_tool_factory import DynamicToolFactory
-                                    from app.services.dynamic_tool_executor import DynamicToolExecutor
-                                    from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                                    from app.dynamic_db_client import DynamicDbClient
                                     
                                     schema_service = SchemaService(db_config)
                                     schema_metadata = await schema_service.get_schema_metadata()
-                                    
-                                    tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
-                                    tools, exec_map = tool_factory.generate_tools()
-                                    
-                                    from app.dynamic_db_client import DynamicDbClient
                                     dyn_db_client = DynamicDbClient(db_config)
                                     
-                                    executor = DynamicToolExecutor(
-                                        dyn_db_client, 
-                                        exec_map, 
-                                        dyn_cfg["identity"]["table"],
-                                        dyn_cfg["identity"]["name_column"],
-                                        dyn_cfg["identity"]["verification_column"]
-                                    )
-                                    prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                    if dyn_cfg.get("pipeline_type") == "outreach":
+                                        from app.services.outreach_tool_factory import OutreachToolFactory
+                                        from app.services.outreach_tool_executor import OutreachToolExecutor
+                                        from app.services.outreach_prompt_assembler import OutreachPromptAssembler
+                                        
+                                        tool_factory = OutreachToolFactory(dyn_cfg, schema_metadata)
+                                        tools, exec_map = tool_factory.generate_tools()
+                                        
+                                        executor = OutreachToolExecutor(dyn_db_client, exec_map)
+                                        prompt = OutreachPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                    else:
+                                        from app.services.dynamic_tool_factory import DynamicToolFactory
+                                        from app.services.dynamic_tool_executor import DynamicToolExecutor
+                                        from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                                        
+                                        tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                                        tools, exec_map = tool_factory.generate_tools()
+                                        
+                                        executor = DynamicToolExecutor(
+                                            dyn_db_client, 
+                                            exec_map, 
+                                            dyn_cfg["identity"]["table"],
+                                            dyn_cfg["identity"]["name_column"],
+                                            dyn_cfg["identity"]["verification_column"]
+                                        )
+                                        prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
                                     
+                                    if customer_name:
+                                        prompt = f"The customer you are speaking to is named {customer_name}. Greet them by name naturally.\n\n{prompt}"
+                                        
                                     if language != "en":
                                         prompt = f"You must speak strictly in {language}. Even if the user speaks English, reply in {language}.\n\n{prompt}"
                                         
@@ -549,7 +584,9 @@ async def audio_stream(websocket: WebSocket):
                                         "dynamic_executor": executor,
                                         "system_prompt": prompt,
                                         "domain": dyn_cfg["domain"],
-                                        "language": language
+                                        "company_name": dyn_cfg.get("company_name"),
+                                        "language": language,
+                                        "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support")
                                     }
                                     logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
                         except Exception as e:
@@ -607,7 +644,6 @@ async def audio_stream(websocket: WebSocket):
                             base_prompt = prompts_yaml.get("multimodal", {}).get("base_prompt", "")
                             domain_prompt = prompts_yaml.get("multimodal", {}).get("domains", {}).get(domain_info["prompt_key"], "")
                             
-                            customer_name = start_custom_params.get("customer_name")
                             if customer_name:
                                 domain_prompt = f"The customer you are speaking to is named {customer_name}. Greet them by name naturally.\n\n{domain_prompt}"
 
@@ -916,27 +952,45 @@ async def mic_stream(websocket: WebSocket):
                     dyn_cfg["database"] = db_config
                     dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
                     from app.services.schema_service import SchemaService
-                    from app.services.dynamic_tool_factory import DynamicToolFactory
-                    from app.services.dynamic_tool_executor import DynamicToolExecutor
-                    from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                    from app.dynamic_db_client import DynamicDbClient
                     
                     schema_service = SchemaService(db_config)
                     schema_metadata = await schema_service.get_schema_metadata()
-                    tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
-                    tools, exec_map = tool_factory.generate_tools()
-                    
-                    from app.dynamic_db_client import DynamicDbClient
                     dyn_db_client = DynamicDbClient(db_config)
-                    executor = DynamicToolExecutor(
-                        dyn_db_client, exec_map, dyn_cfg["identity"]["table"],
-                        dyn_cfg["identity"]["name_column"], dyn_cfg["identity"]["verification_column"]
-                    )
-                    prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                    
+                    if dyn_cfg.get("pipeline_type") == "outreach":
+                        from app.services.outreach_tool_factory import OutreachToolFactory
+                        from app.services.outreach_tool_executor import OutreachToolExecutor
+                        from app.services.outreach_prompt_assembler import OutreachPromptAssembler
+                        
+                        tool_factory = OutreachToolFactory(dyn_cfg, schema_metadata)
+                        tools, exec_map = tool_factory.generate_tools()
+                        
+                        executor = OutreachToolExecutor(dyn_db_client, exec_map)
+                        prompt = OutreachPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                    else:
+                        from app.services.dynamic_tool_factory import DynamicToolFactory
+                        from app.services.dynamic_tool_executor import DynamicToolExecutor
+                        from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                        
+                        tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                        tools, exec_map = tool_factory.generate_tools()
+                        
+                        executor = DynamicToolExecutor(
+                            dyn_db_client, 
+                            exec_map, 
+                            dyn_cfg["identity"]["table"],
+                            dyn_cfg["identity"]["name_column"], 
+                            dyn_cfg["identity"]["verification_column"]
+                        )
+                        prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                    
                     dynamic_kwargs = {
                         "dynamic_tools": tools,
                         "dynamic_executor": executor,
                         "system_prompt": prompt,
-                        "domain": dyn_cfg["domain"]
+                        "domain": dyn_cfg["domain"],
+                        "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support")
                     }
                     logger.info(f"[{session_id}] Configured dynamic tools for client {client_id}")
         except Exception as e:
@@ -1054,3 +1108,4 @@ async def mic_stream(websocket: WebSocket):
 # =============================================================================
 # Run with: uvicorn app.main:app --reload --port 8000
 # =============================================================================
+

@@ -47,7 +47,20 @@ class DynamicToolExecutor:
                 # Execute verification logic
                 logger.info(f"Running verification for args: {args}")
                 
-                params = [args.get(k) for k in tool_entry.get("param_order", args.keys())]
+                import re
+                params = []
+                for k in tool_entry.get("param_order", args.keys()):
+                    val = args.get(k)
+                    if isinstance(val, str):
+                        if k == self.identity_name_col:
+                            # Replace punctuation with wildcards to handle "Alice. Smith" matching "Alice Smith"
+                            # or "O'Connor" matching properly without stripping the apostrophe.
+                            clean_val = re.sub(r'[^\w\s]', '%', val)
+                            clean_val = re.sub(r'%+', '%', clean_val).strip()
+                            val = f"%{clean_val}%"
+                        elif "date" in k.lower() or "birth" in k.lower() or "dob" in k.lower():
+                            val = re.sub(r'(st|nd|rd|th)', '', val.lower()).strip()
+                    params.append(val)
                 rows = await self._db_client.execute_query(sql, tuple(params))
                 
                 if not rows:

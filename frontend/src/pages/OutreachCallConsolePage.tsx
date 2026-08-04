@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Button from '@mui/material/Button';
 import TextField from '@mui/material/TextField';
 import Alert from '@mui/material/Alert';
@@ -8,8 +8,10 @@ import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import Autocomplete from '@mui/material/Autocomplete';
+import MenuItem from '@mui/material/MenuItem';
 import { useNavigate } from 'react-router-dom';
-import { twilioService } from '../services/twilioService';
+import { outreachService } from '../services/outreachService';
+import { twilioService } from '../services/twilioService'; // for polling call status
 
 const WS_BASE = 'ws://localhost:8000';
 
@@ -17,32 +19,21 @@ interface Country {
   code: string;
   flagUrl: string;
   name: string;
-  cioc: string;
 }
 
-interface Client {
-  id: number;
-  company_name: string;
-  client_name: string;
-  email: string;
-  phone?: string;
-}
-
-interface AgentCallConsoleProps {
-  client: Client;
-  domainName: string;
-  pipelineMode: string;
-}
-
-export default function AgentCallConsolePage({ client, domainName, pipelineMode }: AgentCallConsoleProps) {
+export default function OutreachCallConsolePage() {
   const navigate = useNavigate();
   const [countries, setCountries] = useState<Country[]>([]);
   const [selectedCountry, setSelectedCountry] = useState<Country | null>(null);
   const [localPhoneNumber, setLocalPhoneNumber] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [language, setLanguage] = useState<'en' | 'hi'>('en');
+  
   const [dialing, setDialing] = useState(false);
   const [callSid, setCallSid] = useState<string | null>(null);
   const [phoneError, setPhoneError] = useState('');
   const [codeError, setCodeError] = useState('');
+  const [nameError, setNameError] = useState('');
 
   // Call status options: 'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'
   const [callState, setCallState] = useState<'IDLE' | 'DIALING' | 'ACTIVE' | 'ENDED'>('IDLE');
@@ -63,11 +54,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     tts: 'idle'
   });
   const [transcript, setTranscript] = useState('—');
-  const [intent, setIntent] = useState('—');
-  const [identityText, setIdentityText] = useState('—');
-  const [recordsText, setRecordsText] = useState<React.ReactNode>('—');
   const [replyText, setReplyText] = useState('—');
-  const [turn, setTurn] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -81,7 +68,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
       try {
         const data = await twilioService.getCallStatus(sid);
         if (data.success) {
-          const status = data.status; // e.g. queued, ringing, in-progress, completed, failed
+          const status = data.status;
           setTwilioStatus(status);
 
           if (status === 'in-progress') {
@@ -91,9 +78,6 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
             setCallSid(null);
             setTranscript('—');
             setReplyText('—');
-            setIntent('—');
-            setIdentityText('—');
-            setRecordsText('—');
             setConsolePhase('ENDED');
             setStageStates({
               vad: 'idle',
@@ -135,14 +119,12 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
               code: formattedCode,
               flagUrl: item.flags?.png || item.flags?.svg || '',
               name: item.name || '',
-              cioc: item.cioc || '',
             };
           })
           .filter((c: Country) => c.code && c.flagUrl && c.name);
 
         mapped.sort((a, b) => a.name.localeCompare(b.name));
 
-        // Deduplicate country code items
         const seen = new Set<string>();
         const uniqueMapped: Country[] = [];
         for (const c of mapped) {
@@ -155,7 +137,6 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
 
         setCountries(uniqueMapped);
 
-        // Default to India (+91)
         const defaultCountry = uniqueMapped.find(
           (c) => c.code === '+91' && c.name.toLowerCase().includes('india')
         ) || uniqueMapped.find((c) => c.code === '+91') || uniqueMapped.find((c) => c.code === '+1') || uniqueMapped[0];
@@ -164,11 +145,9 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
       } catch (err) {
         console.error('Failed to fetch country codes from API, using fallbacks:', err);
         const fallback = [
-          { code: '+91', flagUrl: 'https://flagcdn.com/w320/in.png', name: 'India', cioc: 'IND' },
-          { code: '+1', flagUrl: 'https://flagcdn.com/w320/us.png', name: 'United States', cioc: 'USA' },
-          { code: '+44', flagUrl: 'https://flagcdn.com/w320/gb.png', name: 'United Kingdom', cioc: 'GBR' },
-          { code: '+61', flagUrl: 'https://flagcdn.com/w320/au.png', name: 'Australia', cioc: 'AUS' },
-          { code: '+49', flagUrl: 'https://flagcdn.com/w320/de.png', name: 'Germany', cioc: 'DEU' },
+          { code: '+91', flagUrl: 'https://flagcdn.com/w320/in.png', name: 'India' },
+          { code: '+1', flagUrl: 'https://flagcdn.com/w320/us.png', name: 'United States' },
+          { code: '+44', flagUrl: 'https://flagcdn.com/w320/gb.png', name: 'United Kingdom' },
         ];
         setCountries(fallback);
         setSelectedCountry(fallback[0]);
@@ -205,7 +184,6 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log('Listener received event:', data);
 
         switch (data.type) {
           case 'phase':
@@ -238,54 +216,6 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
             setReplyText(prev => (prev === '—' ? '' : prev) + data.token);
             break;
 
-          case 'turn_done':
-            setTurn(prev => prev + 1);
-            const r = data.result;
-            if (r) {
-              setIntent(r.intent || '—');
-              if (r.customer) {
-                setIdentityText(`${r.customer.full_name} (DOB: ${r.customer.date_of_birth})`);
-              } else {
-                setIdentityText('—');
-              }
-              if (r.orders && r.orders.length > 0) {
-                if (domainName.toLowerCase() === 'healthcare') {
-                  setRecordsText(
-                    <div className="space-y-2 mt-1">
-                      {r.orders.map((apt: any, idx: number) => (
-                        <div key={idx} className="bg-slate-950/60 border border-slate-850 p-2.5 rounded-lg text-xs flex flex-col gap-1">
-                          <div className="flex justify-between font-bold text-slate-300">
-                            <span>Doctor: {apt.doctor_name}</span>
-                            <span className="text-emerald-400 font-normal">{apt.status}</span>
-                          </div>
-                          <div className="text-slate-400 font-mono text-[10px]">Date: {apt.appointment_date}</div>
-                          <div className="text-slate-400 italic">Reason: {apt.reason}</div>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                } else {
-                  setRecordsText(
-                    <div className="space-y-2 mt-1">
-                      {r.orders.map((ord: any, idx: number) => (
-                        <div key={idx} className="bg-slate-950/60 border border-slate-850 p-2.5 rounded-lg text-xs flex flex-col gap-1">
-                          <div className="flex justify-between font-bold text-slate-300">
-                            <span>Order #{ord.order_number}</span>
-                            <span className="text-emerald-400 font-normal">{ord.status}</span>
-                          </div>
-                          <div className="text-slate-400 font-mono text-[10px]">Arrival: {ord.estimated_arrival}</div>
-                          <div className="text-slate-400 italic">Items: {ord.items_summary}</div>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                }
-              } else {
-                setRecordsText('—');
-              }
-            }
-            break;
-
           default:
             break;
         }
@@ -310,6 +240,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     setStatusType('');
     setPhoneError('');
     setCodeError('');
+    setNameError('');
 
     if (!selectedCountry) {
       setCodeError('Country code is required');
@@ -320,13 +251,15 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
       setPhoneError('Phone number is required');
       return;
     }
+    if (!customerName.trim()) {
+      setNameError('Customer Name is required for Outreach.');
+      return;
+    }
 
     const combinedNumber = selectedCountry.code + cleanedNumber;
-
-    // Require valid format starting with '+' followed by 7-15 digits
     const phoneRegex = /^\+[1-9]\d{6,14}$/;
     if (!phoneRegex.test(combinedNumber)) {
-      setPhoneError('Please enter a valid phone number (e.g. 9876543210)');
+      setPhoneError('Please enter a valid phone number');
       return;
     }
 
@@ -335,10 +268,12 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
     setTwilioStatus('Initiating outbound call...');
 
     try {
-      const data = await twilioService.dialCall({
+      const data = await outreachService.triggerCall({
         phone_number: combinedNumber,
-        client_id: client.id
+        customer_name: customerName,
+        language: language,
       });
+      
       if (data.success) {
         setCallSid(data.call_sid);
         setStatusType('success');
@@ -348,52 +283,29 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
         setCallState('IDLE');
         setTwilioStatus('Failed');
         setStatusType('error');
-        setStatusMsg(data.detail || 'Failed to place call.');
+        setStatusMsg(data.error || 'Failed to place call');
       }
     } catch (err: any) {
       setCallState('IDLE');
       setTwilioStatus('Error');
       setStatusType('error');
-      setStatusMsg('Error placing call: ' + err.message);
+      setStatusMsg(err.message || 'Error occurred while placing call');
     } finally {
       setDialing(false);
     }
   };
 
-  const handleEndCall = async () => {
+  const handleHangUp = async () => {
     if (!callSid) return;
-    setTwilioStatus('Hanging up...');
-
     try {
-      const data = await twilioService.endCall(callSid);
-      if (data.success) {
-        setCallState('ENDED');
-        setCallSid(null);
-        setTranscript('—');
-        setReplyText('—');
-        setIntent('—');
-        setIdentityText('—');
-        setRecordsText('—');
-        setConsolePhase('IDLE');
-        setStageStates({
-          vad: 'idle',
-          stt: 'idle',
-          conversation: 'idle',
-          llm: 'idle',
-          tts: 'idle'
-        });
-        setTwilioStatus('completed');
-        setStatusType('success');
-        setStatusMsg('Call successfully terminated.');
-      } else {
-        setStatusType('error');
-        setStatusMsg('Failed to terminate call.');
-      }
-    } catch (err: any) {
-      setStatusType('error');
-      setStatusMsg('Error ending call: ' + err.message);
-    } finally {
+      setTwilioStatus('Hanging up...');
+      await twilioService.endCall(callSid);
+      setCallState('ENDED');
+      setTwilioStatus('Completed');
       stopPolling();
+      setCallSid(null);
+    } catch (err) {
+      console.error('Error ending call', err);
     }
   };
 
@@ -402,10 +314,10 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
       <header className="flex justify-between items-center mb-8 animate-fade-in">
         <div>
           <h1 className="text-2xl font-extrabold text-slate-100">
-            Voice Agent Dialer
+            Outreach Console
           </h1>
           <p className="text-slate-400 text-xs mt-1">
-            SaaS Domain: <span className="text-emerald-400 font-bold uppercase tracking-wider">{domainName}</span>
+            Trigger proactive outbound sales calls
           </p>
         </div>
         <Button
@@ -471,43 +383,46 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
             {callState === 'IDLE' || callState === 'ENDED' ? (
               <>
                 <p className="text-slate-400 text-xs text-center select-none uppercase tracking-wider pb-2">
-                  Dial a number to query agent domain records via call
+                  Enter customer details to initiate an outbound call
                 </p>
                 <form onSubmit={handleDialCall} className="flex flex-col gap-4">
-                  <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-start pb-2">
+                  <TextField
+                    label="Customer Name"
+                    placeholder="e.g. John Doe"
+                    variant="outlined"
+                    size="medium"
+                    fullWidth
+                    disabled={dialing}
+                    value={customerName}
+                    onChange={e => {
+                      setCustomerName(e.target.value);
+                      if (nameError) setNameError('');
+                    }}
+                    error={!!nameError}
+                    helperText={nameError}
+                    slotProps={{ inputLabel: { shrink: true } }}
+                  />
+                  <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-start">
                     <Autocomplete
                       id="country-code-select"
                       options={countries}
-                      getOptionLabel={(option) => `${option.code} (${option.cioc ? option.cioc : option.name})`}
-                      filterOptions={(options, state) => {
-                        const query = state.inputValue.toLowerCase();
-                        return options.filter((option) =>
-                          option.code.toLowerCase().includes(query) ||
-                          option.name.toLowerCase().includes(query) ||
-                          (option.cioc && option.cioc.toLowerCase().includes(query))
-                        );
-                      }}
+                      getOptionLabel={(option) => `${option.code} (${option.name})`}
                       value={selectedCountry}
                       onChange={(_event, newValue) => {
                         setSelectedCountry(newValue);
                         if (codeError) setCodeError('');
                       }}
                       disabled={dialing}
-                      sx={{ width: { xs: '100%', sm: 180 }, flexShrink: 0 }}
+                      sx={{ width: { xs: '100%', sm: 140 }, flexShrink: 0 }}
                       renderOption={(props, option) => {
                         const { key, ...optionProps } = props as any;
                         return (
                           <li key={key} {...optionProps} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem' }}>
                             {option.flagUrl && (
-                              <img
-                                src={option.flagUrl}
-                                alt={option.name}
-                                style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover' }}
-                                loading="lazy"
-                              />
+                              <img src={option.flagUrl} alt={option.name} style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover' }} loading="lazy" />
                             )}
                             <span>{option.code}</span>
-                            <span style={{ color: '#64748b', fontSize: '0.75rem' }}>({option.cioc ? option.cioc : option.name})</span>
+                            <span style={{ color: '#64748b', fontSize: '0.75rem' }}>({option.name})</span>
                           </li>
                         );
                       }}
@@ -520,26 +435,14 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
                             startAdornment: (
                               <>
                                 {selectedCountry && selectedCountry.flagUrl && (
-                                  <img
-                                    src={selectedCountry.flagUrl}
-                                    alt={selectedCountry.name}
-                                    style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover', marginRight: '4px' }}
-                                  />
+                                  <img src={selectedCountry.flagUrl} alt={selectedCountry.name} style={{ width: '20px', height: '14px', borderRadius: '2px', objectFit: 'cover', marginRight: '4px' }} />
                                 )}
                                 {p.InputProps?.startAdornment}
                               </>
                             )
                           }
                         } as any;
-                        return (
-                          <TextField
-                            {...customParams}
-                            label="Country Code"
-                            size="medium"
-                            error={!!codeError}
-                            helperText={codeError}
-                          />
-                        );
+                        return <TextField {...customParams} label="Country Code" size="medium" error={!!codeError} helperText={codeError} />;
                       }}
                     />
 
@@ -560,6 +463,20 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
                       slotProps={{ inputLabel: { shrink: true } }}
                     />
                   </div>
+
+                  <TextField
+                    select
+                    fullWidth
+                    label="Language"
+                    value={language}
+                    onChange={(e) => setLanguage(e.target.value as 'en' | 'hi')}
+                    disabled={dialing}
+                    size="medium"
+                  >
+                    <MenuItem value="en">English</MenuItem>
+                    <MenuItem value="hi">Hindi</MenuItem>
+                  </TextField>
+
                   <Button
                     type="submit"
                     variant="contained"
@@ -571,9 +488,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
                     sx={{
                       py: 1.5,
                       background: 'linear-gradient(to right, #059669, #0d9488)',
-                      '&:hover': {
-                        background: 'linear-gradient(to right, #047857, #0f766e)',
-                      }
+                      '&:hover': { background: 'linear-gradient(to right, #047857, #0f766e)' }
                     }}
                   >
                     {dialing ? 'Calling...' : 'Dial Phone Number'}
@@ -582,7 +497,7 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
               </>
             ) : (
               <Button
-                onClick={handleEndCall}
+                onClick={handleHangUp}
                 variant="contained"
                 color="error"
                 size="large"
@@ -596,64 +511,6 @@ export default function AgentCallConsolePage({ client, domainName, pipelineMode 
           </div>
         </div>
 
-        {/* Live Conversation Transcript Panel */}
-        {callState === 'ACTIVE' && pipelineMode !== 'multimodal' && (
-          <div className="border-t border-slate-800/80 pt-4 space-y-4">
-            <div className="flex justify-between items-center select-none">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Live Call Logs</h3>
-              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide bg-slate-950 text-slate-500 border border-slate-900 select-none">
-                Turn {turn}
-              </span>
-            </div>
-
-            <div className="divide-y divide-slate-850 bg-slate-950/40 border border-slate-850/80 rounded-xl p-4 space-y-3">
-              <div className="pb-3 flex flex-col sm:flex-row sm:items-start border-b border-slate-850">
-                <span className="w-20 text-[10px] font-bold text-slate-500 uppercase tracking-wider sm:pt-0.5 mb-1 sm:mb-0 select-none">Transcript</span>
-                <span className="flex-1 text-xs font-semibold text-slate-200">{transcript}</span>
-              </div>
-              <div className="py-3 flex flex-col sm:flex-row sm:items-start border-b border-slate-850">
-                <span className="w-20 text-[10px] font-bold text-slate-500 uppercase tracking-wider sm:pt-0.5 mb-1 sm:mb-0 select-none">Reply</span>
-                <span className="flex-1 text-xs font-semibold text-emerald-400">{replyText}</span>
-              </div>
-              <div className="py-3 flex flex-col sm:flex-row sm:items-start border-b border-slate-850">
-                <span className="w-20 text-[10px] font-bold text-slate-500 uppercase tracking-wider sm:pt-0.5 mb-1 sm:mb-0 select-none">Intent</span>
-                <span className="flex-1 text-xs font-bold text-violet-400">{intent}</span>
-              </div>
-              <div className="py-3 flex flex-col sm:flex-row sm:items-start border-b border-slate-850">
-                <span className="w-20 text-[10px] font-bold text-slate-500 uppercase tracking-wider sm:pt-0.5 mb-1 sm:mb-0 select-none">Identity</span>
-                <span className="flex-1 text-xs font-semibold text-slate-200">{identityText}</span>
-              </div>
-              <div className="pt-3 flex flex-col sm:flex-row sm:items-start">
-                <span className="w-20 text-[10px] font-bold text-slate-500 uppercase tracking-wider sm:pt-0.5 mb-1 sm:mb-0 select-none">Records</span>
-                <div className="flex-1 text-xs font-semibold text-slate-200">{recordsText}</div>
-              </div>
-            </div>
-
-            {/* Stage states pipeline */}
-            <div className="flex justify-center flex-wrap gap-2 pt-2 select-none">
-              {Object.entries(stageStates).map(([stage, status]) => (
-                <span
-                  key={stage}
-                  className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider border transition-all duration-300
-                    ${status === 'active' ? 'bg-violet-950/80 text-violet-400 border-violet-700/60 animate-pulse' : ''}
-                    ${status === 'done' ? 'bg-emerald-950/80 text-emerald-400 border-emerald-800/60' : ''}
-                    ${status === 'error' ? 'bg-red-950/80 text-red-400 border-red-850' : ''}
-                    ${status === 'idle' ? 'bg-slate-950/50 text-slate-500 border-slate-900' : ''}
-                  `}
-                >
-                  <FiberManualRecordIcon
-                    sx={{
-                      fontSize: 8,
-                      animation: status === 'active' ? 'pulse 1s infinite' : 'none',
-                      color: status === 'active' ? '#a78bfa' : status === 'done' ? '#34d399' : status === 'error' ? '#ef4444' : '#475569'
-                    }}
-                  />
-                  {stage}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
 
         {statusMsg && (
           <Alert severity={statusType === 'success' ? 'success' : 'error'} variant="outlined" sx={{ width: '100%', mt: 2 }}>
