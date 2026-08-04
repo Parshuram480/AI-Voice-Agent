@@ -24,7 +24,6 @@ ENV_PATH = ROOT_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 import audioop
 import uuid
-from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +58,75 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+async def load_dynamic_config(client_id: int, session_id: str) -> dict:
+    """
+    Load dynamic configuration for a client including tools, executor, prompt, and gemini key.
+
+    Args:
+        client_id: The client identifier.
+        session_id: Session identifier for logging.
+
+    Returns:
+        Dictionary with dynamic_tools, dynamic_executor, system_prompt, domain, gemini_api_key.
+        Returns empty dict if config not found or error occurs.
+    """
+    if not client_id:
+        return {}
+
+    try:
+        from app.system_database import SystemDatabase
+        from app.services.schema_service import SchemaService
+        from app.services.dynamic_tool_factory import DynamicToolFactory
+        from app.services.dynamic_tool_executor import DynamicToolExecutor
+        from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+        from app.dynamic_db_client import DynamicDbClient
+
+        sys_db = SystemDatabase()
+        client_mapping = await sys_db.get_client_domain_mapping(client_id)
+        if not client_mapping or not client_mapping.get("dynamic_config"):
+            return {}
+
+        dyn_cfg = json.loads(client_mapping["dynamic_config"])
+        db_config = await sys_db.get_client_db_config(client_id)
+        if not db_config:
+            return {}
+
+        dyn_cfg["database"] = db_config
+        dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+
+        schema_service = SchemaService(db_config)
+        schema_metadata = await schema_service.get_schema_metadata()
+
+        tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+        tools, exec_map = tool_factory.generate_tools()
+
+        dyn_db_client = DynamicDbClient(db_config)
+        executor = DynamicToolExecutor(
+            dyn_db_client,
+            exec_map,
+            dyn_cfg["identity"]["table"],
+            dyn_cfg["identity"]["name_column"],
+            dyn_cfg["identity"]["verification_column"],
+        )
+        prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+
+        # Load client-specific Gemini API key (optional, falls back to env var)
+        gemini_key = await sys_db.get_client_gemini_key(client_id)
+
+        logger.info(f"[{session_id}] Configured dynamic tools for client {client_id}")
+        return {
+            "dynamic_tools": tools,
+            "dynamic_executor": executor,
+            "system_prompt": prompt,
+            "domain": dyn_cfg["domain"],
+            "gemini_api_key": gemini_key,
+        }
+    except Exception as e:
+        logger.error(f"[{session_id}] Error loading dynamic config for client {client_id}: {e}")
+        return {}
+
 
 # --- Environment Variables ---
 SERVER_HOST = os.getenv("SERVER_HOST", "http://localhost:8000")

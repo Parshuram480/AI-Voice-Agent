@@ -975,12 +975,49 @@ class StreamingVoicePipeline:
             # Decide if we stream TTS directly from LangGraph (only if not rephrasing)
             stream_direct = not (self.rephraser and self.rephraser.enabled)
 
+            # Start periodic filler task to bridge the gap until first LLM token
+            first_token_received = asyncio.Event()
+
+            async def _periodic_filler():
+                """Send periodic fillers while waiting for first LLM token."""
+                try:
+                    # Wait a bit after initial filler before sending more
+                    await asyncio.sleep(2.0)
+                    while not first_token_received.is_set():
+                        if self._fillers and on_tts_audio:
+                            filler_phrase = self._fillers.get_filler("thinking")
+                            if filler_phrase:
+                                filler_audio = self.tts_cache.get(filler_phrase)
+                                if not filler_audio:
+                                    if self.tts_provider == "cartesia" and self.cartesia:
+                                        filler_audio = await self.cartesia.text_to_speech(filler_phrase)
+                                    else:
+                                        filler_audio = await self.groq.text_to_speech(filler_phrase)
+                                    self.tts_cache.put(filler_phrase, filler_audio)
+                                if filler_audio:
+                                    on_tts_audio(filler_audio)
+                                    logger.info(f"[{utterance_id}] Periodic filler sent: '{filler_phrase}'")
+                        # Wait before next filler (avoid overlapping)
+                        await asyncio.sleep(3.5)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"Periodic filler error: {e}")
+
+            filler_task = asyncio.create_task(_periodic_filler())
+
             def _handle_llm_token(token: str):
                 if on_llm_token:
                     try:
                         on_llm_token(token)
                     except Exception:
                         pass
+                
+                # Signal first token received to stop periodic fillers
+                if not first_token_received.is_set():
+                    first_token_received.set()
+                    if filler_task and not filler_task.done():
+                        filler_task.cancel()
                 
                 if stream_direct:
                     token_buffer.append(token)
@@ -1051,11 +1088,20 @@ class StreamingVoicePipeline:
             except Exception as e:
                 logger.exception(f"[{utterance_id}] Conversation service error: {e}")
                 _stage("conversation", "failed", str(e))
+                # Stop periodic filler on error
+                if filler_task and not filler_task.done():
+                    filler_task.cancel()
                 if stream_direct:
                     tts_queue.put_nowait(None)
                     await tts_consumer_task
                 result["reply_text"] = "I'm sorry, something went wrong. Please try again."
             finally:
+                if filler_task and not filler_task.done():
+                    filler_task.cancel()
+                    try:
+                        await filler_task
+                    except asyncio.CancelledError:
+                        pass
                 if tts_consumer_task and not tts_consumer_task.done():
                     tts_consumer_task.cancel()
                     try:

@@ -209,12 +209,22 @@ class TwilioHandler:
         """
         Initiates an outbound call to the given phone number.
         """
-        if not self._client:
-            raise ValueError("Twilio client is not initialized. Please check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.")
+        from app.system_database import SystemDatabase
+        sys_db = SystemDatabase()
+        client_cfg = await sys_db.get_client_twilio_config(client_id)
         
-        twilio_from = os.getenv("TWILIO_PHONE_NUMBER")
+        if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+            client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+            twilio_from = client_cfg["phone_number"]
+            logger.info(f"Using client-specific Twilio credentials for client {client_id}")
+        else:
+            if not self._client:
+                raise ValueError("Twilio client is not initialized. Please configure client Twilio credentials or server default credentials.")
+            client = self._client
+            twilio_from = os.getenv("TWILIO_PHONE_NUMBER")
+
         if not twilio_from:
-            raise ValueError("TWILIO_PHONE_NUMBER environment variable is not configured.")
+            raise ValueError("TWILIO_PHONE_NUMBER is not configured.")
         
         # Prioritize NGROK_URL environment variable if configured
         ngrok_url = os.getenv("NGROK_URL")
@@ -236,7 +246,7 @@ class TwilioHandler:
         
         import anyio
         call = await anyio.to_thread.run_sync(
-            lambda: self._client.calls.create(
+            lambda: client.calls.create(
                 to=to_number,
                 from_=twilio_from,
                 url=callback_url,
@@ -246,30 +256,52 @@ class TwilioHandler:
         logger.info(f"Outbound call successfully initiated. Call SID: {call.sid}")
         return call.sid
 
-    async def get_call_status(self, call_sid: str) -> str:
+    async def get_call_status(self, call_sid: str, client_id: Optional[int] = None) -> str:
         """
         Retrieves the status of a live or completed call from Twilio.
         """
-        if not self._client:
+        client = None
+        if client_id:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_cfg = await sys_db.get_client_twilio_config(client_id)
+            if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+                client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+                
+        if not client:
+            client = self._client
+
+        if not client:
             raise ValueError("Twilio client is not initialized.")
         
         import anyio
         call = await anyio.to_thread.run_sync(
-            lambda: self._client.calls(call_sid).fetch()
+            lambda: client.calls(call_sid).fetch()
         )
         return call.status
 
-    async def end_call(self, call_sid: str) -> bool:
+    async def end_call(self, call_sid: str, client_id: Optional[int] = None) -> bool:
         """
         Terminates a live Twilio call.
         """
-        if not self._client:
+        client = None
+        if client_id:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_cfg = await sys_db.get_client_twilio_config(client_id)
+            if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+                client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+                
+        if not client:
+            client = self._client
+
+        if not client:
             raise ValueError("Twilio client is not initialized.")
         
         import anyio
         try:
             await anyio.to_thread.run_sync(
-                lambda: self._client.calls(call_sid).update(status="completed")
+                lambda: client.calls(call_sid).update(status="completed")
             )
             return True
         except Exception as e:

@@ -98,9 +98,10 @@ VOICE_GENDERS = {
 }
 
 class FillerAudioService:
-    def __init__(self, cache_dir: str = "data/audio_cache/fillers", cooldown_size: int = 3):
+    def __init__(self, cache_dir: str = "data/audio_cache/fillers", cooldown_size: int = 3, api_key: str = None):
         self.cache_dir = Path(cache_dir)
         self.cooldown_size = cooldown_size
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
         
         # In-memory cache of PCM byte arrays
         # Format: self._cache[language][category][latency_type] = [pcm_bytes, pcm_bytes, ...]
@@ -120,11 +121,14 @@ class FillerAudioService:
             return f"hi_{self.voice_gender}"
         return language
 
-    async def initialize(self):
+    async def initialize(self, api_key: str = None):
         """
         Loads cached clips from disk or generates them if missing.
         Should be called at server startup.
         """
+        if api_key:
+            self.api_key = api_key
+            
         self.voice_cache_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Initializing FillerAudioService for voice '{self.voice_name}' (Gender: {self.voice_gender})...")
@@ -142,12 +146,11 @@ class FillerAudioService:
                 
         # Generate or load
         tasks = []
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
+        if not self.api_key:
             logger.warning("GOOGLE_API_KEY not set. FillerAudioService disabled.")
             return
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=self.api_key)
 
         for lang, categories in FILLER_PHRASES.items():
             # Skip genders that do not match the current voice

@@ -9,7 +9,7 @@ from app.services.base_tool_factory import BaseToolFactory
 
 class DynamicToolFactory(BaseToolFactory):
     """Generates Gemini function declarations and SQL maps from schema."""
-    MAX_TOOLS = 7
+    MAX_TOOLS = 12
 
     def __init__(self, config: Dict[str, Any], schema_metadata: Dict[str, Any]):
         super().__init__(config, schema_metadata)
