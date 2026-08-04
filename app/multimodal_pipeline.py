@@ -42,7 +42,7 @@ class GeminiLivePipeline:
     Multimodal pipeline using Gemini Live API.
     Replaces StreamingVoicePipeline when PIPELINE_MODE=multimodal.
     """
-    def __init__(self, verification_service, order_service, db_client: DatabaseClient, client_id: str = None, domain: str = None, filler_service=None):
+    def __init__(self, verification_service, order_service, db_client: DatabaseClient, client_id: str = None, domain: str = None, filler_service=None, gemini_api_key: str = None):
         self.verification_service = verification_service
         self.order_service = order_service
         self.db = db_client
@@ -50,6 +50,7 @@ class GeminiLivePipeline:
         self.client_id = client_id
         self.domain = domain
         self.filler_service = filler_service
+        self.gemini_api_key = gemini_api_key
 
     async def process_stream(
         self,
@@ -168,14 +169,23 @@ class GeminiLivePipeline:
         dynamic_tools = kwargs.get("dynamic_tools")
         dynamic_executor = kwargs.get("dynamic_executor")
         system_prompt = kwargs.get("system_prompt")
+        gemini_api_key = kwargs.get("gemini_api_key") or self.gemini_api_key
         
         session_client = GeminiLiveClient(
             self.verification_service,
             self.order_service,
             dynamic_tools=dynamic_tools,
             dynamic_executor=dynamic_executor,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            api_key=gemini_api_key
         )
+        
+        # Initialize filler service with API key if available and not already initialized
+        if self.filler_service and not self.filler_service.is_ready and gemini_api_key:
+            try:
+                await self.filler_service.initialize(api_key=gemini_api_key)
+            except Exception as e:
+                logger.warning(f"Failed to initialize filler service: {e}")
         
         # Connect to Gemini
         try:

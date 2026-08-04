@@ -86,11 +86,14 @@ class GeminiLiveClient:
         order_service: OrderService,
         dynamic_tools: list = None,
         dynamic_executor = None,
-        system_prompt: str = None
+        system_prompt: str = None,
+        api_key: str = None
     ):
-        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
-            logger.warning("GOOGLE_API_KEY is not set. Gemini Multimodal pipeline will fail.")
+            raise ValueError(
+                "Gemini API key is not configured. Please add your own API key in the Database Wizard settings or configure GOOGLE_API_KEY in the server environment."
+            )
             
         self.client = genai.Client(api_key=self.api_key)
         self.model = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")

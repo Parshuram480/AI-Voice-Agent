@@ -106,7 +106,11 @@ class SystemDatabase:
                 enable_ssl                  INTEGER DEFAULT 0,
                 trust_server_certificate    INTEGER DEFAULT 0,
                 connection_timeout          INTEGER DEFAULT 5,
-                connection_string           TEXT
+                connection_string           TEXT,
+                gemini_api_key              VARCHAR(255),
+                twilio_account_sid          VARCHAR(255),
+                twilio_auth_token           VARCHAR(255),
+                twilio_phone_number         VARCHAR(50)
             );
             """)
 
@@ -172,9 +176,14 @@ class SystemDatabase:
                     ALTER TABLE client_database_configurations
                         ADD CONSTRAINT client_database_configurations_client_id_key UNIQUE (client_id);
                 END IF;
-            END
-            $$;
-            """)
+             $$;
+             """)
+
+            # Ensure all Gemini and Twilio credential columns exist (self-healing migration)
+            await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS gemini_api_key VARCHAR(255);")
+            await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_account_sid VARCHAR(255);")
+            await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_auth_token VARCHAR(255);")
+            await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_phone_number VARCHAR(50);")
 
         # Seed standard domains
         await self._seed_domains()
@@ -353,6 +362,8 @@ class SystemDatabase:
             config = dict(row)
             config["password"] = decrypt(config.get("password"))
             config["connection_string"] = decrypt(config.get("connection_string"))
+            config["gemini_api_key"] = decrypt(config.get("gemini_api_key")) if config.get("gemini_api_key") else None
+            config["twilio_auth_token"] = decrypt(config.get("twilio_auth_token")) if config.get("twilio_auth_token") else None
             return config
 
     async def save_client_db_config(self, client_id: int, db_config: Dict[str, Any]):
@@ -389,6 +400,57 @@ class SystemDatabase:
                 db_config.get("connection_timeout", 5),
                 encrypt(db_config.get("connection_string"))
             )
+
+    async def save_client_gemini_key(self, client_id: int, api_key: str):
+        """Save encrypted Gemini API key for a client."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            UPDATE client_database_configurations
+            SET gemini_api_key = $1
+            WHERE client_id = $2
+            """, encrypt(api_key), client_id)
+
+    async def get_client_gemini_key(self, client_id: int) -> Optional[str]:
+        """Get decrypted Gemini API key for a client."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT gemini_api_key FROM client_database_configurations WHERE client_id = $1",
+                client_id
+            )
+            if row and row["gemini_api_key"]:
+                return decrypt(row["gemini_api_key"])
+            return None
+
+    async def save_client_twilio_config(self, client_id: int, account_sid: str, auth_token: str, phone_number: str):
+        """Save encrypted Twilio config for a client."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            UPDATE client_database_configurations
+            SET twilio_account_sid = $1,
+                twilio_auth_token = $2,
+                twilio_phone_number = $3
+            WHERE client_id = $4
+            """, account_sid, encrypt(auth_token) if auth_token else "", phone_number, client_id)
+
+    async def get_client_twilio_config(self, client_id: int) -> Optional[Dict[str, Any]]:
+        """Get decrypted Twilio configuration for a client."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+            SELECT twilio_account_sid, twilio_auth_token, twilio_phone_number
+            FROM client_database_configurations
+            WHERE client_id = $1
+            """, client_id)
+            if row and row["twilio_account_sid"]:
+                return {
+                    "account_sid": row["twilio_account_sid"],
+                    "auth_token": decrypt(row["twilio_auth_token"]) if row["twilio_auth_token"] else "",
+                    "phone_number": row["twilio_phone_number"]
+                }
+            return None
 
     async def get_client_domain_mapping(self, client_id: int) -> Optional[Dict[str, Any]]:
         pool = await self._get_conn()
