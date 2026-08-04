@@ -9,7 +9,6 @@ from typing import Optional, Annotated, Sequence, TypedDict, Callable
 import operator
 
 import asyncio
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,7 +19,6 @@ from app.models.session import SessionState
 from app.services.order_service import OrderService
 from app.services.verification_service import VerificationService
 from app.session.manager import SessionManager
-from app.logging.logger import log_llm_metrics
 from datetime import datetime, date
 from app.system_database import SystemDatabase
 from app.utils.prompt_loader import get_prompts
@@ -280,7 +278,6 @@ class AgentService:
             
         # --- LLM Metrics Tracking Variables ---
         llm_usage = None
-        streaming_started_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         history_tokens = 0
         summary_tokens = 0
         current_user_tokens = 0
@@ -502,7 +499,6 @@ class AgentService:
             
         # --- LLM Metrics Tracking Variables ---
         llm_usage = None
-        streaming_started_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         history_tokens = 0
         summary_tokens = 0
         current_user_tokens = 0
@@ -1015,17 +1011,8 @@ class AgentService:
                                 for table_name, columns in selected_tables.items():
                                     if table_name == identity_table:
                                         continue
-                                    # Since we don't know the exact FK name without introspecting, 
-                                    # we assume there's a column linking to identity_table (e.g. `customer_id` or `patient_id`)
-                                    # Wait, DynamicToolFactory does this introspection in initialization. We can just run a broad SELECT
-                                    # with the assumption that the ID column matches `customer_id` or `identity_id`.
-                                    # If that's complex, we can gracefully fallback. Wait, earlier implementation plan suggested:
-                                    # fk_col = fk... If we don't have FK in dyn_cfg, this is hard.
-                                    # For simplicity in LangGraph pipeline, let's just attempt a common FK pattern or skip linked auto-fetch.
-                                    # Gemini pipeline does this inside DynamicToolExecutor.
-                                    # Wait, the LLM will just use `get_<table_name>` tools later to fetch records in dynamic mode.
-                                    # Actually, in dynamic mode, we DO NOT NEED to automatically fetch linked records during verification.
-                                    # The LLM will call the `get_` tools. Let's just return empty records here for dynamic config.
+                                    # In dynamic mode, we don't auto-fetch linked records during verification.
+                                    # The LLM will call the `get_<table_name>` tools later to fetch records.
                                     pass
                             else:
                                 data_query = mapping.get("data_query")
@@ -1105,29 +1092,25 @@ class AgentService:
                                             item[k] = v.isoformat()
                                     records.append(item)
                             elif dyn_cfg:
-                                # For dynamic tools like get_appointments, the LLM will just use it.
-                                # Actually, this branch handles ALL non-verify tools.
-                                # We need to use DynamicToolExecutor here if dynamic mode is on.
+                                # Dynamic tools are handled by DynamicToolExecutor in multimodal pipeline.
+                                # In cascade mode, we don't execute them here; LLM uses tools directly.
                                 pass
                         except Exception as e:
                             logger.error(f"Error fetching data for domain: {e}")
                             result_str = json.dumps({"error": str(e)})
-                            
-                    # Note: We should ideally delegate to DynamicToolExecutor for other tools.
-                    # But for now, we leave the legacy behavior intact or let the tool return success if records were fetched.
-                    if records:
-                        result_str = json.dumps({"records": records})
-                    elif not dyn_cfg:
-                        result_str = json.dumps({"records": [], "message": "No records found."})
-                    else:
-                        # If dyn_cfg, we should really use DynamicToolExecutor, but since we didn't inject it into AgentService, 
-                        # let's just use the local order_service as fallback if the tool is get_order_status
-                        if tool_name in ["get_order_status", "get_patient_records", "get_records"]:
-                            raw_orders = await self._orders.get_orders(state["customer"].get("id"))
-                            result_str = json.dumps({"records": raw_orders.get("recent_orders", [])})
+                        
+                        if records:
+                            result_str = json.dumps({"records": records})
+                        elif not dyn_cfg:
+                            result_str = json.dumps({"records": [], "message": "No records found."})
                         else:
-                            # Not handled here natively yet.
-                            result_str = json.dumps({"error": f"Tool {tool_name} is not fully implemented in the Cascade pipeline yet. Multimodal pipeline handles this."})
+                            # If dyn_cfg, tools should be executed by DynamicToolExecutor in multimodal pipeline.
+                            # Fallback for cascade pipeline with legacy tools.
+                            if tool_name in ["get_order_status", "get_patient_records", "get_records"]:
+                                raw_orders = await self._orders.get_orders(state["customer"].get("id"))
+                                result_str = json.dumps({"records": raw_orders.get("recent_orders", [])})
+                            else:
+                                result_str = json.dumps({"error": f"Tool {tool_name} is not fully implemented in the Cascade pipeline yet. Multimodal pipeline handles this."})
 
                 if "error" not in result_str and not dyn_cfg:
                     # Updates for legacy

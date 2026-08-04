@@ -11,6 +11,7 @@ export interface DbConfig {
   enable_ssl?: boolean;
   trust_server_certificate?: boolean;
   connection_timeout?: number;
+  gemini_api_key?: string;
 }
 
 export const tenantService = {
@@ -61,6 +62,44 @@ export const tenantService = {
     return request(`${API_BASE}/api/tenant/db-config/save-rules`, {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  async saveGeminiKey(apiKey: string) {
+    return request(`${API_BASE}/api/tenant/gemini-key`, {
+      method: 'POST',
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+  },
+
+  async getGeminiKey() {
+    return request(`${API_BASE}/api/tenant/gemini-key`, {
+      method: 'GET',
+    });
+  },
+
+  async deleteGeminiKey() {
+    return request(`${API_BASE}/api/tenant/gemini-key`, {
+      method: 'DELETE',
+    });
+  },
+
+  async saveTwilioConfig(config: { account_sid: string; auth_token: string; phone_number: string }) {
+    return request(`${API_BASE}/api/tenant/twilio-config`, {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  },
+
+  async getTwilioConfig() {
+    return request(`${API_BASE}/api/tenant/twilio-config`, {
+      method: 'GET',
+    });
+  },
+
+  async deleteTwilioConfig() {
+    return request(`${API_BASE}/api/tenant/twilio-config`, {
+      method: 'DELETE',
     });
   },
 };

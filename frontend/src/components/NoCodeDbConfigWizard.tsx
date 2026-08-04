@@ -22,6 +22,10 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import BuildIcon from '@mui/icons-material/Build';
+import VisibilityIcon from '@mui/icons-material/Visibility';
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
+import PsychologyIcon from '@mui/icons-material/Psychology';
+import KeyIcon from '@mui/icons-material/Key';
 
 import { tenantService } from '../services/tenantService';
 
@@ -66,10 +70,18 @@ export default function NoCodeDbConfigWizard({
   const [port, setPort] = useState<number | ''>(initialDbConfig?.port || 5432);
   const [username, setUsername] = useState(initialDbConfig?.username || 'postgres');
   const [passwordDb, setPasswordDb] = useState(initialDbConfig?.password || '');
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(initialDbConfig?.gemini_api_key || '');
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [schemaName] = useState('');
   const [enableSsl] = useState(false);
   const [trustCert] = useState(false);
   const [timeout] = useState(5);
+  const [serverKeyExists, setServerKeyExists] = useState<boolean | null>(null);
+  const [twilioAccountSid, setTwilioAccountSid] = useState('');
+  const [twilioAuthToken, setTwilioAuthToken] = useState('');
+  const [twilioPhoneNumber, setTwilioPhoneNumber] = useState('');
+  const [showTwilioToken, setShowTwilioToken] = useState(false);
+  const [serverTwilioKeyExists, setServerTwilioKeyExists] = useState<boolean | null>(null);
 
   const [schemaData, setSchemaData] = useState<Record<string, string[]>>({});
   const [loadingIntrospect, setLoadingIntrospect] = useState(false);
@@ -96,6 +108,30 @@ export default function NoCodeDbConfigWizard({
   const [loadingSave, setLoadingSave] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
+  // Query server default key availability on mount
+  useEffect(() => {
+    const checkKeyStatus = async () => {
+      try {
+        const res = await tenantService.getGeminiKey();
+        if (res) {
+          setServerKeyExists(res.server_key_exists);
+        }
+      } catch (err) {
+        console.error("Failed to check Gemini API Key status", err);
+      }
+
+      try {
+        const res = await tenantService.getTwilioConfig();
+        if (res) {
+          setServerTwilioKeyExists(res.server_key_exists);
+        }
+      } catch (err) {
+        console.error("Failed to check Twilio config status", err);
+      }
+    };
+    checkKeyStatus();
+  }, []);
+
   // Pre-fill state whenever initialDbConfig or initialMetadata changes
   useEffect(() => {
     if (initialDbConfig) {
@@ -104,6 +140,10 @@ export default function NoCodeDbConfigWizard({
       if (initialDbConfig.server_name) setServerAddress(initialDbConfig.server_name);
       if (initialDbConfig.port) setPort(initialDbConfig.port);
       if (initialDbConfig.username) setUsername(initialDbConfig.username);
+      if (initialDbConfig.gemini_api_key) setGeminiApiKey(initialDbConfig.gemini_api_key);
+      if (initialDbConfig.twilio_account_sid) setTwilioAccountSid(initialDbConfig.twilio_account_sid);
+      if (initialDbConfig.twilio_auth_token) setTwilioAuthToken(initialDbConfig.twilio_auth_token);
+      if (initialDbConfig.twilio_phone_number) setTwilioPhoneNumber(initialDbConfig.twilio_phone_number);
     }
     if (initialMetadata) {
       const custTab = initialMetadata.identity?.table || initialMetadata.customerTable || '';
@@ -310,6 +350,22 @@ export default function NoCodeDbConfigWizard({
     setLoadingSave(true);
     setSaveSuccessMsg('');
     try {
+      if (geminiApiKey) {
+        await tenantService.saveGeminiKey(geminiApiKey);
+      } else {
+        await tenantService.deleteGeminiKey();
+      }
+
+      if (twilioAccountSid && twilioAuthToken && twilioPhoneNumber) {
+        await tenantService.saveTwilioConfig({
+          account_sid: twilioAccountSid,
+          auth_token: twilioAuthToken,
+          phone_number: twilioPhoneNumber,
+        });
+      } else {
+        await tenantService.deleteTwilioConfig();
+      }
+
       const res = await tenantService.saveRules({
         db_config: getDbConfigPayload(),
         domain_id: domainId,
@@ -472,6 +528,131 @@ export default function NoCodeDbConfigWizard({
               />
             </div>
           )}
+
+          {/* Gemini API Key Section */}
+          <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <PsychologyIcon sx={{ fontSize: 20, color: '#a78bfa' }} />
+              <h4 className="text-sm font-bold text-slate-200">Gemini API Key (Optional)</h4>
+            </div>
+            <p className="text-xs text-slate-400">
+              Provide your own Google Gemini API key for the multimodal voice agent. 
+              If not provided, the server's default key will be used. 
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:underline">
+                Get your API key
+              </a>
+            </p>
+            <TextField
+              {...({
+                size: "small",
+                fullWidth: true,
+                label: "Gemini API Key",
+                type: showGeminiKey ? 'text' : 'password',
+                value: geminiApiKey,
+                onChange: (e: any) => setGeminiApiKey(e.target.value),
+                placeholder: "AIzaSy... (leave blank to use server default)",
+                InputProps: {
+                  endAdornment: (
+                    <Button
+                      type="button"
+                      size="small"
+                      onClick={() => setShowGeminiKey(!showGeminiKey)}
+                      sx={{ px: 1, py: 0 }}
+                    >
+                      {showGeminiKey ? (
+                        <VisibilityOffIcon fontSize="small" />
+                      ) : (
+                        <VisibilityIcon fontSize="small" />
+                      )}
+                    </Button>
+                  )
+                }
+              } as any)}
+            />
+            <p className="text-xs text-slate-500">
+              {geminiApiKey ? (
+                <>
+                  <KeyIcon sx={{ fontSize: 12, verticalAlign: 'middle' }} /> Key configured ({geminiApiKey.length} chars)
+                </>
+              ) : serverKeyExists === false ? (
+                <span className="text-amber-500 font-semibold">
+                  ⚠️ No server default key is set. You must provide an API key to use the voice agent.
+                </span>
+              ) : (
+                'Using server default key from environment variable'
+              )}
+            </p>
+          </div>
+
+          {/* Twilio Configuration Section */}
+          <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3 mt-4">
+            <div className="flex items-center gap-2">
+              <BuildIcon sx={{ fontSize: 20, color: '#f43f5e' }} />
+              <h4 className="text-sm font-bold text-slate-200">Twilio Configuration (Optional)</h4>
+            </div>
+            <p className="text-xs text-slate-400">
+              Provide your own Twilio Account SID, Auth Token, and Phone Number.
+              If not provided, the server default environment configuration will be used.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <TextField
+                size="small"
+                fullWidth
+                label="Twilio Account SID"
+                value={twilioAccountSid}
+                onChange={(e) => setTwilioAccountSid(e.target.value)}
+                placeholder="AC..."
+              />
+              <TextField
+                size="small"
+                fullWidth
+                label="Twilio Phone Number"
+                value={twilioPhoneNumber}
+                onChange={(e) => setTwilioPhoneNumber(e.target.value)}
+                placeholder="+15551234567"
+              />
+            </div>
+            <TextField
+              {...({
+                size: "small",
+                fullWidth: true,
+                label: "Twilio Auth Token",
+                type: showTwilioToken ? 'text' : 'password',
+                value: twilioAuthToken,
+                onChange: (e: any) => setTwilioAuthToken(e.target.value),
+                placeholder: "Auth Token (leave blank to use server default)",
+                InputProps: {
+                  endAdornment: (
+                    <Button
+                      type="button"
+                      size="small"
+                      onClick={() => setShowTwilioToken(!showTwilioToken)}
+                      sx={{ px: 1, py: 0 }}
+                    >
+                      {showTwilioToken ? (
+                        <VisibilityOffIcon fontSize="small" />
+                      ) : (
+                        <VisibilityIcon fontSize="small" />
+                      )}
+                    </Button>
+                  )
+                }
+              } as any)}
+            />
+            <p className="text-xs text-slate-500">
+              {twilioAccountSid && twilioAuthToken && twilioPhoneNumber ? (
+                <>
+                  <CheckCircleIcon sx={{ fontSize: 12, color: '#10b981', verticalAlign: 'middle' }} /> Custom Twilio settings configured
+                </>
+              ) : serverTwilioKeyExists === false ? (
+                <span className="text-amber-500 font-semibold">
+                  ⚠️ No server default Twilio configuration is set. You must configure Twilio to make outbound calls.
+                </span>
+              ) : (
+                'Using server default Twilio configuration from environment variables'
+              )}
+            </p>
+          </div>
 
           <div className="flex justify-end pt-4">
             <Button

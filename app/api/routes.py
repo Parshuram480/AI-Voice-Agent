@@ -69,6 +69,14 @@ class DbConfigRequest(BaseModel):
     trust_server_certificate: Optional[bool] = False
     connection_timeout: Optional[int] = 5
 
+class GeminiKeyRequest(BaseModel):
+    api_key: str
+
+class TwilioConfigRequest(BaseModel):
+    account_sid: str
+    auth_token: str
+    phone_number: str
+
 class CallRequest(BaseModel):
     phone_number: str
     client_id: Optional[int] = None
@@ -497,6 +505,136 @@ def create_api_router(
             logger.error(f"Error refreshing schema: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
+    # -------------------------------------------------------------------------
+    # Gemini API Key Management
+    # -------------------------------------------------------------------------
+
+    @router.post("/api/tenant/gemini-key")
+    async def save_gemini_key(req: GeminiKeyRequest, request: Request):
+        """Save or update the client's Gemini API key."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        if not req.api_key or not req.api_key.strip():
+            raise HTTPException(status_code=400, detail="API key cannot be empty.")
+
+        try:
+            await system_db.save_client_gemini_key(client_id, req.api_key.strip())
+            return {"success": True, "message": "Gemini API key saved successfully."}
+        except Exception as e:
+            logger.error(f"Error saving Gemini key: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+    @router.get("/api/tenant/gemini-key")
+    async def get_gemini_key(request: Request):
+        """Check if the client has a Gemini API key configured (returns masked preview)."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        try:
+            import os
+            server_key_exists = bool(os.getenv("GOOGLE_API_KEY"))
+            
+            key = await system_db.get_client_gemini_key(client_id)
+            if key:
+                # Return masked preview (first 8 and last 4 characters)
+                masked = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "****"
+                return {"has_key": True, "masked_key": masked, "server_key_exists": server_key_exists}
+            return {"has_key": False, "masked_key": None, "server_key_exists": server_key_exists}
+        except Exception as e:
+            logger.error(f"Error retrieving Gemini key: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+    @router.delete("/api/tenant/gemini-key")
+    async def delete_gemini_key(request: Request):
+        """Remove the client's Gemini API key (falls back to env var)."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        try:
+            # Save empty string to clear the key
+            await system_db.save_client_gemini_key(client_id, "")
+            return {"success": True, "message": "Gemini API key removed. Will use server default."}
+        except Exception as e:
+            logger.error(f"Error deleting Gemini key: {e}")
+            raise HTTPException(status_code=500, detail=str(e))    # -------------------------------------------------------------------------
+    # Twilio Configuration Management
+    # -------------------------------------------------------------------------
+
+    @router.post("/api/tenant/twilio-config")
+    async def save_twilio_config(req: TwilioConfigRequest, request: Request):
+        """Save or update the client's Twilio configuration."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        if not req.account_sid or not req.auth_token or not req.phone_number:
+            raise HTTPException(status_code=400, detail="All Twilio configuration fields are required.")
+
+        try:
+            await system_db.save_client_twilio_config(
+                client_id, req.account_sid.strip(), req.auth_token.strip(), req.phone_number.strip()
+            )
+            return {"success": True, "message": "Twilio configuration saved successfully."}
+        except Exception as e:
+            logger.error(f"Error saving Twilio config: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+    @router.get("/api/tenant/twilio-config")
+    async def get_twilio_config(request: Request):
+        """Retrieve the client's Twilio configuration (returns masked token)."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        try:
+            import os
+            server_key_exists = bool(os.getenv("TWILIO_ACCOUNT_SID"))
+            
+            cfg = await system_db.get_client_twilio_config(client_id)
+            if cfg and cfg.get("account_sid"):
+                masked_token = f"{cfg['auth_token'][:4]}...{cfg['auth_token'][-4:]}" if len(cfg['auth_token']) > 8 else "****"
+                return {
+                    "has_config": True,
+                    "account_sid": cfg["account_sid"],
+                    "masked_auth_token": masked_token,
+                    "phone_number": cfg["phone_number"],
+                    "server_key_exists": server_key_exists
+                }
+            return {"has_config": False, "server_key_exists": server_key_exists}
+        except Exception as e:
+            logger.error(f"Error retrieving Twilio config: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+    @router.delete("/api/tenant/twilio-config")
+    async def delete_twilio_config(request: Request):
+        """Remove the client's Twilio configuration (falls back to env vars)."""
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid session or token.")
+
+        try:
+            await system_db.save_client_twilio_config(client_id, "", "", "")
+            return {"success": True, "message": "Twilio configuration removed. Will use server default."}
+        except Exception as e:
+            logger.error(f"Error deleting Twilio config: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
     @router.post("/api/twilio/call")
     async def make_twilio_call(req: CallRequest, request: Request):
         """Triggers an outbound Twilio phone call to any destination number."""
@@ -536,27 +674,47 @@ def create_api_router(
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.get("/api/twilio/call/{call_sid}")
-    async def get_twilio_call_status(call_sid: str):
+    async def get_twilio_call_status(call_sid: str, request: Request):
         """Retrieve the current real-time status of a Twilio call."""
         th = get_twilio_handler() if get_twilio_handler else None
         if not th:
             raise HTTPException(status_code=500, detail="Twilio handler is not initialized on the server.")
+        
+        client_id = None
+        client_id_str = request.cookies.get("session_token")
+        if client_id_str:
+            try:
+                client_id = int(client_id_str)
+            except ValueError:
+                pass
+
         try:
-            status = await th.get_call_status(call_sid)
+            status = await th.get_call_status(call_sid, client_id=client_id)
             return {"success": True, "status": status}
         except Exception as e:
+            logger.error(f"Error retrieving Twilio call status: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/api/twilio/call/{call_sid}/end")
-    async def end_twilio_call(call_sid: str):
+    async def end_twilio_call(call_sid: str, request: Request):
         """Hangs up / terminates an active Twilio call."""
         th = get_twilio_handler() if get_twilio_handler else None
         if not th:
             raise HTTPException(status_code=500, detail="Twilio handler is not initialized on the server.")
+
+        client_id = None
+        client_id_str = request.cookies.get("session_token")
+        if client_id_str:
+            try:
+                client_id = int(client_id_str)
+            except ValueError:
+                pass
+
         try:
-            success = await th.end_call(call_sid)
+            success = await th.end_call(call_sid, client_id=client_id)
             return {"success": success}
         except Exception as e:
+            logger.error(f"Error ending Twilio call: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 
