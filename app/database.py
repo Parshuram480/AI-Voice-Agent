@@ -453,6 +453,13 @@ class DatabaseClient:
             import json
             history_json = json.dumps(log_data.get("history", []))
             
+            client_id_val = log_data.get("client_id")
+            if client_id_val is not None:
+                try:
+                    client_id_val = int(client_id_val)
+                except (ValueError, TypeError):
+                    client_id_val = None
+
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     query,
@@ -470,7 +477,7 @@ class DatabaseClient:
                     log_data.get("summary_input_output_tokens", 0),
                     log_data.get("total_tokens", 0),
                     log_data.get("average_latency", 0.0),
-                    log_data.get("client_id"),
+                    client_id_val,
                     log_data.get("domain"),
                     log_data.get("total_input_cost", 0.0),
                     log_data.get("total_output_cost", 0.0),

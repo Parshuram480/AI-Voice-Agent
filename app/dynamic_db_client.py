@@ -408,6 +408,17 @@ class DynamicDbClient:
                         continue
                     except ValueError:
                         pass
+                else:
+                    # Attempt natural language date parsing for dates like "12th of April 1985"
+                    try:
+                        import dateutil.parser
+                        # Only parse if it looks like a date/time string with numbers
+                        if len(p_clean) >= 6 and any(char.isdigit() for char in p_clean):
+                            parsed_date = dateutil.parser.parse(p_clean).date()
+                            pg_params.append(parsed_date)
+                            continue
+                    except Exception:
+                        pass
                 pg_params.append(p)
             else:
                 pg_params.append(p)

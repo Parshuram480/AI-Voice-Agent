@@ -133,6 +133,9 @@ class GeminiLivePipeline:
         total_output_tokens = 0
         last_speech_time = None
         
+        # Extract per-call language from kwargs
+        call_language = kwargs.get("language", "en")
+        
         # Filler State
         filler_start_time = None
         played_fillers_meta = []
@@ -177,6 +180,8 @@ class GeminiLivePipeline:
             dynamic_tools=dynamic_tools,
             dynamic_executor=dynamic_executor,
             system_prompt=system_prompt,
+            domain=kwargs.get("domain") or self.domain,
+            language=kwargs.get("language", "en"),
             api_key=gemini_api_key
         )
         
@@ -193,11 +198,25 @@ class GeminiLivePipeline:
             async with session_client.connect() as session:
                 logger.info(f"[{resolved_session_id}] Multimodal session started")
                 
-
-                
                 # Trigger the agent to speak first based on the domain context
                 domain_name = kwargs.get("domain", "default").replace("_", " ")
-                initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
+                pipeline_type = kwargs.get("pipeline_type", "customer_support")
+                company_name = kwargs.get("company_name")
+                
+                logger.info(f"[{resolved_session_id}] Initial prompt context: pipeline_type={pipeline_type!r}, domain={domain_name!r}, company_name={company_name!r}")
+                
+                if pipeline_type == "outreach":
+                    initial_prompt = (
+                        f"[CALL CONNECTED] You have just dialed this person. YOU initiated this call — they did NOT call you. "
+                        f"You are making a proactive outbound sales call on behalf of {company_name or 'the company'}. "
+                        f"Do NOT say 'How can I help you?' or 'Thanks for calling' — that is wrong because YOU called THEM. "
+                        f"Instead, introduce yourself confidently, mention {company_name or 'the company'} by name, and immediately begin your sales pitch "
+                        f"following your Telemarketing Protocol instructions. Start with the 30-Second Hook."
+                    )
+                else:
+                    initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
+                
+                logger.info(f"[{resolved_session_id}] Sending initial prompt: {initial_prompt[:150]}...")
                 await session.send(input=initial_prompt, end_of_turn=True)
                 
                 # --- TASK 1: Sender (Read from Mic queue -> send to Gemini & local VAD) ---
@@ -266,7 +285,7 @@ class GeminiLivePipeline:
                                                 
                                                 # Inject universal filler immediately on VAD silence (60% chance)
                                                 if self.filler_service and on_tts_audio and not universal_filler_played_this_turn and not is_speaking and time.perf_counter() >= filler_debounce_until and random.random() < 0.75:
-                                                    filler_data = self.filler_service.select_filler("universal", "fast")
+                                                    filler_data = self.filler_service.select_filler("universal", "fast", language=call_language)
                                                     if filler_data:
                                                         pcm_bytes, s_rate = filler_data
                                                         logger.info(f"[{resolved_session_id}] Injecting universal filler audio on VAD silence")
@@ -508,7 +527,7 @@ class GeminiLivePipeline:
                                             on_stage("conversation", "running", f"Gemini executing tool: {fc.name}")
                                     
                                         # Filler Audio Injection
-                                        if self.filler_service and on_tts_audio and not is_speaking and not current_agent_text and fc.name != "end_call":
+                                        if self.filler_service and on_tts_audio and not is_speaking and not current_agent_text and fc.name != "end_call" and time.perf_counter() >= filler_debounce_until:
                                             executor = kwargs.get("dynamic_executor")
                                             tool_meta = {}
                                             if executor and hasattr(executor, "execution_map") and executor.execution_map:
@@ -517,7 +536,7 @@ class GeminiLivePipeline:
                                             filler_cat = tool_meta.get("filler_category", "thinking")
                                             latency_type = tool_meta.get("expected_latency", "fast")
                                             
-                                            filler_data = self.filler_service.select_filler(filler_cat, latency_type)
+                                            filler_data = self.filler_service.select_filler(filler_cat, latency_type, language=call_language)
                                             if filler_data:
                                                 pcm_bytes, s_rate = filler_data
                                                 logger.info(f"Injecting filler audio for tool {fc.name} (category: {filler_cat}, latency: {latency_type})")
@@ -526,7 +545,6 @@ class GeminiLivePipeline:
                                                 chunk_size = 960
                                                 for i in range(0, len(pcm_bytes), chunk_size):
                                                     on_tts_audio((pcm_bytes[i:i+chunk_size], s_rate))
-                                                
                                                 # Calculate exact audio duration for dynamic debounce to prevent multiple tool fillers overlapping
                                                 duration_sec = (len(pcm_bytes) / 2) / s_rate
                                                 filler_debounce_until = time.perf_counter() + duration_sec + 0.5
@@ -538,7 +556,7 @@ class GeminiLivePipeline:
                                                     else:
                                                         cached_perceived_ttfa = 0.0
                                                 # Always append metadata to show the tool filler was used
-                                                played_fillers_meta.append(self.filler_service.get_filler_metadata(filler_cat, latency_type))
+                                                played_fillers_meta.append(self.filler_service.get_filler_metadata(filler_cat, latency_type, language=call_language))
                                                 
                                         # Execute the tool
                                         tool_response = await session_client.execute_tool_call(

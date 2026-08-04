@@ -87,6 +87,8 @@ class GeminiLiveClient:
         dynamic_tools: list = None,
         dynamic_executor = None,
         system_prompt: str = None,
+        domain: str = None,
+        language: str = "en",
         api_key: str = None
     ):
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
@@ -104,12 +106,87 @@ class GeminiLiveClient:
         
         self.dynamic_tools = dynamic_tools
         self.dynamic_executor = dynamic_executor
+        self.domain = domain
+        self.language = language
         
+        # Ensure sales tools/executor/prompt are defaulted if domain is sales to prevent DB fallback
+        if domain == "sales":
+            if self.dynamic_tools is None:
+                from app.services.sales_tools import get_sales_tool_declarations
+                self.dynamic_tools = get_sales_tool_declarations()
+            if self.dynamic_executor is None:
+                from app.services.sales_executor import SalesToolExecutor
+                self.dynamic_executor = SalesToolExecutor()
+            if not system_prompt:
+                prompts = get_prompts()
+                base_prompt = prompts.get("multimodal", {}).get("base_prompt", "")
+                domain_prompt = prompts.get("multimodal", {}).get("domains", {}).get("sales", "")
+                system_prompt = f"{base_prompt}\n{domain_prompt}"
+
         if system_prompt:
             self.system_prompt = system_prompt + CALL_FLOW_INSTRUCTIONS
         else:
             prompts = get_prompts()
             self.system_prompt = prompts.get("multimodal", {}).get("base_prompt", "You are a helpful assistant.") + CALL_FLOW_INSTRUCTIONS
+            
+        # --- GENDER & PERSONA ---
+        VOICE_GENDERS = {
+            # Male Voices
+            "Achird": "male",
+            "Algenib": "male",
+            "Algieba": "male",
+            "Alnilam": "male",
+            "Charon": "male",
+            "Enceladus": "male",
+            "Fenrir": "male",
+            "Iapetus": "male",
+            "Orus": "male",
+            "Puck": "male",
+            "Rasalgethi": "male",
+            "Sadachbia": "male",
+            "Sadaltager": "male",
+            "Schedar": "male",
+            "Umbriel": "male",
+            "Zubenelgenubi": "male",
+            
+            # Female Voices
+            "Achernar": "female",
+            "Aoede": "female",
+            "Autonoe": "female",
+            "Callirrhoe": "female",
+            "Despina": "female",
+            "Erinome": "female",
+            "Gacrux": "female",
+            "Kore": "female",
+            "Laomedeia": "female",
+            "Leda": "female",
+            "Pulcherrima": "female",
+            "Sulafat": "female",
+            "Vindemiatrix": "female",
+            "Zephyr": "female"
+        }
+        gender = VOICE_GENDERS.get(self.voice, "male")
+        
+        # Apply the gender persona globally for all languages
+        persona_instruction = f"\n\n--- PERSONA ---\nYou are a {gender} AI assistant."
+        self.system_prompt += persona_instruction
+        
+        # Apply the strict grammar rules ONLY for Hindi
+        if self.language.lower().startswith("hi"):
+            grammar_term = "feminine" if gender == "female" else "masculine"
+            example = "'मैं कर रही हूँ'" if gender == "female" else "'मैं कर रहा हूँ'"
+            not_example = "'मैं कर रहा हूँ'" if gender == "female" else "'मैं कर रही हूँ'"
+            
+            grammar_instruction = (
+                f"\nWhen speaking Hindi, you MUST use strict {grammar_term} grammar for yourself "
+                f"(e.g., say {example} instead of {not_example})."
+            )
+            self.system_prompt += grammar_instruction
+
+
+        logger.info(f"[GEMINI CLIENT INIT] Initialized client with model={self.model}, voice={self.voice}, domain={domain}")
+        logger.info(f"[GEMINI CLIENT INIT] Tools: {[t.get('name') for t in (self.dynamic_tools or [])]}")
+        logger.info(f"[GEMINI CLIENT INIT] Prompt prefix: {self.system_prompt[:250]}...")
 
 
 
@@ -230,28 +307,35 @@ class GeminiLiveClient:
         if name == "out_of_scope":
             count = state.get("out_of_scope_count", 0) + 1
             state["out_of_scope_count"] = count
-            reason = args.get("reason", "unknown")
-            logger.info(f"[CALL FLOW] out_of_scope tool triggered (count={count}, reason={reason})")
+            # Ensure domain check is case-insensitive
+            current_domain = str(self.domain).lower() if self.domain else ""
             
-            if count >= 2:
+            if count >= 2 and current_domain not in ("sales", "realestate", "outreach"):
                 state["should_end"] = True
+                msg = "This is the second out-of-scope question. The call must now be terminated. Say goodbye and then call end_call."
+                    
                 return types.FunctionResponse(
                     name=name,
                     id=tool_call_id,
                     response={
                         "warning_level": "terminate",
                         "out_of_scope_count": count,
-                        "message": "This is the second out-of-scope question. The call must now be terminated. Say goodbye and then call end_call."
+                        "message": msg
                     }
                 )
             else:
+                if current_domain in ("sales", "realestate", "outreach"):
+                    msg = "This is an out-of-scope question (e.g. tech support, or something we do not offer). DO NOT threaten to hang up. Gracefully pivot the conversation back to the products or properties we do offer."
+                else:
+                    msg = "This is the first out-of-scope question. Warn the user: 'I can only help you with questions related to our service. Please ask about that, or I will have to end the call.'"
+                    
                 return types.FunctionResponse(
                     name=name,
                     id=tool_call_id,
                     response={
                         "warning_level": "warning",
                         "out_of_scope_count": count,
-                        "message": "This is the first out-of-scope question. Warn the user: 'I can only help you with questions related to our service. Please ask about that, or I will have to end the call.'"
+                        "message": msg
                     }
                 )
         

@@ -1,0 +1,188 @@
+{
+  "company": {
+    "name": "Pinnacle Realty",
+    "description": "Premium real estate brokerage specializing in residential properties, luxury estates, and new developments.",
+    "tagline": "Finding your perfect place to call home."
+  },
+  "agent": {
+    "name": "Alex",
+    "specialization": "Residential Sales & First-time Homebuyers"
+  },
+  "categories": [
+    "Apartments",
+    "Townhomes",
+    "Single-Family Homes",
+    "Luxury Estates",
+    "New Developments"
+  ],
+  "properties": [
+    {
+      "id": "PROP-APT-01",
+      "name": "The Metro Lofts - Unit 4B",
+      "category": "Apartments",
+      "price": "$215,000",
+      "status": "available",
+      "bedrooms": 1,
+      "bathrooms": 1,
+      "sqft": 750,
+      "year_built": 2015,
+      "address": "400 Downtown Ave, City Center",
+      "neighborhood": "City Center",
+      "description": "Modern 1-bedroom loft in the heart of downtown. Features exposed brick, high ceilings, and stainless steel appliances.",
+      "features": ["In-unit laundry", "Fitness center in building", "Rooftop deck access"],
+      "nearby": {"transit": "2 blocks from subway", "lifestyle": "Walking distance to cafes and nightlife"},
+      "hoa_fee": "$250/month",
+      "property_tax": "$2,100/year",
+      "open_house": "Sunday, 1:00 PM - 3:00 PM",
+      "rating": 4.5
+    },
+    {
+      "id": "PROP-APT-02",
+      "name": "Riverview Condos - Unit 12C",
+      "category": "Apartments",
+      "price": "$310,000",
+      "status": "available",
+      "bedrooms": 2,
+      "bathrooms": 2,
+      "sqft": 1100,
+      "year_built": 2020,
+      "address": "1200 Riverside Dr, Riverfront",
+      "neighborhood": "Riverfront",
+      "description": "Stunning 2-bedroom corner unit with panoramic river views and a private balcony.",
+      "features": ["Balcony", "Covered parking", "Pool access"],
+      "nearby": {"transit": "Bus stop outside", "lifestyle": "Next to river walk park"},
+      "hoa_fee": "$320/month",
+      "property_tax": "$3,200/year",
+      "open_house": "Saturday, 11:00 AM - 2:00 PM",
+      "discount": "Seller offering to cover first 6 months of HOA fees",
+      "rating": 4.7
+    },
+    {
+      "id": "PROP-TWN-01",
+      "name": "Maplewood Terraces",
+      "category": "Townhomes",
+      "price": "$385,000",
+      "status": "available",
+      "bedrooms": 3,
+      "bathrooms": 2.5,
+      "sqft": 1650,
+      "year_built": 2018,
+      "address": "45 Maplewood Ln, Maplewood",
+      "neighborhood": "Maplewood",
+      "description": "Spacious 3-story townhome with a small private yard and attached 2-car garage. Perfect for a growing family.",
+      "features": ["Attached garage", "Private backyard", "Hardwood floors"],
+      "nearby": {"schools": "Oak Elementary (8/10)", "lifestyle": "Quiet residential street"},
+      "hoa_fee": "$150/month",
+      "property_tax": "$4,100/year",
+      "open_house": "None currently scheduled, available for private viewing",
+      "rating": 4.6
+    },
+    {
+      "id": "PROP-SFH-01",
+      "name": "The Greenwood Classic",
+      "category": "Single-Family Homes",
+      "price": "$475,000",
+      "status": "available",
+      "bedrooms": 4,
+      "bathrooms": 2.5,
+      "sqft": 2200,
+      "lot_size": "0.3 acres",
+      "year_built": 2012,
+      "address": "742 Greenwood Dr, Greenwood Heights",
+      "neighborhood": "Greenwood Heights",
+      "description": "Beautiful 4-bedroom family home in highly sought-after Greenwood Heights. Features an open-plan kitchen and a large fenced backyard.",
+      "features": ["Fenced backyard", "Open-plan kitchen", "Fireplace", "Smart home thermostat"],
+      "nearby": {"schools": "Greenwood High (9/10)", "parks": "5 min walk to Centennial Park"},
+      "hoa_fee": "$0/month",
+      "property_tax": "$5,200/year",
+      "open_house": "Saturday, 10:00 AM - 1:00 PM",
+      "rating": 4.8
+    },
+    {
+      "id": "PROP-SFH-02",
+      "name": "Sunnyvale Ranch",
+      "category": "Single-Family Homes",
+      "price": "$525,000",
+      "status": "pending",
+      "bedrooms": 3,
+      "bathrooms": 2,
+      "sqft": 1950,
+      "lot_size": "0.5 acres",
+      "year_built": 1998,
+      "address": "88 Sunnyvale Rd, Westside",
+      "neighborhood": "Westside",
+      "description": "Charming single-story ranch home with a recently renovated kitchen and massive backyard.",
+      "features": ["Renovated kitchen", "Large lot", "No stairs"],
+      "nearby": {"schools": "Westside Middle (7/10)"},
+      "hoa_fee": "$0/month",
+      "property_tax": "$4,800/year",
+      "open_house": "Canceled (Pending Sale)",
+      "rating": 4.4
+    },
+    {
+      "id": "PROP-LUX-01",
+      "name": "The Summit Estate",
+      "category": "Luxury Estates",
+      "price": "$1,150,000",
+      "status": "available",
+      "bedrooms": 5,
+      "bathrooms": 4.5,
+      "sqft": 4500,
+      "lot_size": "1.2 acres",
+      "year_built": 2023,
+      "address": "100 Summit Ridge, The Palisades",
+      "neighborhood": "The Palisades",
+      "description": "Magnificent luxury estate featuring a chef's kitchen, home theater, infinity pool, and spectacular valley views.",
+      "features": ["Infinity pool", "Home theater", "Chef's kitchen", "Gated community", "Wine cellar"],
+      "nearby": {"schools": "Palisades Prep (10/10)", "lifestyle": "Exclusive gated access"},
+      "hoa_fee": "$400/month",
+      "property_tax": "$12,500/year",
+      "open_house": "By appointment only",
+      "discount": "Price recently reduced by $50k",
+      "rating": 4.9
+    }
+  ],
+  "neighborhoods": [
+    {
+      "name": "City Center",
+      "description": "Bustling downtown area with great nightlife, dining, and public transit. Perfect for young professionals.",
+      "avg_price": "$300,000",
+      "walkability_score": 95,
+      "school_rating": "5/10"
+    },
+    {
+      "name": "Greenwood Heights",
+      "description": "Family-friendly suburbs with tree-lined streets and top-rated public schools.",
+      "avg_price": "$500,000",
+      "walkability_score": 45,
+      "school_rating": "9/10"
+    },
+    {
+      "name": "The Palisades",
+      "description": "Exclusive, gated hilltop community offering privacy, large lots, and luxury living.",
+      "avg_price": "$1,200,000",
+      "walkability_score": 10,
+      "school_rating": "10/10"
+    }
+  ],
+  "financing_options": [
+    {
+      "type": "Conventional 30-Year Fixed",
+      "rate": "6.5%",
+      "down_payment": "20%",
+      "description": "Standard loan type, best for buyers with good credit and a 20% down payment to avoid PMI."
+    },
+    {
+      "type": "FHA Loan",
+      "rate": "6.25%",
+      "down_payment": "3.5%",
+      "description": "Government-backed loan perfect for first-time buyers with lower down payments."
+    },
+    {
+      "type": "VA Loan",
+      "rate": "5.9%",
+      "down_payment": "0%",
+      "description": "Exclusive to veterans and active military, offering 0% down and no PMI."
+    }
+  ]
+}

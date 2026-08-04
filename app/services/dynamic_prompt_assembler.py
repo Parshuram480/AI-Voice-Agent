@@ -17,9 +17,12 @@ class DynamicPromptAssembler:
         base_prompt = multimodal_prompts.get("base_prompt", "You are a helpful assistant.")
         
         domain = config.get("domain", "default").lower()
-        domain_prompts = multimodal_prompts.get("domains", {})
-        domain_prompt = domain_prompts.get(domain, "")
+        domain_prompt = config.get("system_prompt")
         
+        if not domain_prompt:
+            domain_prompts = multimodal_prompts.get("domains", {})
+            domain_prompt = domain_prompts.get(domain, "")
+            
         identity_table = config.get("identity", {}).get("table")
         identity_name = config.get("identity", {}).get("name_column")
         identity_verify = config.get("identity", {}).get("verification_column")
@@ -27,8 +30,8 @@ class DynamicPromptAssembler:
         context_lines = [
             "\n--- DATABASE SCHEMA CONTEXT ---",
             f"The '{identity_table}' table is the central identity table.",
-            f"To verify a user, you must ask for their '{identity_name}' AND '{identity_verify}'.",
-            "DO NOT call ANY tools starting with 'get_' until you have successfully verified the user using the verify tool.",
+            f"To verify a user, you must ask for their '{identity_name}' AND '{identity_verify}' and then call the 'verify_user_identity' tool.",
+            "DO NOT call ANY tools starting with 'get_' until you have successfully verified the user using the 'verify_user_identity' tool.",
             "If verification fails, allow the user to keep retrying. Do not refuse to authenticate them or redirect them to human support prematurely.",
             "Once a user is verified, they are authenticated for the session and you cannot authenticate them as someone else."
         ]

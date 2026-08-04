@@ -13,6 +13,7 @@ import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 
 import NoCodeDbConfigWizard from '../components/NoCodeDbConfigWizard';
+import OutreachConfigWizard from '../components/OutreachConfigWizard';
 import EditProfileModal from '../components/EditProfileModal';
 import { authService } from '../services/authService';
 import { domainService } from '../services/domainService';
@@ -23,6 +24,8 @@ interface Client {
   client_name: string;
   email: string;
   phone?: string;
+  active_domain_id?: number;
+  active_path?: string;
 }
 
 interface Domain {
@@ -30,6 +33,7 @@ interface Domain {
   name: string;
   description: string;
   status: string;
+  path_type: string;
 }
 
 interface DashboardProps {
@@ -55,12 +59,8 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
     setLoadingConfig(true);
     try {
       const data = await authService.checkAuth();
-      if (data.db_config) {
-        setDbConfig(data.db_config);
-      }
-      if (data.domain) {
-        setDomainData(data.domain);
-      }
+      setDbConfig(data.db_config || null);
+      setDomainData(data.domain || null);
     } catch (err) {
       console.error('Failed to load DB configuration', err);
     } finally {
@@ -87,6 +87,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
 
   // Parse UI metadata if available
   let parsedMetadata: any = null;
+  let parsedDynamicConfig: any = null;
   if (domainData?.ui_config_metadata) {
     try {
       parsedMetadata = typeof domainData.ui_config_metadata === 'string'
@@ -96,8 +97,19 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
       parsedMetadata = null;
     }
   }
+  
+  if (domainData?.dynamic_config) {
+    try {
+      parsedDynamicConfig = typeof domainData.dynamic_config === 'string'
+        ? JSON.parse(domainData.dynamic_config)
+        : domainData.dynamic_config;
+    } catch {
+      parsedDynamicConfig = null;
+    }
+  }
 
   const isConfigured = Boolean(dbConfig && dbConfig.db_name && dbConfig.db_name !== 'placeholder.db');
+  const isOutreach = domainData?.path_type === 'outreach' || parsedDynamicConfig?.pipeline_type === 'outreach' || client.active_path === 'outreach';
 
   if (loadingConfig) {
     return (
@@ -150,7 +162,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
             </Tooltip>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 sm:pt-0">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 pt-6 sm:pt-0">
             <div className="space-y-1">
               <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Company</span>
               <span className="block text-base font-bold text-slate-100">{client.company_name}</span>
@@ -160,8 +172,12 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
               <span className="block text-base font-bold text-slate-100">{client.client_name}</span>
             </div>
             <div className="space-y-1">
-              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Domain</span>
-              <span className="block text-base font-bold text-emerald-400">{domainName}</span>
+              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Pipeline Path</span>
+              <span className="block text-base font-bold text-slate-100">{isOutreach ? 'Outreach' : 'Customer Support'}</span>
+            </div>
+            <div className="space-y-1">
+              <span className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Industry Sub-Domain</span>
+              <span className="block text-base font-bold text-slate-100">{domainName}</span>
             </div>
           </div>
         </div>
@@ -169,7 +185,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
         {/* Launch Button Room */}
         <div className="text-center py-4 bg-slate-900/40 border border-slate-800 rounded-2xl">
           <Button
-            onClick={() => navigate('/agent-call-console')}
+            onClick={() => navigate(isOutreach ? '/outreach-console' : '/agent-call-console')}
             variant="contained"
             color="primary"
             size="large"
@@ -186,7 +202,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
               }
             }}
           >
-            Open AI Voice Agent Console
+            {isOutreach ? 'Open Outreach Console' : 'Open AI Voice Agent Console'}
           </Button>
           {!isConfigured && (
             <p className="text-xs text-rose-400 mt-2 font-medium">
@@ -247,26 +263,52 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
               </div>
 
               <div className="bg-slate-950/50 border border-slate-800/80 rounded-2xl p-4 space-y-2">
-                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider block">Agent AI Rules Mapping</span>
-                {parsedMetadata ? (
-                  <>
-                    <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Primary Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.customerTable || 'Configured'}</span>
+                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider block">
+                  {isOutreach ? 'Outreach Strategy Mapping' : 'Agent AI Rules Mapping'}
+                </span>
+                
+                {isOutreach ? (
+                  parsedDynamicConfig ? (
+                    <>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Scenario:</span> <span className="uppercase font-mono text-violet-400">{parsedDynamicConfig.campaign_type === 'real_estate' ? 'Real Estate' : 'B2B Sales'}</span>
+                      </div>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Company Name:</span> <span className="font-mono text-sky-400">{parsedDynamicConfig.company_name}</span>
+                      </div>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Product Table:</span> <span className="font-mono text-violet-300">{parsedDynamicConfig.product_table}</span>
+                      </div>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Selected Cols:</span> <span className="font-mono text-emerald-400">{(parsedDynamicConfig.selected_columns || []).join(', ')}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-emerald-400 font-medium pt-1">
+                      Outreach dynamic rules ready.
                     </div>
-                    <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Verified Columns:</span>{' '}
-                      <span className="font-mono text-violet-300">
-                        {Array.isArray(parsedMetadata.verificationFields) ? parsedMetadata.verificationFields.join(', ') : 'Default'}
-                      </span>
-                    </div>
-                    <div className="text-sm text-slate-200">
-                      <span className="font-semibold text-slate-400">Related Tables:</span> <span className="font-mono text-emerald-400">{Object.keys(parsedMetadata.selectedTables || {}).join(', ') || 'Configured'}</span>
-                    </div>
-                  </>
+                  )
                 ) : (
-                  <div className="text-xs text-emerald-400 font-medium pt-1">
-                    AI verification and business record queries compiled and ready.
-                  </div>
+                  parsedMetadata ? (
+                    <>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Primary Table:</span> <span className="font-mono text-sky-400">{parsedMetadata.customerTable || 'Configured'}</span>
+                      </div>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Verified Columns:</span>{' '}
+                        <span className="font-mono text-violet-300">
+                          {Array.isArray(parsedMetadata.verificationFields) ? parsedMetadata.verificationFields.join(', ') : 'Default'}
+                        </span>
+                      </div>
+                      <div className="text-sm text-slate-200">
+                        <span className="font-semibold text-slate-400">Related Tables:</span> <span className="font-mono text-emerald-400">{Object.keys(parsedMetadata.selectedTables || {}).join(', ') || 'Configured'}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-emerald-400 font-medium pt-1">
+                      AI verification and business record queries compiled and ready.
+                    </div>
+                  )
                 )}
               </div>
             </div>
@@ -296,16 +338,28 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
               </Alert>
             )}
 
-            {/* Reusable No-Code Database Introspection & Rule Configurator Wizard */}
-            <NoCodeDbConfigWizard
-              domainId={domainData?.id || 1}
-              initialDbConfig={isConfigured ? dbConfig : undefined}
-              initialMetadata={isConfigured ? parsedMetadata : undefined}
-              onSaveSuccess={() => {
-                loadConfig();
-                setIsEditing(false);
-              }}
-            />
+            {/* Render Outreach Config Wizard if domain is Outreach, else generic No-Code config */}
+            {isOutreach ? (
+              <OutreachConfigWizard
+                domainName={domainName}
+                initialDbConfig={isConfigured ? dbConfig : undefined}
+                initialOutreachConfig={isConfigured ? parsedDynamicConfig : undefined}
+                onSaveSuccess={() => {
+                  loadConfig();
+                  setIsEditing(false);
+                }}
+              />
+            ) : (
+              <NoCodeDbConfigWizard
+                domainId={domainData?.id || client.active_domain_id || 1}
+                initialDbConfig={isConfigured ? dbConfig : undefined}
+                initialMetadata={isConfigured ? parsedMetadata : undefined}
+                onSaveSuccess={() => {
+                  loadConfig();
+                  setIsEditing(false);
+                }}
+              />
+            )}
           </div>
         )}
       </div>
@@ -317,7 +371,10 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
         client={client}
         domainName={domainName}
         domains={domains}
-        onSaveSuccess={onProfileUpdate}
+        onSaveSuccess={(updatedClient, newDomain) => {
+          onProfileUpdate(updatedClient, newDomain);
+          loadConfig(); // Reload the specific configuration for the new active path
+        }}
       />
     </div>
   );

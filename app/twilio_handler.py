@@ -44,25 +44,38 @@ class TwilioHandler:
     # -------------------------------------------------------------------------
     # TwiML Generation
     # -------------------------------------------------------------------------
-    def generate_stream_twiml(self, ws_url: str) -> str:
+    def generate_stream_twiml(self, ws_url: str, client_id: str = None, customer_name: str = None, language: str = None, pipeline_type: str = None) -> str:
         """
-        Generate TwiML that connects a media stream.
+        Generate TwiML to connect the call to a media stream.
 
         The stream sends real-time audio to our WebSocket endpoint
         and allows us to send audio back.
 
         Args:
             ws_url: Full WebSocket URL (e.g. "wss://example.ngrok.app/audio-stream").
+            client_id: Optional client ID to pass via customParameters.
+            customer_name: Optional customer name to pass via customParameters.
+            language: Optional language to pass via customParameters.
+            pipeline_type: Optional pipeline type (e.g. outreach) to pass via customParameters.
 
         Returns:
             TwiML XML string.
         """
-        from twilio.twiml.voice_response import Connect
+        from twilio.twiml.voice_response import Connect, Stream, Parameter
         response = VoiceResponse()
 
         # Connect the call entirely to our WebSocket for bi-directional audio
         connect = Connect()
-        connect.stream(url=ws_url)
+        stream = Stream(url=ws_url)
+        if client_id:
+            stream.append(Parameter(name="client_id", value=client_id))
+        if customer_name:
+            stream.append(Parameter(name="customer_name", value=customer_name))
+        if language:
+            stream.append(Parameter(name="language", value=language))
+        if pipeline_type:
+            stream.append(Parameter(name="pipeline_type", value=pipeline_type))
+        connect.append(stream)
         response.append(connect)
 
         twiml = str(response)
