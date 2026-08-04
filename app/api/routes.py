@@ -322,6 +322,10 @@ def create_api_router(
             client.pop("password_hash", None)
             if db_config:
                 db_config.pop("password", None)
+                db_config.pop("gemini_api_key", None)
+                db_config.pop("twilio_account_sid", None)
+                db_config.pop("twilio_auth_token", None)
+                db_config.pop("twilio_phone_number", None)
             
             import os
             pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
