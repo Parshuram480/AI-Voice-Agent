@@ -33,26 +33,47 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 class SystemDatabase:
+    _instance = None
+    _init_lock = None # Will be set to threading.Lock() on first load
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(SystemDatabase, cls).__new__(cls)
+            cls._instance._pool = None
+            cls._instance._lock = None
+            
+            import threading
+            cls._init_lock = threading.Lock()
+        return cls._instance
+
     def __init__(self):
-        self._pool = None
+        pass
 
     async def _get_conn(self):
+        if self._lock is None:
+            with self._init_lock:
+                if self._lock is None:
+                    import asyncio
+                    self._lock = asyncio.Lock()
+            
         if not self._pool:
-            try:
-                self._pool = await asyncpg.create_pool(
-                    host=DB_HOST,
-                    port=DB_PORT,
-                    database=DB_NAME,
-                    user=DB_USER,
-                    password=DB_PASSWORD,
-                    min_size=1,
-                    max_size=10,
-                    command_timeout=10,
-                )
-                await self._init_db()
-            except Exception as e:
-                logger.error(f"PostgreSQL connection/init failed in SystemDatabase: {e}")
-                raise e
+            async with self._lock:
+                if not self._pool:
+                    try:
+                        self._pool = await asyncpg.create_pool(
+                            host=DB_HOST,
+                            port=DB_PORT,
+                            database=DB_NAME,
+                            user=DB_USER,
+                            password=DB_PASSWORD,
+                            min_size=1,
+                            max_size=10,
+                            command_timeout=10,
+                        )
+                        await self._init_db()
+                    except Exception as e:
+                        logger.error(f"PostgreSQL connection/init failed in SystemDatabase: {e}")
+                        raise e
         return self._pool
 
     async def close(self):

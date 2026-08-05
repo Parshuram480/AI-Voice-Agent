@@ -777,12 +777,30 @@ def create_api_router(
             else:
                 voice_url = f"{ngrok_url.rstrip('/')}/voice?client_id={client_id}&customer_name={encoded_name}&language={encoded_lang}&pipeline_type=outreach"
             
-            call_sid = th._client.calls.create(
-                to=req.phone_number,
-                from_=os.getenv("TWILIO_PHONE_NUMBER"),
-                url=voice_url,
-                method="POST"
-            ).sid
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_cfg = await sys_db.get_client_twilio_config(client_id)
+            
+            if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+                from twilio.rest import Client as TwilioClient
+                client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+                twilio_from = client_cfg["phone_number"]
+            else:
+                client = th._client
+                twilio_from = os.getenv("TWILIO_PHONE_NUMBER")
+                if not client:
+                    raise ValueError("Twilio client is not initialized.")
+
+            import anyio
+            call = await anyio.to_thread.run_sync(
+                lambda: client.calls.create(
+                    to=req.phone_number,
+                    from_=twilio_from,
+                    url=voice_url,
+                    method="POST"
+                )
+            )
+            call_sid = call.sid
             
             return {"success": True, "call_sid": call_sid}
         except Exception as e:
@@ -924,13 +942,7 @@ def create_api_router(
         """Triggers an outbound Twilio phone call to any destination number."""
         client_id = req.client_id
         if client_id is None:
-            client_id_str = request.cookies.get("session_token")
-            if not client_id_str:
-                raise HTTPException(status_code=401, detail="Unauthorized session.")
-            try:
-                client_id = int(client_id_str)
-            except ValueError:
-                raise HTTPException(status_code=401, detail="Invalid session token.")
+            client_id = get_authenticated_client_id(request)
         
         request.app.state.last_active_client_id = client_id
         try:
@@ -965,12 +977,10 @@ def create_api_router(
             raise HTTPException(status_code=500, detail="Twilio handler is not initialized on the server.")
         
         client_id = None
-        client_id_str = request.cookies.get("session_token")
-        if client_id_str:
-            try:
-                client_id = int(client_id_str)
-            except ValueError:
-                pass
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            pass
 
         try:
             status = await th.get_call_status(call_sid, client_id=client_id)
@@ -987,12 +997,10 @@ def create_api_router(
             raise HTTPException(status_code=500, detail="Twilio handler is not initialized on the server.")
 
         client_id = None
-        client_id_str = request.cookies.get("session_token")
-        if client_id_str:
-            try:
-                client_id = int(client_id_str)
-            except ValueError:
-                pass
+        try:
+            client_id = get_authenticated_client_id(request)
+        except HTTPException:
+            pass
 
         try:
             success = await th.end_call(call_sid, client_id=client_id)

@@ -126,11 +126,11 @@ export default function NoCodeDbConfigWizard({
       try {
         const twilioRes = await tenantService.getTwilioConfig();
         if (twilioRes) {
-          setServerTwilioKeyExists(twilioRes.server_default_exists);
-          if (twilioRes.config) {
-            setTwilioAccountSid(twilioRes.config.account_sid || '');
-            setTwilioAuthToken(twilioRes.config.auth_token_preview || '');
-            setTwilioPhoneNumber(twilioRes.config.phone_number || '');
+          setServerTwilioKeyExists(twilioRes.server_key_exists);
+          if (twilioRes.has_config) {
+            setTwilioAccountSid(twilioRes.account_sid || '');
+            setTwilioAuthToken(twilioRes.masked_auth_token || '');
+            setTwilioPhoneNumber(twilioRes.phone_number || '');
           }
         }
       } catch (err) {
@@ -354,13 +354,13 @@ export default function NoCodeDbConfigWizard({
     setLoadingSave(true);
     setSaveSuccessMsg('');
     try {
-      if (geminiApiKey && !geminiApiKey.includes('...')) {
+      if (geminiApiKey && !geminiApiKey.includes('...') && geminiApiKey !== '****') {
         await tenantService.saveGeminiKey(geminiApiKey);
       } else if (!geminiApiKey) {
         await tenantService.deleteGeminiKey();
       }
 
-      if ((twilioAccountSid || twilioAuthToken || twilioPhoneNumber) && !twilioAuthToken.includes('...')) {
+      if ((twilioAccountSid || twilioAuthToken || twilioPhoneNumber) && !twilioAuthToken.includes('...') && twilioAuthToken !== '****') {
         await tenantService.saveTwilioConfig({
           account_sid: twilioAccountSid,
           auth_token: twilioAuthToken,

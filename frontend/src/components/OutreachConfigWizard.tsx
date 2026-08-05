@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
-import { useTheme } from '@mui/material/styles';
+
 import TextField from '@mui/material/TextField';
 import Button from '@mui/material/Button';
 import FormControl from '@mui/material/FormControl';
 import InputLabel from '@mui/material/InputLabel';
 import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Checkbox from '@mui/material/Checkbox';
 import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import Accordion from '@mui/material/Accordion';
@@ -16,7 +14,6 @@ import AccordionDetails from '@mui/material/AccordionDetails';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SaveIcon from '@mui/icons-material/Save';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
-import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import CampaignIcon from '@mui/icons-material/Campaign';
 import PsychologyIcon from '@mui/icons-material/Psychology';
@@ -42,8 +39,6 @@ export default function OutreachConfigWizard({
   domainName,
   onSaveSuccess,
 }: OutreachConfigWizardProps) {
-  const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
 
   // Step tracking (1: DB Credentials, 2: Outreach Rules, 3: Summary Review)
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
@@ -84,11 +79,11 @@ export default function OutreachConfigWizard({
         
         const twilioRes = await tenantService.getTwilioConfig();
         if (twilioRes) {
-          setServerTwilioKeyExists(twilioRes.server_default_exists);
-          if (twilioRes.config) {
-            setTwilioAccountSid(twilioRes.config.account_sid || '');
-            setTwilioAuthToken(twilioRes.config.auth_token_preview || '');
-            setTwilioPhoneNumber(twilioRes.config.phone_number || '');
+          setServerTwilioKeyExists(twilioRes.server_key_exists);
+          if (twilioRes.has_config) {
+            setTwilioAccountSid(twilioRes.account_sid || '');
+            setTwilioAuthToken(twilioRes.masked_auth_token || '');
+            setTwilioPhoneNumber(twilioRes.phone_number || '');
           }
         }
       } catch (e) {
@@ -101,7 +96,6 @@ export default function OutreachConfigWizard({
 
   const [schemaData, setSchemaData] = useState<Record<string, string[]>>({});
   const [loadingIntrospect, setLoadingIntrospect] = useState(false);
-  const [uploadingDb, setUploadingDb] = useState(false);
   const [step1Error, setStep1Error] = useState('');
 
 
@@ -130,26 +124,6 @@ export default function OutreachConfigWizard({
     trust_server_certificate: trustCert,
     connection_timeout: timeout,
   });
-
-  const handleSqliteFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (!event.target.files || event.target.files.length === 0) return;
-    const file = event.target.files[0];
-
-    setUploadingDb(true);
-    setStep1Error('');
-    try {
-      const result = await tenantService.uploadSqlite(file);
-      if (result.success && result.db_path) {
-        setDbName(result.db_path);
-      } else {
-        setStep1Error('Failed to upload SQLite database.');
-      }
-    } catch (e: any) {
-      setStep1Error(e.message || 'Error uploading SQLite file.');
-    } finally {
-      setUploadingDb(false);
-    }
-  };
 
   // Helper to flatten the hierarchical schema into Record<string, string[]>
   const flattenSchema = (schema: any): Record<string, string[]> => {
@@ -206,12 +180,6 @@ export default function OutreachConfigWizard({
     }
   };
 
-  const handleColumnToggle = (col: string) => {
-    setSelectedColumns((prev) => 
-      prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col]
-    );
-  };
-
   const handleValidateStep2 = () => {
     setStep2Error('');
     if (!companyName || !closingGoal || !productTable) {
@@ -228,13 +196,13 @@ const handleSaveConfig = async () => {
     setStep2Error('');
     try {
       // Save Gemini and Twilio if changed
-      if (geminiApiKey && !geminiApiKey.includes('...')) {
+      if (geminiApiKey && !geminiApiKey.includes('...') && geminiApiKey !== '****') {
         await tenantService.saveGeminiKey(geminiApiKey);
       } else if (!geminiApiKey) {
         await tenantService.deleteGeminiKey();
       }
 
-      if ((twilioAccountSid || twilioPhoneNumber || twilioAuthToken) && !twilioAuthToken.includes('...')) {
+      if ((twilioAccountSid || twilioPhoneNumber || twilioAuthToken) && !twilioAuthToken.includes('...') && twilioAuthToken !== '****') {
         await tenantService.saveTwilioConfig({
           account_sid: twilioAccountSid,
           auth_token: twilioAuthToken,
@@ -245,7 +213,7 @@ const handleSaveConfig = async () => {
       }
 
 
-      const res = await outreachService.saveConfig({
+      await outreachService.saveConfig({
         db_config: getDbConfigPayload(),
         campaign_type: derivedCampaignType,
         company_name: companyName,

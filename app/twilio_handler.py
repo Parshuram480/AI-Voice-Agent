@@ -100,7 +100,7 @@ class TwilioHandler:
     # -------------------------------------------------------------------------
     # Call Management
     # -------------------------------------------------------------------------
-    async def update_call_with_audio(self, call_sid: str, audio_url: str) -> bool:
+    async def update_call_with_audio(self, call_sid: str, audio_url: str, client_id: Optional[int] = None) -> bool:
         """
         Redirect a live Twilio call to play an audio file.
 
@@ -109,17 +109,30 @@ class TwilioHandler:
         Args:
             call_sid: The Twilio Call SID.
             audio_url: Public URL of the WAV file to play.
+            client_id: Optional tenant ID to fetch custom Twilio credentials.
 
         Returns:
             True if the update succeeded, False otherwise.
         """
-        if not self._client:
+        client = None
+        if client_id is not None:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_cfg = await sys_db.get_client_twilio_config(client_id)
+            if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+                from twilio.rest import Client as TwilioClient
+                client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+
+        if not client:
+            client = self._client
+
+        if not client:
             logger.error("Cannot update call — Twilio client not initialized.")
             return False
 
         try:
             twiml = self.generate_play_twiml(audio_url)
-            self._client.calls(call_sid).update(twiml=twiml)
+            client.calls(call_sid).update(twiml=twiml)
             logger.info(f"Updated call {call_sid} to play {audio_url}")
             return True
         except Exception as e:

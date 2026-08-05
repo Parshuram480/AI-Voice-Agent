@@ -6,7 +6,6 @@ import CircularProgress from '@mui/material/CircularProgress';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import PhoneIcon from '@mui/icons-material/Phone';
 import StopIcon from '@mui/icons-material/Stop';
-import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import Autocomplete from '@mui/material/Autocomplete';
 import MenuItem from '@mui/material/MenuItem';
 import { useNavigate } from 'react-router-dom';
@@ -46,15 +45,15 @@ export default function OutreachCallConsolePage() {
 
   // Live WebSocket state variables
   const [consolePhase, setConsolePhase] = useState<'IDLE' | 'LISTENING' | 'SPEECH_DETECTED' | 'ENDPOINTING' | 'PROCESSING' | 'SPEAKING' | 'INTERRUPTED' | 'ENDED'>('IDLE');
-  const [stageStates, setStageStates] = useState<Record<string, 'idle' | 'active' | 'done' | 'error'>>({
+  const [, setStageStates] = useState<Record<string, 'idle' | 'active' | 'done' | 'error'>>({
     vad: 'idle',
     stt: 'idle',
     conversation: 'idle',
     llm: 'idle',
     tts: 'idle'
   });
-  const [transcript, setTranscript] = useState('—');
-  const [replyText, setReplyText] = useState('—');
+  const [, setTranscript] = useState('—');
+  const [, setReplyText] = useState('—');
 
   const wsRef = useRef<WebSocket | null>(null);
 
