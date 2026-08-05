@@ -647,6 +647,8 @@ async def audio_stream(websocket: WebSocket):
                                     if language != "en":
                                         prompt = f"You must speak strictly in {language}. Even if the user speaks English, reply in {language}.\n\n{prompt}"
                                         
+                                    gemini_key = await sys_db.get_client_gemini_key(int(client_id))
+                                    
                                     dynamic_kwargs = {
                                         "dynamic_tools": tools,
                                         "dynamic_executor": executor,
@@ -654,7 +656,8 @@ async def audio_stream(websocket: WebSocket):
                                         "domain": dyn_cfg["domain"],
                                         "company_name": dyn_cfg.get("company_name"),
                                         "language": language,
-                                        "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support")
+                                        "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support"),
+                                        "gemini_api_key": gemini_key
                                     }
                                     logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
                         except Exception as e:
@@ -777,7 +780,13 @@ async def audio_stream(websocket: WebSocket):
                             # Let the last few syllables play out
                             await asyncio.sleep(2.0)
                             logger.info(f"[{call_sid}] Hanging up Twilio call now.")
-                            await twilio_handler.end_call(call_sid)
+                            # Convert "sales" back to int for the DB lookup, or None if invalid
+                            cid_for_twilio = None
+                            if isinstance(client_id, int):
+                                cid_for_twilio = client_id
+                            elif str(client_id).isdigit():
+                                cid_for_twilio = int(client_id)
+                            await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -815,7 +824,12 @@ async def audio_stream(websocket: WebSocket):
             try:
                 result = await asyncio.wait_for(pipeline_task, timeout=30.0)
                 if use_stream_audio_out and call_sid and result.get("audio_url") and not stream_audio_sent:
-                    await twilio_handler.update_call_with_audio(call_sid, result["audio_url"])
+                    cid_for_twilio = None
+                    if isinstance(client_id, int):
+                        cid_for_twilio = client_id
+                    elif str(client_id).isdigit():
+                        cid_for_twilio = int(client_id)
+                    await twilio_handler.update_call_with_audio(call_sid, result["audio_url"], client_id=cid_for_twilio)
                 logger.info(f"Twilio pipeline result: {result.get('reply_text', '')[:80]}")
                 
                 # Automatically hang up if requested by pipeline
@@ -828,7 +842,12 @@ async def audio_stream(websocket: WebSocket):
                     await asyncio.sleep(2.0)
                     if call_sid:
                         logger.info(f"[{call_sid}] Hanging up the Twilio call now.")
-                        await twilio_handler.end_call(call_sid)
+                        cid_for_twilio = None
+                        if isinstance(client_id, int):
+                            cid_for_twilio = client_id
+                        elif str(client_id).isdigit():
+                            cid_for_twilio = int(client_id)
+                        await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
             except asyncio.TimeoutError:
                 logger.error("Twilio pipeline timed out")
                 pipeline_task.cancel()
