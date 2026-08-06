@@ -244,6 +244,15 @@ async def startup():
     db_client = DatabaseClient()
     await db_client.connect()
     logger.info("✓ Database client initialized")
+    
+    # Initialize System Database (to create system tables on startup)
+    from app.system_database import SystemDatabase
+    sys_db = SystemDatabase()
+    try:
+        await sys_db._get_conn()
+        logger.info("✓ System Database initialized")
+    except Exception as e:
+        logger.warning(f"⚠ System Database failed to initialize (PostgreSQL down?): {e}")
 
     # Initialize Twilio handler
     twilio_handler = TwilioHandler()

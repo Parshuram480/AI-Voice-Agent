@@ -36,30 +36,6 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_order_customer
     ON orders (customer_id, created_at DESC);
 
--- Call Logs table
-CREATE TABLE IF NOT EXISTS call_logs (
-    session_id              VARCHAR(100) PRIMARY KEY,
-    user_id                 INTEGER REFERENCES customers(id) ON DELETE SET NULL,
-    pipeline_mode           VARCHAR(50),
-    history                 JSONB,
-    summary                 TEXT,
-    intent                  VARCHAR(100),
-    total_input_tokens          INTEGER DEFAULT 0,
-    total_output_tokens         INTEGER DEFAULT 0,
-    total_input_output_tokens   INTEGER DEFAULT 0,
-    summary_input_tokens        INTEGER DEFAULT 0,
-    summary_output_tokens       INTEGER DEFAULT 0,
-    summary_input_output_tokens INTEGER DEFAULT 0,
-    total_tokens                INTEGER DEFAULT 0,
-    average_latency         FLOAT,
-    client_id               INTEGER,
-    domain                  VARCHAR(255),
-    total_input_cost        DECIMAL(10, 6) DEFAULT 0.0,
-    total_output_cost       DECIMAL(10, 6) DEFAULT 0.0,
-    total_cost              DECIMAL(10, 6) DEFAULT 0.0,
-    created_at              TIMESTAMPTZ DEFAULT NOW()
-);
-
 -- =============================================================================
 -- Sample Data
 -- =============================================================================
