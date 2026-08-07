@@ -73,7 +73,7 @@ export default function App() {
   const [pipelineMode, setPipelineMode] = useState<string>('cascade');
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('theme_mode');
-    return (saved === 'light' || saved === 'dark') ? saved : 'dark';
+    return (saved === 'light' || saved === 'dark') ? saved : 'light';
   });
 
   const navigate = useNavigate();
