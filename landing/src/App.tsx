@@ -1026,10 +1026,11 @@ export default function App() {
 
                   {/* Console Simulation Panel (Right: 5cols) */}
                   <div className="lg:col-span-5 flex flex-col justify-center">
-                    <div className={`flex flex-col gap-3 font-mono text-xs text-left ${theme.bgConsole} p-6 rounded-2xl border shadow-inner h-full justify-between`}>
+                    <div className={`flex flex-col gap-5 font-mono text-xs text-left ${theme.bgConsole} p-6 rounded-2xl border shadow-inner h-full justify-between`}>
                       <div>
-                        <div className={`flex justify-between items-center border-b ${theme.dividerBorder} pb-2 mb-3`}>
-                          <span className="text-slate-400 font-semibold uppercase tracking-wider text-[10px]">Call State</span>
+                        {/* Header Status Bar */}
+                        <div className={`flex justify-between items-center border-b ${theme.dividerBorder} pb-3 mb-4`}>
+                          <span className="text-slate-400 font-semibold uppercase tracking-wider text-[10px]">Call Console</span>
                           {industryTab === 0 && <span className="text-emerald-500 font-bold animate-pulse text-[10px]">● Outbound Dialing</span>}
                           {industryTab === 1 && <span className="text-violet-500 font-bold text-[10px]">✓ Secure Verification</span>}
                           {industryTab === 2 && <span className="text-rose-500 font-bold animate-pulse text-[10px]">🔒 High Security</span>}
@@ -1038,204 +1039,63 @@ export default function App() {
                           {industryTab === 5 && <span className="text-indigo-500 font-bold text-[10px]">✈ Airline Check-In</span>}
                         </div>
 
-                        {industryTab === 0 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Outbound Product Pitch</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (sales_products)</span></p>
-                            </div>
+                        {/* Interactive Voice Wave Visualizer */}
+                        <div className="h-32 flex items-center justify-center gap-1 border-y border-slate-200/10 dark:border-slate-800 py-6 my-4 w-full bg-slate-950/5 dark:bg-slate-950/20 rounded-lg">
+                          {[...Array(20)].map((_, i) => (
+                            <span
+                              key={i}
+                              className={`w-1 rounded-full transition-all duration-300 ${
+                                isPlaying
+                                  ? 'bg-gradient-to-t from-violet-600 to-pink-500 animate-pulse'
+                                  : 'bg-slate-300 dark:bg-slate-800'
+                              }`}
+                              style={{
+                                height: isPlaying
+                                  ? `${Math.max(12, Math.sin(i * 0.7 + currentTime * 6) * 50 + 40)}px`
+                                  : '12px',
+                                animationDelay: `${i * 35}ms`
+                              }}
+                            ></span>
+                          ))}
+                        </div>
 
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The AI agent successfully connected, verified the prospect, pitched matching Bravia TV packages within their budget, handled the warranty objections, and logged a catalog reservation request.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.18 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-pink-500">Catalog Reserved</span>
-                              </div>
-                            </div>
+                        {/* Custom Audio Controller */}
+                        <div className="flex flex-col gap-3 mt-4">
+                          <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans">
+                            <span className="font-semibold uppercase tracking-wider">Play Call Recording</span>
+                            <span className="font-mono">{formatTime(currentTime)} / {formatTime(duration)}</span>
                           </div>
-                        )}
 
-                        {industryTab === 1 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Patient Appointment Check</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (healthcare_client)</span></p>
-                            </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={togglePlay}
+                              className="w-10 h-10 rounded-full bg-gradient-to-r from-violet-600 to-pink-500 hover:scale-105 hover:shadow-lg text-white flex items-center justify-center cursor-pointer shadow transition-all flex-shrink-0"
+                            >
+                              {isPlaying ? (
+                                <span className="text-[10px] font-bold">❚❚</span>
+                              ) : (
+                                <span className="text-[14px] ml-0.5">▶</span>
+                              )}
+                            </button>
 
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The patient was securely verified using name and date of birth records. The agent successfully confirmed their scheduling with Dr. Emily Stone and provided directions to Suite 402.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.12 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-emerald-500">Booking Verified</span>
-                              </div>
-                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max={duration || 100}
+                              value={currentTime}
+                              onChange={handleSeek}
+                              className="w-full h-1 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-600 outline-none"
+                            />
                           </div>
-                        )}
-
-                        {industryTab === 2 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Fraud Prevention & Card Freeze</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (banking_records)</span></p>
-                            </div>
-
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The client requested card locking due to a misplaced card. The agent authenticated identity via OTP verification and card number checks, froze the card, and processed a credit limit upgrade.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.25 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-rose-500">Card Frozen & Upgraded</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {industryTab === 3 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Downtown Properties Matcher</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (realestate_listings)</span></p>
-                            </div>
-
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The agent qualified the homebuyer's specifications, scanned listings within the $350k budget limit, pitched 3 matching real estate properties, and scheduled an open house tour.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.19 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-amber-500">Tour Booked</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {industryTab === 4 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Shipment Logistics Tracker</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (order_tracking_client)</span></p>
-                            </div>
-
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The caller checked shipment status using order ID. The agent located a carrier delay in Dallas, updated delivery directions to the customer's office address, and logged a shipping redirect ticket.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.10 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-sky-500">Shipment Redirected</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {industryTab === 5 && (
-                          <div className="flex flex-col gap-3">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              <p><span className="text-slate-400">Campaign Profile:</span> Travel Package & Stay Inquiry</p>
-                              <p><span className="text-slate-400">Connected Database:</span> <span className="text-emerald-500 font-semibold">Ready (travel_demo)</span></p>
-                            </div>
-
-                            <div className={`border ${theme.dividerBorder} p-3 rounded ${theme.bgConsoleMsg} flex flex-col gap-1.5 text-[10px] leading-relaxed mt-1`}>
-                              <p className="font-semibold text-slate-300">Call Summary Log:</p>
-                              <p className={`${theme.textDesc}`}>
-                                The caller inquired about custom travel packages and benefit packages. The agent explained meal plans and resort amenities, calculated total trip charges, and verified check-in dates and hotel stay details at the destination resort.
-                              </p>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Avg Latency</span>
-                                <span className="text-[11px] font-bold text-violet-500">1.15 seconds</span>
-                              </div>
-                              <div className={`p-2 rounded border ${theme.dividerBorder} bg-slate-950/10`}>
-                                <span className="text-[8px] text-slate-500 block uppercase font-sans">Action Recorded</span>
-                                <span className="text-[11px] font-bold text-indigo-500">Stay Booking Logged</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
+                        </div>
                       </div>
 
-                      <div className="mt-4 border-t border-slate-900 pt-3 text-[9px] text-slate-500 flex justify-between font-sans">
+                      <div className="mt-4 border-t border-slate-900/10 dark:border-slate-900/40 pt-3 text-[9px] text-slate-500 flex justify-between font-sans">
                         <span>Console Active</span>
-                        <span>Objection Counter: {industryTab === 0 ? '2/3' : '0/3'}</span>
-                      </div>
-
-                      {/* Dynamic Custom Audio Player */}
-                      <div className={`mt-3 pt-3 border-t ${theme.dividerBorder} flex flex-col gap-2 font-sans`}>
-                        <div className="flex items-center justify-between text-[9px] text-slate-400">
-                          <span className="font-semibold uppercase tracking-wider">Play Demo Call</span>
-                          <span className="font-mono">{formatTime(currentTime)} / {formatTime(duration)}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={togglePlay}
-                            className="w-7 h-7 rounded-full bg-gradient-to-r from-violet-600 to-pink-500 hover:scale-105 text-white flex items-center justify-center cursor-pointer shadow transition-all flex-shrink-0"
-                          >
-                            {isPlaying ? (
-                              <span className="text-[8px] font-bold">❚❚</span>
-                            ) : (
-                              <span className="text-[10px] ml-0.5">▶</span>
-                            )}
-                          </button>
-                          <input
-                            type="range"
-                            min="0"
-                            max={duration || 100}
-                            value={currentTime}
-                            onChange={handleSeek}
-                            className="w-full h-1 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-600 outline-none"
-                          />
-                        </div>
+                        <span>Agent Status: Ready</span>
                       </div>
                     </div>
                   </div>
-
                 </div>
               </div>
             </div>
