@@ -1,15 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Voice AI Agent — Call Recording Portfolio</title>
-  
+
   <!-- Premium Typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
-  
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap"
+    rel="stylesheet">
+
   <style>
     body {
       margin: 0;
@@ -73,9 +76,38 @@
       max-width: 1120px;
       margin: 0 auto;
       padding: 0 32px 96px;
-      display: flex;
-      flex-direction: column;
-      gap: 64px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 48px 32px;
+    }
+
+    @media (max-width: 991px) {
+      main {
+        grid-template-columns: 1fr;
+        gap: 48px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      header {
+        padding: 48px 24px 32px;
+      }
+
+      h1 {
+        font-size: 32px;
+      }
+
+      .subtitle {
+        font-size: 15px;
+      }
+
+      main {
+        padding: 0 24px 64px;
+      }
+
+      footer {
+        padding: 24px 24px 48px;
+      }
     }
 
     section {
@@ -107,14 +139,8 @@
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: 1fr;
       gap: 20px;
-    }
-
-    @media (max-width: 768px) {
-      .grid {
-        grid-template-columns: 1fr;
-      }
     }
 
     .card {
@@ -140,6 +166,11 @@
       text-transform: uppercase;
       padding: 4px 10px;
       border-radius: 3px;
+    }
+
+    .badge.inbound {
+      background: rgba(109, 94, 245, 0.15);
+      color: #A99BFF;
     }
 
     .badge.outbound {
@@ -210,30 +241,27 @@
       text-align: right;
     }
 
-    .transcript {
-      border-left: 2px solid #2A2938;
+    .call-summary {
+      border-left: 2px solid #6D5EF5;
       padding-left: 14px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
     }
 
-    .transcript p {
+    .summary-label {
+      font-family: 'Outfit', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #8B7CFF;
+    }
+
+    .summary-text {
       margin: 0;
       font-size: 14px;
-      line-height: 1.55;
-    }
-
-    .speaker {
-      font-weight: 600;
-      color: #6E6C82;
-    }
-
-    .line-agent {
-      color: #D8D6E8;
-    }
-
-    .line-caller {
+      line-height: 1.5;
       color: #A8A6BC;
     }
 
@@ -250,6 +278,7 @@
     }
   </style>
 </head>
+
 <body>
 
   <header>
@@ -258,11 +287,12 @@
       <span class="brand-text">It Path Solutions</span>
     </div>
     <h1>Voice AI Agent — Call Recording Portfolio</h1>
-    <p class="subtitle">Live outbound call samples from our voice AI agent, deployed across sales, healthcare, banking, real estate, order tracking, and travel.</p>
+    <p class="subtitle">Live outbound call samples from our voice AI agent, deployed across sales, healthcare, banking,
+      real estate, order tracking, and travel.</p>
   </header>
 
   <main>
-    
+
     <!-- Sales Section -->
     <section>
       <div class="section-header">
@@ -272,7 +302,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/Sales Agent-Happy Path (Positive).m4a">
           <div class="card-header">
-            
+            <span class="badge outbound">Outbound</span>
             <span class="scenario">Objection handling outreach campaign</span>
           </div>
           <div class="player-controls">
@@ -282,9 +312,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Hey Alex, it's Nova Telecom here. We've got an exciting deal on our Gigabit Fiber right now. But before I get into it, tell me a bit about what you're looking for in your internet.</p>
-            <p class="line-caller"><span class="speaker">Caller: </span>Yeah, like mostly my kids playing video games and my wife and I stream 4K movies on Netflix, but it buffers a lot at night. Can you have something for that? Ah, let's see. Buffering is the worst.</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Nova Telecom agent discussed fiber internet upgrade plans with Alex. Explained plan
+              details, pricing, and offered a free mesh Wi-Fi bundle to improve home coverage.</p>
           </div>
         </div>
       </div>
@@ -299,7 +330,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/Healthcare-Happy Path (Positive).m4a">
           <div class="card-header">
-            
+            <span class="badge inbound">Inbound</span>
             <span class="scenario">Healthcare Assistant Call</span>
           </div>
           <div class="player-controls">
@@ -309,9 +340,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, I'm here to help with your appointments, prescriptions, or lab results. What can I do for you today?</p>
-            <p class="line-caller"><span class="speaker">Caller: </span>Hi, I would like to assess my medical information. I can help with that.</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Healthcare assistant helped Alice Smith verify her identity and reviewed her
+              upcoming medical appointments, active medication refills, and recent laboratory test results.</p>
           </div>
         </div>
       </div>
@@ -326,7 +358,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/Banking_HappyPath_Call.mp3">
           <div class="card-header">
-            
+            <span class="badge inbound">Inbound</span>
             <span class="scenario">Automated Credit card eligibility check</span>
           </div>
           <div class="player-controls">
@@ -336,10 +368,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello and welcome. I am a banking assistant and I can help you explore loan products, credit cards, or answer any general questions you have. How may I assist you today?</p>
-            <p class="line-caller"><span class="speaker">Caller: </span>Actually, I wanted to have a credit card.
-</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Banking assistant helped John Smith check cashback credit card benefits, credit
+              score eligibility, and reviewed personal loan options, scheduling a follow-up consultation.</p>
           </div>
         </div>
       </div>
@@ -354,7 +386,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/Realestate Sales-Happy Path (Positive).m4a">
           <div class="card-header">
-            
+            <span class="badge outbound">Outbound</span>
             <span class="scenario">Residential Property Search</span>
           </div>
           <div class="player-controls">
@@ -364,9 +396,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, Alex, it's great to connect with you. I was just looking at an incredible new listing that just came on the market. Are you actively looking to buy right now?</p>
-            <p class="line-caller"><span class="speaker">Caller: </span>Oh, hey, yeah, we are actually looking to upgrade, we need at least four bedrooms and a decent backyard for the kids.</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Real estate agent qualified Alex's purchase requirements for a home upgrade, noting
+              a budget limit and details for scheduling a 4-bedroom property viewing.</p>
           </div>
         </div>
       </div>
@@ -381,7 +414,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/order-tracking.m4a">
           <div class="card-header">
-            
+            <span class="badge inbound">Inbound</span>
             <span class="scenario">Order status inquiry</span>
           </div>
           <div class="player-controls">
@@ -391,9 +424,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">Caller: </span>Hello, can you please help me to get my order status?</p>
-            <p class="line-caller"><span class="speaker">AI Agent: </span>Hello, I can help with that. To start, please provide your full name.</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Tracking system gathered caller details to locate order shipping status, verifying
+              delivery arrival timelines and dispatcher routes conversationally.</p>
           </div>
         </div>
       </div>
@@ -408,7 +442,7 @@
       <div class="grid">
         <div class="card" data-file="public/recording/Travel_HappyPath_Call.mp3">
           <div class="card-header">
-            
+            <span class="badge inbound">Inbound</span>
             <span class="scenario">Resort stay booking details review</span>
           </div>
           <div class="player-controls">
@@ -418,11 +452,10 @@
             </div>
             <span class="time-text">0:00 / 0:00</span>
           </div>
-          <div class="transcript">
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, thanks for calling Global Travels. How can I help you today?</p>
-            <p class="line-caller"><span class="speaker">Caller: </span>Hello, actually I wanted to plan a vacation</p>
-            <p class="line-agent"><span class="speaker">AI Agent: </span>Do you have a destination or travel type in mind?</p>
-            <p class="line-caller"><span class="speaker">Caller: </span> Yes, the place is Switzerland.</p>
+          <div class="call-summary">
+
+            <p class="summary-text">Global Travels assistant helped client plan an upcoming vacation itinerary,
+              detailing resort package options and hotel booking procedures for a trip to Switzerland.</p>
           </div>
         </div>
       </div>
@@ -504,7 +537,7 @@
         seekContainer.addEventListener('click', (e) => {
           const rect = seekContainer.getBoundingClientRect();
           const clickPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-          
+
           if (activeAudio === audio) {
             audio.currentTime = clickPercent * audio.duration;
             updateProgress();
@@ -588,4 +621,5 @@
   </script>
 
 </body>
+
 </html>
