@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice AI Agent — Call Recording Portfolio</title>
+  
+  <!-- Premium Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    body {
+      margin: 0;
+      background: #0B0B12;
+      font-family: 'Inter', sans-serif;
+      color: #E7E6F0;
+      min-height: 100vh;
+    }
+
+    header {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 72px 32px 48px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #6D5EF5;
+      box-shadow: 0 0 12px #6D5EF5;
+    }
+
+    .brand-text {
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #8B7CFF;
+    }
+
+    h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 48px;
+      font-weight: 700;
+      line-height: 1.1;
+      margin: 0;
+      max-width: 720px;
+      color: #F4F3FA;
+    }
+
+    .subtitle {
+      font-size: 17px;
+      line-height: 1.6;
+      color: #A8A6BC;
+      max-width: 640px;
+      margin: 0;
+    }
+
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 32px 96px;
+      display: flex;
+      flex-direction: column;
+      gap: 64px;
+    }
+
+    section {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      border-bottom: 1px solid #23222E;
+      padding-bottom: 16px;
+    }
+
+    h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 26px;
+      font-weight: 600;
+      margin: 0;
+      color: #F4F3FA;
+    }
+
+    .blurb {
+      font-size: 14px;
+      color: #6E6C82;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 768px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .card {
+      background: #14131C;
+      border: 1px solid #23222E;
+      border-radius: 4px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 3px;
+    }
+
+    .badge.outbound {
+      background: rgba(34, 211, 238, 0.12);
+      color: #67E8F9;
+    }
+
+    .scenario {
+      font-size: 14px;
+      color: #A8A6BC;
+    }
+
+    .player-controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .play-btn {
+      flex: none;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 1px solid #3A3550;
+      background: #1D1B29;
+      color: #C9C3FF;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .play-btn:hover {
+      background: #262239;
+      border-color: #6D5EF5;
+      color: #FFFFFF;
+    }
+
+    .seek-bar {
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
+      background: #23212F;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .seek-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      background: #6D5EF5;
+      border-radius: 3px;
+      width: 0%;
+    }
+
+    .time-text {
+      flex: none;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: #6E6C82;
+      min-width: 74px;
+      text-align: right;
+    }
+
+    .transcript {
+      border-left: 2px solid #2A2938;
+      padding-left: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .transcript p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .speaker {
+      font-weight: 600;
+      color: #6E6C82;
+    }
+
+    .line-agent {
+      color: #D8D6E8;
+    }
+
+    .line-caller {
+      color: #A8A6BC;
+    }
+
+    footer {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 32px 64px;
+      border-top: 1px solid #1A1924;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #6E6C82;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <span class="brand-text">It Path Solutions</span>
+    </div>
+    <h1>Voice AI Agent — Call Recording Portfolio</h1>
+    <p class="subtitle">Live outbound call samples from our voice AI agent, deployed across sales, healthcare, banking, real estate, order tracking, and travel.</p>
+  </header>
+
+  <main>
+    
+    <!-- Sales Section -->
+    <section>
+      <div class="section-header">
+        <h2>Sales</h2>
+        <span class="blurb">Lead outreach product pitches and budget objection handling</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/Sales Agent-Happy Path (Positive).m4a">
+          <div class="card-header">
+            
+            <span class="scenario">Objection handling outreach campaign</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Hey Alex, it's Nova Telecom here. We've got an exciting deal on our Gigabit Fiber right now. But before I get into it, tell me a bit about what you're looking for in your internet.</p>
+            <p class="line-caller"><span class="speaker">Caller: </span>Yeah, like mostly my kids playing video games and my wife and I stream 4K movies on Netflix, but it buffers a lot at night. Can you have something for that? Ah, let's see. Buffering is the worst.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Healthcare Section -->
+    <section>
+      <div class="section-header">
+        <h2>Healthcare</h2>
+        <span class="blurb">Medical appointments and prescription</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/Healthcare-Happy Path (Positive).m4a">
+          <div class="card-header">
+            
+            <span class="scenario">Healthcare Assistant Call</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, I'm here to help with your appointments, prescriptions, or lab results. What can I do for you today?</p>
+            <p class="line-caller"><span class="speaker">Caller: </span>Hi, I would like to assess my medical information. I can help with that.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Banking Section -->
+    <section>
+      <div class="section-header">
+        <h2>Banking</h2>
+        <span class="blurb">Credit card eligibility check and Loan eligibility check</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/Banking_HappyPath_Call.mp3">
+          <div class="card-header">
+            
+            <span class="scenario">Automated Credit card eligibility check</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello and welcome. I am a banking assistant and I can help you explore loan products, credit cards, or answer any general questions you have. How may I assist you today?</p>
+            <p class="line-caller"><span class="speaker">Caller: </span>Actually, I wanted to have a credit card.
+</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Real Estate Section -->
+    <section>
+      <div class="section-header">
+        <h2>Real Estate</h2>
+        <span class="blurb">Properties management</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/Realestate Sales-Happy Path (Positive).m4a">
+          <div class="card-header">
+            
+            <span class="scenario">Residential Property Search</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, Alex, it's great to connect with you. I was just looking at an incredible new listing that just came on the market. Are you actively looking to buy right now?</p>
+            <p class="line-caller"><span class="speaker">Caller: </span>Oh, hey, yeah, we are actually looking to upgrade, we need at least four bedrooms and a decent backyard for the kids.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Order Tracking Section -->
+    <section>
+      <div class="section-header">
+        <h2>Order Tracking</h2>
+        <span class="blurb">Track the order status</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/order-tracking.m4a">
+          <div class="card-header">
+            
+            <span class="scenario">Order status inquiry</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">Caller: </span>Hello, can you please help me to get my order status?</p>
+            <p class="line-caller"><span class="speaker">AI Agent: </span>Hello, I can help with that. To start, please provide your full name.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Travel Section -->
+    <section>
+      <div class="section-header">
+        <h2>Travel</h2>
+        <span class="blurb">Package recommendations and stay itinerary planner</span>
+      </div>
+      <div class="grid">
+        <div class="card" data-file="public/recording/Travel_HappyPath_Call.mp3">
+          <div class="card-header">
+            
+            <span class="scenario">Resort stay booking details review</span>
+          </div>
+          <div class="player-controls">
+            <button type="button" class="play-btn" aria-label="Play recording">▶</button>
+            <div class="seek-bar">
+              <div class="seek-fill"></div>
+            </div>
+            <span class="time-text">0:00 / 0:00</span>
+          </div>
+          <div class="transcript">
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Hello, thanks for calling Global Travels. How can I help you today?</p>
+            <p class="line-caller"><span class="speaker">Caller: </span>Hello, actually I wanted to plan a vacation</p>
+            <p class="line-agent"><span class="speaker">AI Agent: </span>Do you have a destination or travel type in mind?</p>
+            <p class="line-caller"><span class="speaker">Caller: </span> Yes, the place is Switzerland.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <span>© 2026 It Path Solutions</span>
+    <span>Voice AI Agent Portfolio</span>
+  </footer>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const cards = document.querySelectorAll('.card');
+      let activeAudio = null;
+      let activeCard = null;
+      let activeTimer = null;
+
+      function formatTime(t) {
+        if (!isFinite(t) || t < 0) t = 0;
+        const m = Math.floor(t / 60);
+        const s = Math.floor(t % 60);
+        return m + ':' + String(s).padStart(2, '0');
+      }
+
+      cards.forEach(card => {
+        const file = card.getAttribute('data-file');
+        const playBtn = card.querySelector('.play-btn');
+        const seekFill = card.querySelector('.seek-fill');
+        const seekContainer = card.querySelector('.seek-bar');
+        const timeText = card.querySelector('.time-text');
+
+        // Create an audio element for metadata preloading
+        const audio = new Audio();
+        audio.src = file;
+        audio.preload = 'metadata';
+
+        // Handle path fallback if needed
+        audio.addEventListener('error', () => {
+          if (!audio.src.includes('public/')) {
+            const currentSrc = audio.src;
+            const originalPath = file.startsWith('public/') ? file.replace('public/', '') : 'public/' + file;
+            audio.src = originalPath;
+          }
+        });
+
+        // Update duration display when loaded
+        audio.addEventListener('loadedmetadata', () => {
+          timeText.textContent = `0:00 / ${formatTime(audio.duration)}`;
+        });
+
+        // Fallback if metadata is cached or loaded immediately
+        if (audio.readyState >= 1) {
+          timeText.textContent = `0:00 / ${formatTime(audio.duration)}`;
+        } else {
+          timeText.textContent = `0:00 / 0:00`;
+        }
+
+        // Play/Pause toggle click handler
+        playBtn.addEventListener('click', () => {
+          if (activeAudio === audio) {
+            if (audio.paused) {
+              playAudio();
+            } else {
+              pauseAudio();
+            }
+          } else {
+            if (activeAudio) {
+              resetActiveAudio();
+            }
+            activeAudio = audio;
+            activeCard = card;
+            playAudio();
+          }
+        });
+
+        // Seek bar click handler
+        seekContainer.addEventListener('click', (e) => {
+          const rect = seekContainer.getBoundingClientRect();
+          const clickPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          
+          if (activeAudio === audio) {
+            audio.currentTime = clickPercent * audio.duration;
+            updateProgress();
+          } else {
+            if (activeAudio) {
+              resetActiveAudio();
+            }
+            activeAudio = audio;
+            activeCard = card;
+            audio.currentTime = clickPercent * audio.duration;
+            playAudio();
+          }
+        });
+
+        function playAudio() {
+          activeAudio.play().then(() => {
+            playBtn.textContent = '❙❙'; // pause icon
+            startProgressTimer();
+          }).catch(err => {
+            console.warn("Playback failed, trying fallback source path:", err);
+            const fallbackUrl = file.startsWith('public/') ? file.replace('public/', '') : 'public/' + file;
+            activeAudio.src = fallbackUrl;
+            activeAudio.load();
+            activeAudio.play().then(() => {
+              playBtn.textContent = '❙❙';
+              startProgressTimer();
+            }).catch(e => {
+              console.error("All fallback paths failed:", e);
+              resetActiveAudio();
+            });
+          });
+        }
+
+        function pauseAudio() {
+          if (activeAudio) {
+            activeAudio.pause();
+            playBtn.textContent = '▶';
+            clearInterval(activeTimer);
+          }
+        }
+
+        function startProgressTimer() {
+          clearInterval(activeTimer);
+          activeTimer = setInterval(updateProgress, 100);
+        }
+
+        function updateProgress() {
+          if (!activeAudio || !activeCard) return;
+          const cur = activeAudio.currentTime;
+          const dur = activeAudio.duration || 0;
+          const percent = dur ? (cur / dur) * 100 : 0;
+          seekFill.style.width = `${percent}%`;
+          timeText.textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
+        }
+
+        function resetActiveAudio() {
+          if (activeAudio) {
+            activeAudio.pause();
+          }
+          clearInterval(activeTimer);
+          if (activeCard) {
+            const btn = activeCard.querySelector('.play-btn');
+            const fill = activeCard.querySelector('.seek-fill');
+            const txt = activeCard.querySelector('.time-text');
+            btn.textContent = '▶';
+            fill.style.width = '0%';
+            if (activeAudio) {
+              txt.textContent = `0:00 / ${formatTime(activeAudio.duration)}`;
+            }
+          }
+          activeAudio = null;
+          activeCard = null;
+        }
+
+        // Handle end of playback
+        audio.addEventListener('ended', () => {
+          resetActiveAudio();
+        });
+      });
+    });
+  </script>
+
+</body>
+</html>
