@@ -14,6 +14,7 @@ import AgentModeSelectPage from './pages/AgentModeSelectPage';
 import AgentConsolePage from './pages/AgentConsolePage';
 import AgentCallConsolePage from './pages/AgentCallConsolePage';
 import OutreachCallConsolePage from './pages/OutreachCallConsolePage';
+import AgentChatConsolePage from './pages/AgentChatConsolePage';
 import { authService } from './services/authService';
 
 interface Client {
@@ -22,6 +23,7 @@ interface Client {
   client_name: string;
   email: string;
   phone?: string;
+  active_path?: string;
 }
 
 // Custom Slate Material-UI Theme Creator
@@ -68,6 +70,7 @@ const createAppTheme = (mode: 'light' | 'dark') => createTheme({
 
 export default function App() {
   const [client, setClient] = useState<Client | null>(null);
+  const [domain, setDomain] = useState<any>(null);
   const [domainName, setDomainName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [pipelineMode, setPipelineMode] = useState<string>('cascade');
@@ -101,6 +104,7 @@ export default function App() {
       try {
         const data = await authService.checkAuth();
         setClient(data.client);
+        setDomain(data.domain || null);
         setDomainName(data.domain ? data.domain.name : 'None');
         setPipelineMode(data.pipeline_mode || 'cascade');
       } catch (err) {
@@ -120,10 +124,24 @@ export default function App() {
       console.error('Logout failed', e);
     }
     setClient(null);
+    setDomain(null);
     setDomainName('');
     localStorage.removeItem('voice_session_id');
     navigate('/login');
   };
+
+  let isOutreach = false;
+  if (domain) {
+    let parsedDynamicConfig = null;
+    if (domain.dynamic_config) {
+      try {
+        parsedDynamicConfig = typeof domain.dynamic_config === 'string'
+          ? JSON.parse(domain.dynamic_config)
+          : domain.dynamic_config;
+      } catch {}
+    }
+    isOutreach = domain.path_type === 'outreach' || parsedDynamicConfig?.pipeline_type === 'outreach' || client?.active_path === 'outreach';
+  }
 
   if (loading) {
     return (
@@ -167,8 +185,9 @@ export default function App() {
                 <Navigate to="/dashboard" replace />
               ) : (
                 <LoginPage 
-                  onLoginSuccess={(c, d, pm) => {
+                  onLoginSuccess={(c: any, d: string, pm: string, domObj: any) => {
                     setClient(c);
+                    setDomain(domObj);
                     setDomainName(d);
                     setPipelineMode(pm);
                     navigate('/dashboard');
@@ -211,7 +230,7 @@ export default function App() {
             path="/agent-mode-select" 
             element={
               client ? (
-                <AgentModeSelectPage domainName={domainName} />
+                <AgentModeSelectPage domainName={domainName} isOutreach={isOutreach} />
               ) : (
                 <Navigate to="/login" replace />
               )
@@ -250,6 +269,20 @@ export default function App() {
             element={
               client ? (
                 <OutreachCallConsolePage />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/agent-chat" 
+            element={
+              client ? (
+                <AgentChatConsolePage 
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                />
               ) : (
                 <Navigate to="/login" replace />
               )

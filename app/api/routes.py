@@ -236,9 +236,11 @@ def create_api_router(
     async def login_tenant(req: LoginRequest, response: Response):
         """Authenticates client and sets token/cookie."""
         client = await system_db.get_client_by_email(req.email)
+        print(f"Client found: {client}")
         if not client:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         
+        print(f"Client password hash: {client['password_hash']}")
         if not verify_password(req.password, client["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password.")
 
@@ -1009,6 +1011,203 @@ def create_api_router(
             logger.error(f"Error ending Twilio call: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
+    # -------------------------------------------------------------------------
+    # Unified Chatbot API Endpoint
+    # -------------------------------------------------------------------------
+
+    class ChatRequest(BaseModel):
+        client_id: int
+        session_id: str
+        message: str
+
+    async def load_dynamic_chat_config(client_id: int) -> dict:
+        if not client_id:
+            return {}
+        try:
+            from app.system_database import SystemDatabase
+            from app.services.schema_service import SchemaService
+            from app.dynamic_db_client import DynamicDbClient
+            import json
+
+            sys_db = SystemDatabase()
+            client_mapping = await sys_db.get_client_domain_mapping(client_id)
+            if not client_mapping or not client_mapping.get("dynamic_config"):
+                return {}
+
+            dyn_cfg = json.loads(client_mapping["dynamic_config"])
+            db_config = await sys_db.get_client_db_config(client_id)
+            if not db_config:
+                return {}
+
+            dyn_cfg["database"] = db_config
+            dyn_cfg["domain"] = client_mapping.get("domain_name", "default")
+
+            schema_service = SchemaService(db_config)
+            schema_metadata = await schema_service.get_schema_metadata()
+            dyn_db_client = DynamicDbClient(db_config)
+
+            if dyn_cfg.get("pipeline_type") == "outreach":
+                from app.services.outreach_tool_factory import OutreachToolFactory
+                from app.services.outreach_tool_executor import OutreachToolExecutor
+                from app.services.outreach_prompt_assembler import OutreachPromptAssembler
+                
+                tool_factory = OutreachToolFactory(dyn_cfg, schema_metadata)
+                tools, exec_map = tool_factory.generate_tools()
+                executor = OutreachToolExecutor(dyn_db_client, exec_map)
+                prompt = OutreachPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+            else:
+                from app.services.dynamic_tool_factory import DynamicToolFactory
+                from app.services.dynamic_tool_executor import DynamicToolExecutor
+                from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
+                
+                tool_factory = DynamicToolFactory(dyn_cfg, schema_metadata)
+                tools, exec_map = tool_factory.generate_tools()
+                executor = DynamicToolExecutor(
+                    dyn_db_client,
+                    exec_map,
+                    dyn_cfg["identity"]["table"],
+                    dyn_cfg["identity"]["name_column"],
+                    dyn_cfg["identity"]["verification_column"]
+                )
+                prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+
+            gemini_key = await sys_db.get_client_gemini_key(client_id)
+
+            return {
+                "dynamic_tools": tools,
+                "dynamic_executor": executor,
+                "system_prompt": prompt,
+                "domain": dyn_cfg["domain"],
+                "gemini_api_key": gemini_key,
+                "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support"),
+                "dynamic_config": dyn_cfg
+            }
+        except Exception as e:
+            logger.error(f"Error loading dynamic chat config for client {client_id}: {e}")
+            return {}
+
+    @router.post("/api/chat")
+    async def chat_message(req: ChatRequest, request: Request):
+        """Unified text-based chatbot endpoint routing dynamically based on pipeline mode."""
+        # 1. Fetch dynamic config and system prompts
+        config_data = await load_dynamic_chat_config(req.client_id)
+        if not config_data:
+            raise HTTPException(status_code=400, detail=f"Configuration not found for client ID {req.client_id}")
+
+        # Get session_manager and agent_service
+        session_manager = getattr(request.app.state, "session_manager", None)
+        agent_service = getattr(request.app.state, "agent_service", None)
+        if not session_manager or not agent_service:
+            raise HTTPException(status_code=500, detail="Conversation services are not initialized on the server.")
+
+        # Resolve pipeline mode from server environment
+        import os
+        pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
+
+        # 2. Get or create session
+        session = await session_manager.get_or_create(req.session_id)
+        session.client_id = req.client_id
+
+        # 3. Process the query based on mode
+        if pipeline_mode == "multimodal":
+            # --- GEMINI MODE ---
+            gemini_key = config_data.get("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
+            if not gemini_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Gemini API key is not configured. Please add your key in the Database settings or configure GOOGLE_API_KEY in the environment."
+                )
+
+            from app.services.gemini_chat_service import GeminiChatService
+
+            # Load prompts and tools
+            system_prompt = config_data.get("system_prompt", "You are a helpful assistant.")
+            tool_declarations = config_data.get("dynamic_tools", [])
+
+            # Inject verification status and filter tools to optimize rate limits and roundtrips
+            if session.verified:
+                user_details = getattr(session, "user_details", None) or {}
+                system_prompt += f"\n\n[SYSTEM INFO] The user is already verified. Identity ID: {session.customer_id}. User Details: {user_details}. You do NOT need to ask for verification or call verification functions again."
+                tool_declarations = [tool for tool in tool_declarations if not (tool.get("name", "").startswith("verify_") or tool.get("name") == "verify_user")]
+
+            chat_state_dict = {
+                "conversation_history": session.conversation_history,
+                "current_intent": session.current_intent or "unknown",
+                "verified": session.verified,
+                "identity_id": session.customer_id,
+                "customer": {"id": session.customer_id, "full_name": session.customer_name} if session.customer_id else None,
+                "orders": session.orders if hasattr(session, "orders") else [],
+                "user_details": getattr(session, "user_details", None),
+                "records": getattr(session, "records", []),
+            }
+
+            chat_service = GeminiChatService(api_key=gemini_key)
+            executor = config_data.get("dynamic_executor")
+
+            result = await chat_service.handle_chat_message(
+                message=req.message,
+                system_prompt=system_prompt,
+                tool_declarations=tool_declarations,
+                executor=executor,
+                session_state=chat_state_dict,
+                dynamic_config=config_data.get("dynamic_config")
+            )
+
+            # Sync updated states back to session state
+            chat_state = result["chat_state"]
+            session.verified = chat_state["verified"]
+            session.customer_id = chat_state.get("identity_id")
+            if chat_state.get("customer"):
+                session.customer_name = chat_state["customer"]["full_name"]
+            session.orders = chat_state.get("orders", [])
+            session.user_details = chat_state.get("user_details")
+            session.records = chat_state.get("records", [])
+            session.current_intent = result["intent"]
+
+            if req.message != "__START__":
+                session.add_turn(role="user", text=req.message, max_turns=20)
+            session.add_turn(role="assistant", text=result["reply_text"], max_turns=20)
+            session.touch()
+
+            return JSONResponse(content={
+                "session_id": req.session_id,
+                "reply_text": result["reply_text"],
+                "intent": result["intent"],
+                "state": "active",
+                "verified": session.verified,
+                "customer": chat_state.get("customer"),
+                "orders": session.orders
+            })
+
+        else:
+            # --- CASCADE MODE (GROQ) ---
+            conversation_result = await agent_service.handle_user_text(
+                session_id=req.session_id,
+                user_text=req.message
+            )
+            
+            rephraser = getattr(request.app.state, "rephraser", None)
+            reply_text = conversation_result.reply_text
+            if rephraser and rephraser.enabled:
+                rephrased = await rephraser.rephrase_text(reply_text)
+                reply_text = rephrased or reply_text
+
+            session.add_turn(role="user", text=req.message, max_turns=20)
+            session.add_turn(role="assistant", text=reply_text, max_turns=20)
+            session.verified = conversation_result.verified
+            session.current_intent = conversation_result.intent
+            session.touch()
+
+            return JSONResponse(content={
+                "session_id": req.session_id,
+                "reply_text": reply_text,
+                "intent": conversation_result.intent,
+                "state": conversation_result.state,
+                "verified": conversation_result.verified,
+                "customer": conversation_result.customer,
+                "orders": conversation_result.orders
+            })
 
     # -------------------------------------------------------------------------
     # Legacy Pipeline Simulation & Audio Cache Serving APIs (Preserve compatibility)

@@ -12,7 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/authService';
 
 interface LoginProps {
-  onLoginSuccess: (client: any, domainName: string, pipelineMode: string) => void;
+  onLoginSuccess: (client: any, domainName: string, pipelineMode: string, domain: any) => void;
 }
 
 export default function LoginPage({ onLoginSuccess }: LoginProps) {
@@ -59,7 +59,7 @@ export default function LoginPage({ onLoginSuccess }: LoginProps) {
       const data = await authService.login({ email, password });
       if (data.success) {
         const meData = await authService.checkAuth();
-        onLoginSuccess(meData.client, meData.domain ? meData.domain.name : 'None', meData.pipeline_mode || 'cascade');
+        onLoginSuccess(meData.client, meData.domain ? meData.domain.name : 'None', meData.pipeline_mode || 'cascade', meData.domain);
       } else {
         setError(data.detail || 'Authentication failed.');
       }
