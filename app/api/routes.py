@@ -1087,6 +1087,25 @@ def create_api_router(
             logger.error(f"Error loading dynamic chat config for client {client_id}: {e}")
             return {}
 
+    @router.get("/api/chat/history/{session_id}")
+    async def get_chat_history(session_id: str, request: Request):
+        """Fetch existing conversation turns for a session to sync history."""
+        session_manager = getattr(request.app.state, "session_manager", None)
+        if not session_manager:
+            raise HTTPException(status_code=500, detail="Session manager is not initialized.")
+        
+        session = await session_manager.get_or_create(session_id)
+        turns = []
+        for turn in session.conversation_history:
+            if turn.text == "__START__":
+                continue
+            turns.append({
+                "role": turn.role,
+                "text": turn.text,
+                "ts": turn.ts.isoformat()
+            })
+        return JSONResponse(content={"history": turns})
+
     @router.post("/api/chat")
     async def chat_message(req: ChatRequest, request: Request):
         """Unified text-based chatbot endpoint routing dynamically based on pipeline mode."""

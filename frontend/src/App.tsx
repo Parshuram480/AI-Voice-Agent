@@ -3,9 +3,13 @@ import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import CloseIcon from '@mui/icons-material/Close';
+import ChatIcon from '@mui/icons-material/Chat';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import ChatConsoleWidget from './components/ChatConsoleWidget';
 
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -80,6 +84,8 @@ export default function App() {
   });
 
   const navigate = useNavigate();
+  const location = useLocation();
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   // Sync theme mode with document element (HTML) class for Tailwind v4 custom dark variant
   useEffect(() => {
@@ -295,6 +301,50 @@ export default function App() {
             element={<Navigate to={client ? "/dashboard" : "/login"} replace />} 
           />
         </Routes>
+
+        {/* Floating Chat Widget */}
+        {client !== null && location.pathname !== '/agent-chat' && (
+          <div className="fixed bottom-6 right-6 z-[9999] flex flex-col items-end">
+            {isChatOpen && (
+              <div className="w-[360px] sm:w-[390px] h-[500px] mb-4 shadow-2xl">
+                <ChatConsoleWidget
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                  isFloating={true}
+                  onClose={() => setIsChatOpen(false)}
+                  onFullScreen={() => {
+                    setIsChatOpen(false);
+                    navigate('/agent-chat');
+                  }}
+                />
+              </div>
+            )}
+            
+            {/* Floating Action Button (FAB) with hover Tooltip */}
+            <Tooltip title={isChatOpen ? "Close chat" : "Open support chat"} arrow placement="left">
+              <IconButton
+                onClick={() => setIsChatOpen(prev => !prev)}
+                color="primary"
+                className="cursor-pointer text-white rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300 border border-violet-500/20"
+                aria-label="Open support chat"
+                sx={{ 
+                  width: 56, 
+                  height: 56, 
+                  backgroundColor: '#8b5cf6', 
+                  color: '#ffffff', 
+                  '&:hover': { backgroundColor: '#7c3aed' } 
+                }}
+              >
+                {isChatOpen ? (
+                  <CloseIcon className="w-6 h-6 text-white" />
+                ) : (
+                  <ChatIcon className="w-6 h-6 text-white" />
+                )}
+              </IconButton>
+            </Tooltip>
+          </div>
+        )}
       </div>
     </ThemeProvider>
   );
