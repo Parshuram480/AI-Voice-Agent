@@ -15,7 +15,7 @@ class GeminiChatService:
         
         self.client = genai.Client(api_key=self.api_key)
         # Dedicated model for text chat, leaving GEMINI_LIVE_MODEL untouched
-        self.model = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.5-flash")
+        self.model = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.5-flash-lite")
         logger.info(f"Initialized GeminiChatService with model: {self.model}")
 
     async def handle_chat_message(
@@ -118,7 +118,7 @@ class GeminiChatService:
                             last_error = retry_err
 
                     # 2. Handle HTTP 503 Spikes or generic model overloads by continuing to next fallback model
-                    if any(term in err_msg.lower() for term in ("503", "unavailable", "overloaded", "demand", "temporary", "limit")):
+                    if any(term in err_msg.lower() for term in ("503", "unavailable", "overloaded", "demand", "temporary")):
                         logger.warning(f"Model {active_model} is unavailable. Retrying with fallback. Error: {err_msg}")
                         last_error = e
                         continue
