@@ -317,6 +317,11 @@ async def startup():
         )
         logger.info("✓ Streaming voice pipeline initialized")
 
+    app.state.agent_service = agent_service
+    app.state.session_manager = session_manager
+    app.state.db_client = db_client
+    app.state.rephraser = rephraser
+
     logger.info(f"  Pipeline Mode: {pipeline_mode}")
     logger.info(f"  Server host: {SERVER_HOST}")
     logger.info(f"  Listening on port: {SERVER_PORT}")

@@ -3,9 +3,13 @@ import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import CloseIcon from '@mui/icons-material/Close';
+import ChatIcon from '@mui/icons-material/Chat';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import ChatConsoleWidget from './components/ChatConsoleWidget';
 
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -14,6 +18,7 @@ import AgentModeSelectPage from './pages/AgentModeSelectPage';
 import AgentConsolePage from './pages/AgentConsolePage';
 import AgentCallConsolePage from './pages/AgentCallConsolePage';
 import OutreachCallConsolePage from './pages/OutreachCallConsolePage';
+import AgentChatConsolePage from './pages/AgentChatConsolePage';
 import { authService } from './services/authService';
 
 interface Client {
@@ -22,6 +27,7 @@ interface Client {
   client_name: string;
   email: string;
   phone?: string;
+  active_path?: string;
 }
 
 // Custom Slate Material-UI Theme Creator
@@ -68,6 +74,7 @@ const createAppTheme = (mode: 'light' | 'dark') => createTheme({
 
 export default function App() {
   const [client, setClient] = useState<Client | null>(null);
+  const [domain, setDomain] = useState<any>(null);
   const [domainName, setDomainName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [pipelineMode, setPipelineMode] = useState<string>('cascade');
@@ -77,6 +84,8 @@ export default function App() {
   });
 
   const navigate = useNavigate();
+  const location = useLocation();
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   // Sync theme mode with document element (HTML) class for Tailwind v4 custom dark variant
   useEffect(() => {
@@ -101,6 +110,7 @@ export default function App() {
       try {
         const data = await authService.checkAuth();
         setClient(data.client);
+        setDomain(data.domain || null);
         setDomainName(data.domain ? data.domain.name : 'None');
         setPipelineMode(data.pipeline_mode || 'cascade');
       } catch (err) {
@@ -120,10 +130,24 @@ export default function App() {
       console.error('Logout failed', e);
     }
     setClient(null);
+    setDomain(null);
     setDomainName('');
     localStorage.removeItem('voice_session_id');
     navigate('/login');
   };
+
+  let isOutreach = false;
+  if (domain) {
+    let parsedDynamicConfig = null;
+    if (domain.dynamic_config) {
+      try {
+        parsedDynamicConfig = typeof domain.dynamic_config === 'string'
+          ? JSON.parse(domain.dynamic_config)
+          : domain.dynamic_config;
+      } catch {}
+    }
+    isOutreach = domain.path_type === 'outreach' || parsedDynamicConfig?.pipeline_type === 'outreach' || client?.active_path === 'outreach';
+  }
 
   if (loading) {
     return (
@@ -167,8 +191,9 @@ export default function App() {
                 <Navigate to="/dashboard" replace />
               ) : (
                 <LoginPage 
-                  onLoginSuccess={(c, d, pm) => {
+                  onLoginSuccess={(c: any, d: string, pm: string, domObj: any) => {
                     setClient(c);
+                    setDomain(domObj);
                     setDomainName(d);
                     setPipelineMode(pm);
                     navigate('/dashboard');
@@ -211,7 +236,7 @@ export default function App() {
             path="/agent-mode-select" 
             element={
               client ? (
-                <AgentModeSelectPage domainName={domainName} />
+                <AgentModeSelectPage domainName={domainName} isOutreach={isOutreach} />
               ) : (
                 <Navigate to="/login" replace />
               )
@@ -255,6 +280,20 @@ export default function App() {
               )
             } 
           />
+          <Route 
+            path="/agent-chat" 
+            element={
+              client ? (
+                <AgentChatConsolePage 
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                />
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
 
           {/* Catch-all redirect */}
           <Route 
@@ -262,6 +301,50 @@ export default function App() {
             element={<Navigate to={client ? "/dashboard" : "/login"} replace />} 
           />
         </Routes>
+
+        {/* Floating Chat Widget */}
+        {client !== null && location.pathname !== '/agent-chat' && (
+          <div className="fixed bottom-6 right-6 z-[9999] flex flex-col items-end">
+            {isChatOpen && (
+              <div className="w-[360px] sm:w-[390px] h-[500px] mb-4 shadow-2xl">
+                <ChatConsoleWidget
+                  client={client}
+                  domainName={domainName}
+                  pipelineMode={pipelineMode}
+                  isFloating={true}
+                  onClose={() => setIsChatOpen(false)}
+                  onFullScreen={() => {
+                    setIsChatOpen(false);
+                    navigate('/agent-chat');
+                  }}
+                />
+              </div>
+            )}
+            
+            {/* Floating Action Button (FAB) with hover Tooltip */}
+            <Tooltip title={isChatOpen ? "Close chat" : "Open support chat"} arrow placement="left">
+              <IconButton
+                onClick={() => setIsChatOpen(prev => !prev)}
+                color="primary"
+                className="cursor-pointer text-white rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300 border border-violet-500/20"
+                aria-label="Open support chat"
+                sx={{ 
+                  width: 56, 
+                  height: 56, 
+                  backgroundColor: '#8b5cf6', 
+                  color: '#ffffff', 
+                  '&:hover': { backgroundColor: '#7c3aed' } 
+                }}
+              >
+                {isChatOpen ? (
+                  <CloseIcon className="w-6 h-6 text-white" />
+                ) : (
+                  <ChatIcon className="w-6 h-6 text-white" />
+                )}
+              </IconButton>
+            </Tooltip>
+          </div>
+        )}
       </div>
     </ThemeProvider>
   );

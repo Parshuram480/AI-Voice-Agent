@@ -185,7 +185,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
         {/* Launch Button Room */}
         <div className="text-center py-4 bg-slate-900/40 border border-slate-800 rounded-2xl">
           <Button
-            onClick={() => navigate(isOutreach ? '/outreach-console' : '/agent-call-console')}
+            onClick={() => navigate('/agent-mode-select')}
             variant="contained"
             color="primary"
             size="large"

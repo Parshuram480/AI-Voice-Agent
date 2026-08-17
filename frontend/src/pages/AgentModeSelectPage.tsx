@@ -1,15 +1,16 @@
-
 import Button from '@mui/material/Button';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
 import PhoneInTalkIcon from '@mui/icons-material/PhoneInTalk';
+import ForumIcon from '@mui/icons-material/Forum';
 import { useNavigate } from 'react-router-dom';
 
 interface ModeSelectProps {
   domainName: string;
+  isOutreach?: boolean;
 }
 
-export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
+export default function AgentModeSelectPage({ domainName, isOutreach = false }: ModeSelectProps) {
   const navigate = useNavigate();
 
   return (
@@ -21,6 +22,8 @@ export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
           </h1>
           <p className="text-slate-400 text-sm mt-1">
             Agent Domain: <span className="text-emerald-400 font-bold uppercase tracking-wider">{domainName}</span>
+            <span className="mx-2 text-slate-600">|</span>
+            Campaign Type: <span className="text-violet-400 font-bold uppercase tracking-wider">{isOutreach ? 'Outreach' : 'Support'}</span>
           </p>
         </div>
         <Button 
@@ -34,12 +37,12 @@ export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
         </Button>
       </header>
 
-      <div className="flex justify-center select-none">
+      <div className="flex flex-col md:flex-row gap-6 justify-center items-stretch select-none">
         {false && (
           /* Option 1: Web Mic */
           <div 
             onClick={() => navigate('/agent-console')}
-            className="group bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-violet-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-violet-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
+            className="group flex-1 max-w-sm bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-violet-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-violet-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
           >
             <div className="absolute inset-0 bg-gradient-to-b from-violet-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
             
@@ -71,10 +74,10 @@ export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
           </div>
         )}
 
-        {/* Option 2: Twilio Call */}
+        {/* Option 2: Calling Panel */}
         <div 
-          onClick={() => navigate('/agent-call-console')}
-          className="group max-w-md w-full bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-emerald-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-emerald-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
+          onClick={() => navigate(isOutreach ? '/outreach-console' : '/agent-call-console')}
+          className="group flex-1 max-w-sm bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-emerald-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-emerald-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
         >
           <div className="absolute inset-0 bg-gradient-to-b from-emerald-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
           
@@ -84,10 +87,12 @@ export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
           
           <div>
             <h2 className="text-xl font-bold text-slate-200 mb-3 group-hover:text-emerald-400 transition-colors duration-200">
-              Twilio Telephony Call
+              {isOutreach ? 'Outbound Outreach Call' : 'Twilio Telephony Call'}
             </h2>
             <p className="text-slate-400 text-sm leading-relaxed max-w-xs">
-              Configure and place a real outbound call to a mobile number to test the voice agent's latency, speech detection, and pipeline end-to-end.
+              {isOutreach 
+                ? 'Configure outreach campaigns and place outbound calls to verify lead responses, schedule follow-ups, or run marketing dialers.'
+                : 'Configure and place a real outbound call to a mobile number to test the voice agent\'s latency, speech detection, and pipeline end-to-end.'}
             </p>
           </div>
 
@@ -101,7 +106,43 @@ export default function AgentModeSelectPage({ domainName }: ModeSelectProps) {
               py: 1.2
             }}
           >
-            Open Call Dialer
+            {isOutreach ? 'Open Outreach Dialer' : 'Open Call Dialer'}
+          </Button>
+        </div>
+
+        {/* Option 2: Text Chatbot */}
+        <div 
+          onClick={() => navigate('/agent-chat')}
+          className="group flex-1 max-w-sm bg-slate-900/50 hover:bg-slate-900/80 backdrop-blur-xl border border-slate-800/85 hover:border-violet-500/55 rounded-3xl p-8 shadow-xl shadow-slate-950/60 hover:shadow-violet-600/5 transition-all duration-300 flex flex-col justify-between items-center text-center cursor-pointer min-h-[350px] relative overflow-hidden"
+        >
+          <div className="absolute inset-0 bg-gradient-to-b from-violet-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+          
+          <div className="w-16 h-16 rounded-2xl bg-violet-950/50 border border-violet-850 flex items-center justify-center mb-6 group-hover:scale-105 transition-transform duration-300">
+            <ForumIcon sx={{ fontSize: 36, color: '#a78bfa' }} />
+          </div>
+          
+          <div>
+            <h2 className="text-xl font-bold text-slate-200 mb-3 group-hover:text-violet-400 transition-colors duration-200">
+              {isOutreach ? 'Outreach Chatbot Console' : 'Text Chatbot Console'}
+            </h2>
+            <p className="text-slate-400 text-sm leading-relaxed max-w-xs">
+              {isOutreach
+                ? 'Interact with the outreach agent in a standard text chatbot window to verify target databases, contact leads, and trace campaign outcomes.'
+                : 'Interact with the AI Agent in a standard text-based chat widget. Fully supports dynamic database verifications and customer account lookups.'}
+            </p>
+          </div>
+
+          <Button 
+            variant="contained" 
+            color="primary"
+            sx={{
+              mt: 6,
+              background: 'linear-gradient(to right, #7c3aed, #c026d3)',
+              px: 4,
+              py: 1.2
+            }}
+          >
+            Launch Chatbot
           </Button>
         </div>
       </div>
