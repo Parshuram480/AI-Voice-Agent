@@ -182,7 +182,8 @@ class GeminiLivePipeline:
             system_prompt=system_prompt,
             domain=kwargs.get("domain") or self.domain,
             language=kwargs.get("language", "en"),
-            api_key=gemini_api_key
+            api_key=gemini_api_key,
+            client_id=kwargs.get("client_id") or self.client_id
         )
         
         # Initialize filler service with API key if available and not already initialized
@@ -215,7 +216,7 @@ class GeminiLivePipeline:
                     )
                 else:
                     initial_prompt = f"The phone call has just connected. Please greet the user appropriately for the '{domain_name}' domain and ask how you can help them."
-                
+                    
                 logger.info(f"[{resolved_session_id}] Sending initial prompt: {initial_prompt[:150]}...")
                 await session.send(input=initial_prompt, end_of_turn=True)
                 

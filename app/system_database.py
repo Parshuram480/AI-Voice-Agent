@@ -227,6 +227,43 @@ class SystemDatabase:
             await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_auth_token VARCHAR(255);")
             await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_phone_number VARCHAR(50);")
 
+            # 7. Executives (for AI acceleration / human handoff)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS executives (
+                id              SERIAL PRIMARY KEY,
+                name            VARCHAR(255) NOT NULL,
+                phone           VARCHAR(50) NOT NULL,
+                is_available    BOOLEAN DEFAULT TRUE,
+                client_id       INTEGER REFERENCES clients(id) ON DELETE CASCADE
+            );
+            """)
+
+            # Seed default executives if empty
+            count = await conn.fetchval("SELECT COUNT(*) FROM executives")
+            if count == 0:
+                client_row = await conn.fetchrow("SELECT id FROM clients ORDER BY id ASC LIMIT 1")
+                client_id = client_row["id"] if client_row else None
+                if client_id:
+                    await conn.execute("""
+                    INSERT INTO executives (name, phone, is_available, client_id) VALUES
+                    ('Support Representative (Available)', '+15550001111', TRUE, $1),
+                    ('Support Representative (Busy)', '+15550002222', FALSE, $1)
+                    """, client_id)
+                await conn.execute("""
+                INSERT INTO executives (name, phone, is_available, client_id) VALUES
+                ('System Support Representative (Available)', '+15559990001', TRUE, NULL),
+                ('System Support Representative (Busy)', '+15559990002', FALSE, NULL)
+                """)
+
+            # Automatically update dummy available executive phone numbers to MY_CELL_PHONE if set in env
+            my_cell_phone = os.getenv("MY_CELL_PHONE")
+            if my_cell_phone:
+                await conn.execute("""
+                UPDATE executives 
+                SET phone = $1 
+                WHERE is_available = TRUE AND (phone = '+15550001111' OR phone = '+15559990001' OR phone LIKE '+1555%')
+                """, my_cell_phone)
+
         # Seed standard domains
         await self._seed_domains()
 
@@ -612,5 +649,22 @@ class SystemDatabase:
                 await tx.rollback()
                 logger.error(f"Failed to execute profile updates: {e}")
                 raise e
+
+    async def get_available_executive(self, client_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Check for an available executive for the given client_id.
+        """
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            if client_id and client_id.isdigit():
+                row = await conn.fetchrow(
+                    "SELECT name, phone FROM executives WHERE is_available = TRUE AND (client_id = $1 OR client_id IS NULL) ORDER BY client_id ASC NULLS LAST, id ASC LIMIT 1",
+                    int(client_id)
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT name, phone FROM executives WHERE is_available = TRUE AND client_id IS NULL ORDER BY id ASC LIMIT 1"
+                )
+            return dict(row) if row else None
 
 

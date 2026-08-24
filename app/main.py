@@ -435,6 +435,7 @@ async def audio_stream(websocket: WebSocket):
     client_id_str = websocket.query_params.get("client_id")
     logger.info(f"[AUDIO STREAM WS] Raw client_id_str from ws query params: {client_id_str}")
     client_id = None
+    call_ended_or_transferred = False
     if client_id_str and client_id_str != "None":
         if "sales" in client_id_str.lower():
             client_id = "sales"
@@ -596,7 +597,7 @@ async def audio_stream(websocket: WebSocket):
                 logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}, customer_name={customer_name}, pipeline_type={pipeline_type}")
 
                 async def _startup_pipeline():
-                    nonlocal pipeline_task, outbound_task
+                    nonlocal pipeline_task, outbound_task, call_ended_or_transferred
                     # Seeding the session state with client_id
                     await session_manager.get_or_create(call_sid, client_id=client_id)
 
@@ -781,6 +782,7 @@ async def audio_stream(websocket: WebSocket):
 
                 # Background watcher: hang up Twilio when pipeline signals should_end
                 async def _watch_pipeline_end():
+                    nonlocal call_ended_or_transferred
                     try:
                         # Wait for pipeline_task to be initialized to avoid TypeError/race condition
                         while pipeline_task is None:
@@ -793,14 +795,21 @@ async def audio_stream(websocket: WebSocket):
                                 await asyncio.sleep(0.1)
                             # Let the last few syllables play out
                             await asyncio.sleep(2.0)
-                            logger.info(f"[{call_sid}] Hanging up Twilio call now.")
                             # Convert "sales" back to int for the DB lookup, or None if invalid
                             cid_for_twilio = None
                             if isinstance(client_id, int):
                                 cid_for_twilio = client_id
                             elif str(client_id).isdigit():
                                 cid_for_twilio = int(client_id)
-                            await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
+                            
+                            transfer_number = result.get("state", {}).get("transfer_to_number")
+                            call_ended_or_transferred = True
+                            if transfer_number:
+                                logger.info(f"[{call_sid}] Transferring Twilio call to {transfer_number}...")
+                                await twilio_handler.transfer_call(call_sid, transfer_number, client_id=cid_for_twilio)
+                            else:
+                                logger.info(f"[{call_sid}] Hanging up Twilio call now.")
+                                await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -847,7 +856,8 @@ async def audio_stream(websocket: WebSocket):
                 logger.info(f"Twilio pipeline result: {result.get('reply_text', '')[:80]}")
                 
                 # Automatically hang up if requested by pipeline
-                if result and result.get("should_end"):
+                if result and result.get("should_end") and not call_ended_or_transferred:
+                    call_ended_or_transferred = True
                     logger.info(f"[{call_sid}] Pipeline requested end of call. Waiting for outbound audio to play...")
                     # Wait for outbound queue to drain
                     while not outbound_audio_queue.empty():
@@ -855,13 +865,19 @@ async def audio_stream(websocket: WebSocket):
                     # Let the last few syllables play
                     await asyncio.sleep(2.0)
                     if call_sid:
-                        logger.info(f"[{call_sid}] Hanging up the Twilio call now.")
                         cid_for_twilio = None
                         if isinstance(client_id, int):
                             cid_for_twilio = client_id
                         elif str(client_id).isdigit():
                             cid_for_twilio = int(client_id)
-                        await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
+                        
+                        transfer_number = result.get("state", {}).get("transfer_to_number")
+                        if transfer_number:
+                            logger.info(f"[{call_sid}] Transferring the Twilio call to {transfer_number} now.")
+                            await twilio_handler.transfer_call(call_sid, transfer_number, client_id=cid_for_twilio)
+                        else:
+                            logger.info(f"[{call_sid}] Hanging up the Twilio call now.")
+                            await twilio_handler.end_call(call_sid, client_id=cid_for_twilio)
             except asyncio.TimeoutError:
                 logger.error("Twilio pipeline timed out")
                 pipeline_task.cancel()

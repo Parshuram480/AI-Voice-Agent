@@ -320,3 +320,43 @@ class TwilioHandler:
         except Exception as e:
             logger.error(f"Failed to end call {call_sid}: {e}")
             return False
+
+    def generate_transfer_twiml(self, transfer_number: str) -> str:
+        """
+        Generate TwiML to dial a phone number (transfer/forward).
+        """
+        response = VoiceResponse()
+        response.dial(transfer_number)
+        return str(response)
+
+    async def transfer_call(self, call_sid: str, transfer_number: str, client_id: Optional[int] = None) -> bool:
+        """
+        Redirect a live Twilio call to a new phone number.
+        """
+        client = None
+        if client_id is not None:
+            from app.system_database import SystemDatabase
+            sys_db = SystemDatabase()
+            client_cfg = await sys_db.get_client_twilio_config(client_id)
+            if client_cfg and client_cfg.get("account_sid") and client_cfg.get("auth_token"):
+                from twilio.rest import Client as TwilioClient
+                client = TwilioClient(client_cfg["account_sid"], client_cfg["auth_token"])
+
+        if not client:
+            client = self._client
+
+        if not client:
+            logger.error("Cannot transfer call — Twilio client not initialized.")
+            return False
+
+        try:
+            twiml = self.generate_transfer_twiml(transfer_number)
+            import anyio
+            await anyio.to_thread.run_sync(
+                lambda: client.calls(call_sid).update(twiml=twiml)
+            )
+            logger.info(f"Transferred call {call_sid} to {transfer_number}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to transfer call {call_sid}: {e}")
+            return False

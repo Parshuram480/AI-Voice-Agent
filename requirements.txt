@@ -11,11 +11,9 @@ python-multipart>=0.0.18
 aiofiles>=24.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
-webrtcvad-wheels>=2.0.14
-
-# Optional: Neural VAD (much better noise rejection)
-# pip install silero-vad-lite
-silero-vad-lite>=0.2.0
+# webrtcvad-wheels>=2.0.14  # Requires MSVC C++ compiler on Python 3.14; fallback is RMS
+# silero-vad-lite>=0.2.0   # Replaced with custom onnxruntime implementation
+onnxruntime>=1.19.0        # Used for custom Silero VAD implementation
 
 # LangGraph state orchestration
 langchain-core>=0.3.0
@@ -30,3 +28,4 @@ pymysql
 PyYAML>=6.0.1
 cryptography>=41.0.0
 python-jose[cryptography]
+audioop-lts; python_version >= '3.13'

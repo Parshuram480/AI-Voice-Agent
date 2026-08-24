@@ -236,7 +236,7 @@ class DynamicDbClient:
         for c_raw in columns:
             c = self._normalize_keys(c_raw)
             t_name = c["table_name"]
-            if t_name in metadata["tables"]:
+            if t_name in metadata["tables"]:                                                                                
                 metadata["tables"][t_name]["columns"][c["column_name"]] = {"type": c["data_type"], "nullable": c["is_nullable"] == "YES"}
         pks = await self.execute_query(f"""
             SELECT table_name, column_name 

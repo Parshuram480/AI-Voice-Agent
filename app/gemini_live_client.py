@@ -59,6 +59,14 @@ GLOBAL_TOOL_DECLARATIONS = [
             },
             "required": ["reason"]
         }
+    },
+    {
+        "name": "transfer_to_executive",
+        "description": "Call this tool if the user explicitly asks to speak to a human, an executive, an agent, or support, or if they are not satisfied with your answers and want to talk to an executive/human. This starts the transfer process.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        }
     }
 ]
 
@@ -66,12 +74,16 @@ GLOBAL_TOOL_DECLARATIONS = [
 CALL_FLOW_INSTRUCTIONS = """
 
 --- CALL FLOW CONTROL ---
-You have two special tools for managing the phone call lifecycle:
+You have three special tools for managing the phone call lifecycle:
 
 1. **end_call**: Use this IMMEDIATELY after you deliver your final goodbye message when the user indicates they are done (e.g. "thank you", "that's all", "bye", "nothing else"). Say goodbye FIRST, then call end_call.
 2. **out_of_scope**: Use this when the user asks something completely unrelated to the service (e.g. "what is the capital of France?", "tell me a joke"). 
    - On the FIRST out-of-scope question: warn the user politely that you can only help with service-related queries.
    - On the SECOND out-of-scope question: inform the user the call is ending, then call end_call.
+3. **transfer_to_executive**: Use this tool if the user explicitly asks to speak to a human, a support executive, a live agent, or if they are unsatisfied with your answers and want to speak to an executive.
+   - Speak your final transfer confirmation message (e.g. "Sure, let me check if an executive is available.") before calling this tool.
+   - If the tool response indicates that an executive is available, say goodbye and tell the user they are being transferred.
+   - If the tool response indicates that no executives are available, politely inform the user that no one is available right now, that their request is received, and that we will get back to them. Then say goodbye and call the end_call tool.
 
 CRITICAL: When the user says goodbye or thanks you and has no more questions, you MUST call the end_call tool. Do not just say goodbye and wait.
 """
@@ -89,7 +101,8 @@ class GeminiLiveClient:
         system_prompt: str = None,
         domain: str = None,
         language: str = "en",
-        api_key: str = None
+        api_key: str = None,
+        client_id: Optional[str] = None
     ):
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -108,6 +121,7 @@ class GeminiLiveClient:
         self.dynamic_executor = dynamic_executor
         self.domain = domain
         self.language = language
+        self.client_id = client_id
         
         # Ensure sales tools/executor/prompt are defaulted if domain is sales to prevent DB fallback
         if domain == "sales":
@@ -295,6 +309,36 @@ class GeminiLiveClient:
         logger.info(f"Executing tool call: {name} with args {args}")
         
         # Handle global call-flow tools (end_call, out_of_scope) regardless of mode
+        if name == "transfer_to_executive":
+            logger.info("[CALL FLOW] transfer_to_executive tool triggered — checking availability")
+            try:
+                from app.system_database import SystemDatabase
+                sys_db = SystemDatabase()
+                executive = await sys_db.get_available_executive(self.client_id)
+                if executive:
+                    logger.info(f"[CALL FLOW] Executive found: {executive['name']} ({executive['phone']}) - flagging call transfer")
+                    state["transfer_to_number"] = executive["phone"]
+                    state["should_end"] = True
+                    return types.FunctionResponse(
+                        name=name,
+                        id=tool_call_id,
+                        response={"success": True, "message": "An executive is available. The call will be transferred."}
+                    )
+                else:
+                    logger.warning("[CALL FLOW] No executives are currently available.")
+                    return types.FunctionResponse(
+                        name=name,
+                        id=tool_call_id,
+                        response={"success": False, "reason": "no_executive_available", "message": "No executives are currently available to take your call."}
+                    )
+            except Exception as e:
+                logger.error(f"[CALL FLOW] Error checking executive availability: {e}")
+                return types.FunctionResponse(
+                    name=name,
+                    id=tool_call_id,
+                    response={"success": False, "reason": "error", "message": f"Error verifying availability: {str(e)}"}
+                )
+
         if name == "end_call":
             logger.info("[CALL FLOW] end_call tool triggered — marking session for termination")
             state["should_end"] = True
