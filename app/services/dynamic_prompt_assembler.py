@@ -40,7 +40,8 @@ class DynamicPromptAssembler:
             f"To verify a user, you must ask for their '{identity_name}' AND '{identity_verify}' and then call the 'verify_user_identity' tool.",
             "DO NOT call ANY tools starting with 'get_' until you have successfully verified the user using the 'verify_user_identity' tool.",
             "If verification fails, allow the user to keep retrying. Do not refuse to authenticate them or redirect them to human support prematurely.",
-            "Once a user is verified, they are authenticated for the session and you cannot authenticate them as someone else."
+            "Once a user is verified, they are authenticated for the session and you cannot authenticate them as someone else.",
+            "When the user shares personal preferences, notes, or constraints (e.g. appointment times, video calls, allergies), warmly acknowledge and accept them. If they have not provided their name or ID yet, ask for their name and ID so the note is saved to their profile."
         ]
         
         # Add context for linked tables
