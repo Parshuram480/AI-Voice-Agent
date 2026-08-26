@@ -44,7 +44,15 @@ class TwilioHandler:
     # -------------------------------------------------------------------------
     # TwiML Generation
     # -------------------------------------------------------------------------
-    def generate_stream_twiml(self, ws_url: str, client_id: str = None, customer_name: str = None, language: str = None, pipeline_type: str = None) -> str:
+    def generate_stream_twiml(
+        self,
+        ws_url: str,
+        client_id: str = None,
+        customer_name: str = None,
+        language: str = None,
+        pipeline_type: str = None,
+        caller_phone: str = None
+    ) -> str:
         """
         Generate TwiML to connect the call to a media stream.
 
@@ -57,6 +65,7 @@ class TwilioHandler:
             customer_name: Optional customer name to pass via customParameters.
             language: Optional language to pass via customParameters.
             pipeline_type: Optional pipeline type (e.g. outreach) to pass via customParameters.
+            caller_phone: Optional caller phone number for memory preloading.
 
         Returns:
             TwiML XML string.
@@ -68,19 +77,22 @@ class TwilioHandler:
         connect = Connect()
         stream = Stream(url=ws_url)
         if client_id:
-            stream.append(Parameter(name="client_id", value=client_id))
+            stream.append(Parameter(name="client_id", value=str(client_id)))
         if customer_name:
-            stream.append(Parameter(name="customer_name", value=customer_name))
+            stream.append(Parameter(name="customer_name", value=str(customer_name)))
         if language:
-            stream.append(Parameter(name="language", value=language))
+            stream.append(Parameter(name="language", value=str(language)))
         if pipeline_type:
-            stream.append(Parameter(name="pipeline_type", value=pipeline_type))
+            stream.append(Parameter(name="pipeline_type", value=str(pipeline_type)))
+        if caller_phone:
+            stream.append(Parameter(name="caller_phone", value=str(caller_phone)))
         connect.append(stream)
         response.append(connect)
 
         twiml = str(response)
         logger.info(f"Generated stream TwiML: {twiml[:200]}...")
         return twiml
+
 
     def generate_play_twiml(self, audio_url: str) -> str:
         """

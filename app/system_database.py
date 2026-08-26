@@ -4,10 +4,12 @@ import json
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from dotenv import load_dotenv
 import asyncpg
 from app.utils.prompt_loader import get_prompts
 from app.utils.encryption import encrypt, decrypt
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- Environment Variables ---
@@ -226,6 +228,59 @@ class SystemDatabase:
             await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_account_sid VARCHAR(255);")
             await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_auth_token VARCHAR(255);")
             await conn.execute("ALTER TABLE client_database_configurations ADD COLUMN IF NOT EXISTS twilio_phone_number VARCHAR(50);")
+
+            # 7. Continuous Learning: Caller Semantic Profiles
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS caller_profiles (
+                id                  SERIAL PRIMARY KEY,
+                client_id           INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                domain_id           INTEGER REFERENCES domains(id) ON DELETE CASCADE,
+                caller_identifier   VARCHAR(255) NOT NULL,
+                profile_data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at          TIMESTAMPTZ DEFAULT NOW(),
+                updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(client_id, domain_id, caller_identifier)
+            );
+            CREATE INDEX IF NOT EXISTS idx_caller_profiles_lookup ON caller_profiles(client_id, domain_id, caller_identifier);
+            CREATE INDEX IF NOT EXISTS idx_caller_profiles_gin ON caller_profiles USING gin (profile_data);
+            """)
+
+            # 8. Continuous Learning: Post-Call Quality Evaluations (LLM-as-a-Judge)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_evaluations (
+                id                      SERIAL PRIMARY KEY,
+                session_id              VARCHAR(100) REFERENCES call_logs(session_id) ON DELETE CASCADE,
+                client_id               INTEGER,
+                domain_id               INTEGER,
+                task_completion_score   INTEGER DEFAULT 0,
+                friction_score          INTEGER DEFAULT 1,
+                tool_accuracy_score     INTEGER DEFAULT 0,
+                evaluation_details      JSONB DEFAULT '{}'::jsonb,
+                mistakes_detected       JSONB DEFAULT '[]'::jsonb,
+                actionable_lessons      JSONB DEFAULT '[]'::jsonb,
+                extracted_facts         JSONB DEFAULT '{}'::jsonb,
+                created_at              TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_evaluations_session ON call_evaluations(session_id);
+            CREATE INDEX IF NOT EXISTS idx_call_evaluations_client_domain ON call_evaluations(client_id, domain_id);
+            """)
+
+            # 9. Continuous Learning: Procedural Learned Rules
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS domain_learned_rules (
+                id                  SERIAL PRIMARY KEY,
+                client_id           INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+                domain_id           INTEGER REFERENCES domains(id) ON DELETE CASCADE,
+                rule_category       VARCHAR(100) DEFAULT 'general',
+                trigger_condition   TEXT NOT NULL,
+                instruction         TEXT NOT NULL,
+                confidence_score    FLOAT DEFAULT 1.0,
+                status              VARCHAR(50) DEFAULT 'active',
+                created_at          TIMESTAMPTZ DEFAULT NOW(),
+                updated_at          TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_learned_rules_domain_status ON domain_learned_rules(domain_id, status);
+            """)
 
         # Seed standard domains
         await self._seed_domains()
@@ -612,5 +667,142 @@ class SystemDatabase:
                 await tx.rollback()
                 logger.error(f"Failed to execute profile updates: {e}")
                 raise e
+
+    # --- Continuous Learning: Caller Profile Methods ---
+    async def get_caller_profile(self, client_id: int, domain_id: Optional[int], caller_identifier: str) -> Optional[Dict[str, Any]]:
+        """Fetch caller profile/semantic memory for a specific caller under a client/domain."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            if domain_id is not None:
+                row = await conn.fetchrow("""
+                SELECT * FROM caller_profiles
+                WHERE client_id = $1 AND domain_id = $2 AND caller_identifier = $3
+                """, client_id, domain_id, caller_identifier)
+            else:
+                row = await conn.fetchrow("""
+                SELECT * FROM caller_profiles
+                WHERE client_id = $1 AND caller_identifier = $2
+                ORDER BY updated_at DESC LIMIT 1
+                """, client_id, caller_identifier)
+            
+            if row:
+                result = dict(row)
+                if isinstance(result.get("profile_data"), str):
+                    result["profile_data"] = json.loads(result["profile_data"])
+                return result
+            return None
+
+    async def upsert_caller_profile(self, client_id: int, domain_id: Optional[int], caller_identifier: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert or update caller semantic memory."""
+        pool = await self._get_conn()
+        json_data = json.dumps(profile_data)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+            INSERT INTO caller_profiles (client_id, domain_id, caller_identifier, profile_data, updated_at)
+            VALUES ($1, $2, $3, $4::jsonb, NOW())
+            ON CONFLICT (client_id, domain_id, caller_identifier)
+            DO UPDATE SET
+                profile_data = EXCLUDED.profile_data,
+                updated_at = NOW()
+            RETURNING *;
+            """, client_id, domain_id, caller_identifier, json_data)
+            
+            result = dict(row)
+            if isinstance(result.get("profile_data"), str):
+                result["profile_data"] = json.loads(result["profile_data"])
+            return result
+
+    # --- Continuous Learning: Call Evaluation Methods ---
+    async def save_call_evaluation(self, evaluation_data: Dict[str, Any]) -> bool:
+        """Save post-call quality evaluation scores and analysis."""
+        session_id = evaluation_data.get("session_id")
+        client_id = evaluation_data.get("client_id")
+        domain_id = evaluation_data.get("domain_id")
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            try:
+                # Ensure a placeholder record in call_logs exists for chat or voice sessions so FK constraint is satisfied
+                if session_id:
+                    await conn.execute("""
+                    INSERT INTO call_logs (session_id, client_id, pipeline_mode, history, summary, intent, total_tokens, total_cost)
+                    VALUES ($1, $2, 'chat', '[]'::jsonb, 'Interaction evaluation', 'chat', 0, 0.0)
+                    ON CONFLICT (session_id) DO NOTHING;
+                    """, session_id, client_id)
+
+                await conn.execute("""
+                INSERT INTO call_evaluations (
+                    session_id, client_id, domain_id,
+                    task_completion_score, friction_score, tool_accuracy_score,
+                    evaluation_details, mistakes_detected, actionable_lessons, extracted_facts
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
+                """,
+                session_id,
+                client_id,
+                domain_id,
+                evaluation_data.get("task_completion_score", 0),
+                evaluation_data.get("friction_score", 1),
+                evaluation_data.get("tool_accuracy_score", 0),
+                json.dumps(evaluation_data.get("evaluation_details", {})),
+                json.dumps(evaluation_data.get("mistakes_detected", [])),
+                json.dumps(evaluation_data.get("actionable_lessons", [])),
+                json.dumps(evaluation_data.get("extracted_facts", {}))
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to save call evaluation: {e}")
+                return False
+
+
+    async def get_call_evaluation(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve evaluation details for a call session."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+            SELECT * FROM call_evaluations WHERE session_id = $1
+            """, session_id)
+            if row:
+                result = dict(row)
+                for json_col in ("evaluation_details", "mistakes_detected", "actionable_lessons", "extracted_facts"):
+                    if isinstance(result.get(json_col), str):
+                        result[json_col] = json.loads(result[json_col])
+                return result
+            return None
+
+    # --- Continuous Learning: Procedural Learned Rules ---
+    async def get_active_learned_rules(self, client_id: Optional[int], domain_id: Optional[int], limit: int = 5) -> List[Dict[str, Any]]:
+        """Fetch active procedural guidelines for prompt injection."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+            SELECT * FROM domain_learned_rules
+            WHERE status = 'active'
+              AND (client_id = $1 OR client_id IS NULL)
+              AND (domain_id = $2 OR domain_id IS NULL)
+            ORDER BY confidence_score DESC, updated_at DESC
+            LIMIT $3
+            """, client_id, domain_id, limit)
+            return [dict(r) for r in rows]
+
+    async def upsert_learned_rule(
+        self,
+        client_id: Optional[int],
+        domain_id: Optional[int],
+        rule_category: str,
+        trigger_condition: str,
+        instruction: str,
+        confidence_score: float = 1.0,
+        status: str = 'active'
+    ) -> Dict[str, Any]:
+        """Add or update a learned procedural rule."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+            INSERT INTO domain_learned_rules (
+                client_id, domain_id, rule_category, trigger_condition, instruction, confidence_score, status, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            RETURNING *;
+            """, client_id, domain_id, rule_category, trigger_condition, instruction, confidence_score, status)
+            return dict(row)
+
 
 

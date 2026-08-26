@@ -12,7 +12,11 @@ class BaseToolFactory:
         self.config = config
         self.schema = schema_metadata
         self.db_type = config.get("database", {}).get("db_type", "postgresql").lower()
-        self.selected_tables = config.get("selected_tables", {})
+        self.selected_tables = config.get("selected_tables") or {
+            t: list(info.get("columns", {}).keys()) if isinstance(info.get("columns"), dict) else info.get("columns", [])
+            for t, info in schema_metadata.get("tables", {}).items()
+        }
+
 
     def _format_query(self, select_cols: str, table_and_joins: str, where_clause: str = "", order_by: str = "", limit: int = None) -> str:
         """Formats the query according to the dialect."""

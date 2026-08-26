@@ -1,6 +1,8 @@
 """HTTP API routes for authentication and configuration."""
 
 import logging
+import asyncio
+import os
 from typing import Callable, Optional, Any, Dict, List
 from pathlib import Path
 from fastapi import APIRouter, Request, Response, HTTPException, status, UploadFile, File
@@ -11,7 +13,7 @@ from app.schemas.requests import SimulateRequest
 from app.system_database import SystemDatabase, verify_password
 from app.dynamic_db_client import DynamicDbClient
 from app.services.email_service import EmailService
-import os
+
 
 logger = logging.getLogger(__name__)
 AUDIO_CACHE_DIR = Path("audio_cache")
@@ -1020,8 +1022,9 @@ def create_api_router(
         client_id: int
         session_id: str
         message: str
+        caller_identifier: Optional[str] = None
 
-    async def load_dynamic_chat_config(client_id: int) -> dict:
+    async def load_dynamic_chat_config(client_id: int, caller_identifier: Optional[str] = None) -> dict:
         if not client_id:
             return {}
         try:
@@ -1047,6 +1050,22 @@ def create_api_router(
             schema_metadata = await schema_service.get_schema_metadata()
             dyn_db_client = DynamicDbClient(db_config)
 
+            # Continuous Learning: Preload Caller Memory & Learned Rules
+            caller_memory = None
+            if caller_identifier:
+                try:
+                    domain_id = client_mapping.get("domain_id")
+                    caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
+                except Exception as e:
+                    logger.error(f"Error preloading caller memory in chat: {e}")
+
+            learned_rules = None
+            try:
+                domain_id = client_mapping.get("domain_id")
+                learned_rules = await sys_db.get_active_learned_rules(client_id, domain_id)
+            except Exception as e:
+                logger.error(f"Error loading learned rules in chat: {e}")
+
             if dyn_cfg.get("pipeline_type") == "outreach":
                 from app.services.outreach_tool_factory import OutreachToolFactory
                 from app.services.outreach_tool_executor import OutreachToolExecutor
@@ -1070,7 +1089,13 @@ def create_api_router(
                     dyn_cfg["identity"]["name_column"],
                     dyn_cfg["identity"]["verification_column"]
                 )
-                prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                prompt = DynamicPromptAssembler.assemble(
+                    dyn_cfg,
+                    schema_metadata,
+                    tools,
+                    caller_memory=caller_memory,
+                    learned_rules=learned_rules
+                )
 
             gemini_key = await sys_db.get_client_gemini_key(client_id)
 
@@ -1079,6 +1104,7 @@ def create_api_router(
                 "dynamic_executor": executor,
                 "system_prompt": prompt,
                 "domain": dyn_cfg["domain"],
+                "domain_id": client_mapping.get("domain_id"),
                 "gemini_api_key": gemini_key,
                 "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support"),
                 "dynamic_config": dyn_cfg
@@ -1086,6 +1112,7 @@ def create_api_router(
         except Exception as e:
             logger.error(f"Error loading dynamic chat config for client {client_id}: {e}")
             return {}
+
 
     @router.get("/api/chat/history/{session_id}")
     async def get_chat_history(session_id: str, request: Request):
@@ -1109,24 +1136,37 @@ def create_api_router(
     @router.post("/api/chat")
     async def chat_message(req: ChatRequest, request: Request):
         """Unified text-based chatbot endpoint routing dynamically based on pipeline mode."""
-        # 1. Fetch dynamic config and system prompts
-        config_data = await load_dynamic_chat_config(req.client_id)
-        if not config_data:
-            raise HTTPException(status_code=400, detail=f"Configuration not found for client ID {req.client_id}")
-
         # Get session_manager and agent_service
         session_manager = getattr(request.app.state, "session_manager", None)
         agent_service = getattr(request.app.state, "agent_service", None)
         if not session_manager or not agent_service:
             raise HTTPException(status_code=500, detail="Conversation services are not initialized on the server.")
 
+        # 1. Get or create session
+        session = await session_manager.get_or_create(req.session_id)
+        session.client_id = req.client_id
+
+        # 2. Intelligently resolve caller identifier
+        caller_id = req.caller_identifier or getattr(session, "customer_name", None) or getattr(session, "customer_id", None)
+        if not caller_id and req.message:
+            import re
+            m = re.search(r"(?:my name is|i am|this is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)", req.message, re.IGNORECASE)
+            if m:
+                caller_id = m.group(1).strip()
+            else:
+                m_id = re.search(r"(?:my id is|patient id is|id:?)\s*(\d+)", req.message, re.IGNORECASE)
+                if m_id:
+                    caller_id = m_id.group(1).strip()
+
+        # 3. Fetch dynamic config and system prompts
+        config_data = await load_dynamic_chat_config(req.client_id, caller_id or req.session_id)
+        if not config_data:
+            raise HTTPException(status_code=400, detail=f"Configuration not found for client ID {req.client_id}")
+
         # Resolve pipeline mode from server environment
         import os
         pipeline_mode = os.getenv("PIPELINE_MODE", "cascade").lower()
 
-        # 2. Get or create session
-        session = await session_manager.get_or_create(req.session_id)
-        session.client_id = req.client_id
 
         # 3. Process the query based on mode
         if pipeline_mode == "multimodal":
@@ -1189,6 +1229,39 @@ def create_api_router(
             session.add_turn(role="assistant", text=result["reply_text"], max_turns=20)
             session.touch()
 
+            # Continuous Learning: Asynchronously extract facts and reconcile caller memory in background (0ms latency added to response)
+            try:
+                if caller_id and len(session.conversation_history) >= 2:
+                    from app.memory.memory_manager import MemoryManager
+                    from app.memory.evaluator_judge import EvaluatorJudge
+                    from app.system_database import SystemDatabase
+                    
+                    domain_id = config_data.get("domain_id")
+                    history_dicts = [{"role": t.role, "content": t.text} for t in session.conversation_history if t.text != "__START__"]
+                    
+                    async def _bg_chat_learning(cid, did, cident, hist, sid, dom):
+                        try:
+                            s_db = getattr(request.app.state, "sys_db", None) or SystemDatabase()
+                            judge = EvaluatorJudge()
+                            mm = MemoryManager(s_db)
+                            await mm.process_post_call_learning(
+                                session_id=sid,
+                                history=hist,
+                                domain=dom,
+                                client_id=cid,
+                                domain_id=did,
+                                caller_identifier=str(cident),
+                                evaluator_judge=judge
+                            )
+                        except Exception as bg_err:
+                            logger.error(f"Error in chat background continuous learning: {bg_err}")
+
+                    
+                    asyncio.create_task(_bg_chat_learning(req.client_id, domain_id, caller_id, history_dicts, req.session_id, config_data.get("domain", "general")))
+
+            except Exception as trigger_err:
+                logger.error(f"Error dispatching chat continuous learning: {trigger_err}")
+
             return JSONResponse(content={
                 "session_id": req.session_id,
                 "reply_text": result["reply_text"],
@@ -1198,6 +1271,7 @@ def create_api_router(
                 "customer": chat_state.get("customer"),
                 "orders": session.orders
             })
+
 
         else:
             # --- CASCADE MODE (GROQ) ---

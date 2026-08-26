@@ -1,20 +1,24 @@
 import os
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
+from app.system_database import SystemDatabase
+from app.memory.memory_manager import MemoryManager
 from app.utils.prompt_loader import get_prompts
 
 logger = logging.getLogger(__name__)
 
 class AnalyticsService:
-    """Service to process conversation analytics and generate summaries/intents."""
+    """Service to process conversation analytics, summaries/intents, and continuous learning."""
 
-    def __init__(self, db_client: DatabaseClient):
+    def __init__(self, db_client: DatabaseClient, system_db: Optional[SystemDatabase] = None):
         self.db = db_client
-        self.api_key = os.getenv("GROQ_SUMMARY_API_KEY")
+        self.system_db = system_db or SystemDatabase()
+        self.memory_manager = MemoryManager(self.system_db)
+        self.api_key = os.getenv("GROQ_SUMMARY_API_KEY") or os.getenv("GROQ_API_KEY")
         self.model = os.getenv("SUMMARY_MODEL", "llama-3.1-8b-instant")
         
         # Initialize Groq client only if API key is present
@@ -29,11 +33,14 @@ class AnalyticsService:
         total_output_tokens: int,
         average_latency: float,
         user_id: int = None,
-        client_id: str = None,
-        domain: str = None
+        client_id: Any = None,
+        domain: str = None,
+        domain_id: Optional[int] = None,
+        caller_identifier: Optional[str] = None
     ) -> None:
         """
-        Process the completed call by generating a summary/intent and storing it in DB.
+        Process the completed call by generating a summary/intent, storing analytics,
+        and triggering the Continuous Learning System 2 post-call flywheel.
         """
         try:
             summary = "Summary not generated"
@@ -79,8 +86,6 @@ class AnalyticsService:
                             summary_input_tokens = self.groq.last_usage.get('prompt_tokens', 0)
                             summary_output_tokens = self.groq.last_usage.get('completion_tokens', 0)
                         else:
-                            # Approximate tokens if last_usage is not captured by GroqClient 
-                            # (Depending on GroqClient implementation, we might just estimate)
                             summary_input_tokens = len(text_to_summarize) // 4
                             summary_output_tokens = len(response_text) // 4
 
@@ -110,7 +115,7 @@ class AnalyticsService:
             log_data = {
                 "session_id": session_id,
                 "user_id": user_id,
-                "client_id": client_id,
+                "client_id": str(client_id) if client_id is not None else None,
                 "domain": domain,
                 "pipeline_mode": pipeline_mode,
                 "history": history,
@@ -136,8 +141,23 @@ class AnalyticsService:
             else:
                 logger.error(f"Failed to save call analytics for session {session_id} to DB")
 
+            # --- Continuous Learning: System 2 Asynchronous Post-Call Flywheel ---
+            try:
+                clean_client_id = int(client_id) if (client_id is not None and str(client_id).isdigit()) else None
+                resolved_caller = caller_identifier or (str(user_id) if user_id else None)
+
+                await self.memory_manager.process_post_call_learning(
+                    session_id=session_id,
+                    history=history,
+                    domain=domain,
+                    client_id=clean_client_id,
+                    domain_id=domain_id,
+                    caller_identifier=resolved_caller
+                )
+                logger.info(f"[ContinuousLearning] Successfully executed post-call flywheel for session {session_id}")
+            except Exception as cl_err:
+                logger.error(f"[ContinuousLearning] Error in post-call learning for {session_id}: {cl_err}", exc_info=True)
+
         except Exception as e:
             logger.error(f"Error in process_call_analytics for session {session_id}: {e}")
-        finally:
-            if self.groq:
-                await self.groq.close()
+

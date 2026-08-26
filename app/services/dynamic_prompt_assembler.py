@@ -1,16 +1,23 @@
 """Assembler for combining dynamic context into a system prompt."""
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from app.utils.prompt_loader import get_prompts
+from app.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
 class DynamicPromptAssembler:
-    """Combines base rules, domain prompts, and DB relationship context using centralized YAML prompts."""
+    """Combines base rules, domain prompts, DB relationships, and Continuous Learning memory."""
 
     @staticmethod
-    def assemble(config: Dict[str, Any], schema: Dict[str, Any], tools: List[Dict[str, Any]]) -> str:
+    def assemble(
+        config: Dict[str, Any],
+        schema: Dict[str, Any],
+        tools: List[Dict[str, Any]],
+        caller_memory: Optional[Dict[str, Any]] = None,
+        learned_rules: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
         prompts_yaml = get_prompts()
         multimodal_prompts = prompts_yaml.get("multimodal", {})
         
@@ -55,5 +62,24 @@ class DynamicPromptAssembler:
                 
         context_prompt = "\n".join(context_lines)
         
-        final_prompt = f"{base_prompt}\n{domain_prompt}\n{context_prompt}"
+        # Continuous Learning: Inject Caller Semantic Memory (Preferences & Context)
+        memory_prompt = ""
+        if caller_memory:
+            profile_data = caller_memory.get("profile_data", caller_memory)
+            formatted_mem = MemoryManager.format_memory_for_prompt(profile_data)
+            if formatted_mem:
+                memory_prompt = f"\n{formatted_mem}"
+
+        # Continuous Learning: Inject Learned Procedural Rules
+        rules_prompt = ""
+        if learned_rules and isinstance(learned_rules, list):
+            valid_rules = [
+                f"- {r.get('instruction') or r.get('trigger_condition')}"
+                for r in learned_rules
+                if isinstance(r, dict) and (r.get('instruction') or r.get('trigger_condition'))
+            ]
+            if valid_rules:
+                rules_prompt = "\n\n<domain_learned_rules>\n# ACTIVE LEARNED GUIDELINES (FROM PAST INTERACTIONS)\n" + "\n".join(valid_rules) + "\n</domain_learned_rules>"
+
+        final_prompt = f"{base_prompt}\n{domain_prompt}\n{context_prompt}{memory_prompt}{rules_prompt}"
         return final_prompt

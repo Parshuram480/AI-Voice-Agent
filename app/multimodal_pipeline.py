@@ -653,8 +653,11 @@ class GeminiLivePipeline:
                     average_latency=avg_latency,
                     user_id=user_id,
                     client_id=kwargs.get("client_id", self.client_id),
-                    domain=kwargs.get("domain", self.domain)
+                    domain=kwargs.get("domain", self.domain),
+                    domain_id=kwargs.get("domain_id"),
+                    caller_identifier=kwargs.get("caller_identifier") or (str(user_id) if user_id else None)
                 )
             )
+
             
             return {"total_turns": turn_index, "state": state, "should_end": state.get("should_end", False)}

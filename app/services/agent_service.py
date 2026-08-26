@@ -23,6 +23,7 @@ from datetime import datetime, date
 from app.system_database import SystemDatabase
 from app.utils.prompt_loader import get_prompts
 from app.dynamic_db_client import DynamicDbClient
+from app.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class AgentService:
         self._verification = verification_service
         self._orders = order_service
         self._system_db = SystemDatabase()
+        self._memory_manager = MemoryManager(self._system_db)
         self._memory = MemorySaver()
         self._graph = self._build_graph()
 
@@ -195,6 +197,30 @@ class AgentService:
             "2. If the user asks unnecessary, out-of-scope questions unrelated to account details, orders, or delivery (e.g. general knowledge, chit-chat, weather, unrelated services), you MUST call the `out_of_scope` tool."
         )
         dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}{end_call_instructions}"
+
+        # Continuous Learning: Preload Caller Semantic Memory & Learned Rules (< 5ms)
+        caller_id = getattr(session, "caller_identifier", None) or getattr(session, "phone_number", None) or (state.get("customer", {}).get("full_name") if state.get("customer") else None)
+        domain_id = mapping.get("domain_id") if mapping else None
+        if caller_id and client_id:
+            try:
+                caller_profile = await self._memory_manager.get_caller_memory(client_id, domain_id, str(caller_id))
+                if caller_profile and caller_profile.get("profile_data"):
+                    mem_block = MemoryManager.format_memory_for_prompt(caller_profile["profile_data"])
+                    if mem_block:
+                        dynamic_prompt += f"\n{mem_block}"
+            except Exception as e:
+                logger.error(f"Error preloading caller memory in _llm1_node: {e}")
+
+        if client_id:
+            try:
+                learned_rules = await self._system_db.get_active_learned_rules(client_id, domain_id)
+                if learned_rules:
+                    rule_lines = [f"- {r.get('instruction') or r.get('trigger_condition')}" for r in learned_rules if r.get('instruction') or r.get('trigger_condition')]
+                    if rule_lines:
+                        dynamic_prompt += "\n\n<domain_learned_rules>\n# ACTIVE LEARNED GUIDELINES\n" + "\n".join(rule_lines) + "\n</domain_learned_rules>"
+            except Exception as e:
+                logger.error(f"Error fetching learned rules in _llm1_node: {e}")
+
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):
@@ -454,6 +480,30 @@ class AgentService:
             "- If the end_call tool is successfully executed, output a polite goodbye message."
         )
         dynamic_prompt = f"{base_prompt}\n\nCURRENT SYSTEM DATE AND TIME: {current_time}{global_instructions}"
+
+        # Continuous Learning: Preload Caller Semantic Memory & Learned Rules (< 5ms)
+        caller_id = getattr(session, "caller_identifier", None) or getattr(session, "phone_number", None) or (state.get("customer", {}).get("full_name") if state.get("customer") else None)
+        domain_id = mapping.get("domain_id") if mapping else None
+        if caller_id and client_id:
+            try:
+                caller_profile = await self._memory_manager.get_caller_memory(client_id, domain_id, str(caller_id))
+                if caller_profile and caller_profile.get("profile_data"):
+                    mem_block = MemoryManager.format_memory_for_prompt(caller_profile["profile_data"])
+                    if mem_block:
+                        dynamic_prompt += f"\n{mem_block}"
+            except Exception as e:
+                logger.error(f"Error preloading caller memory in _llm2_node: {e}")
+
+        if client_id:
+            try:
+                learned_rules = await self._system_db.get_active_learned_rules(client_id, domain_id)
+                if learned_rules:
+                    rule_lines = [f"- {r.get('instruction') or r.get('trigger_condition')}" for r in learned_rules if r.get('instruction') or r.get('trigger_condition')]
+                    if rule_lines:
+                        dynamic_prompt += "\n\n<domain_learned_rules>\n# ACTIVE LEARNED GUIDELINES\n" + "\n".join(rule_lines) + "\n</domain_learned_rules>"
+            except Exception as e:
+                logger.error(f"Error fetching learned rules in _llm2_node: {e}")
+
         messages_to_send = [{"role": "system", "content": dynamic_prompt}]
 
         if state.get("verified") and state.get("customer"):

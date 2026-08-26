@@ -60,8 +60,11 @@ class DynamicToolExecutor:
                             val = f"%{clean_val}%"
                         elif "date" in k.lower() or "birth" in k.lower() or "dob" in k.lower():
                             val = re.sub(r'(st|nd|rd|th)', '', val.lower()).strip()
+                        elif (k == self.identity_verify_col or k.lower() == "id") and val.strip().isdigit():
+                            val = int(val.strip())
                     params.append(val)
                 rows = await self._db_client.execute_query(sql, tuple(params))
+
                 
                 if not rows:
                     response_data = {
@@ -82,6 +85,26 @@ class DynamicToolExecutor:
                         "user_details": row,
                         "message": "User verified successfully."
                     }
+
+                    # Preload caller memory facts directly into verification response
+                    try:
+                        from app.system_database import SystemDatabase
+                        sys_db = SystemDatabase()
+                        name_val = row.get(self.identity_name_col) or row.get("full_name") or row.get("name")
+                        id_val = row.get("id")
+                        c_profile = None
+                        for cand in [name_val, str(id_val) if id_val is not None else None]:
+                            if cand:
+                                c_profile = await sys_db.get_caller_profile(state.get("client_id", 1), None, str(cand))
+                                if c_profile and c_profile.get("profile_data"):
+                                    break
+                        if c_profile and c_profile.get("profile_data"):
+                            response_data["caller_profile_preferences"] = {
+                                k: v.get("value") if isinstance(v, dict) else v
+                                for k, v in c_profile["profile_data"].items()
+                            }
+                    except Exception as mem_fetch_err:
+                        logger.warning(f"Could not attach caller memory to verification response: {mem_fetch_err}")
                     
                     # Set identity_id in state
                     pk_col = tool_entry.get("pk_col")
@@ -90,6 +113,7 @@ class DynamicToolExecutor:
                     else:
                         # Fallback if no PK is defined in schema
                         state["identity_id"] = list(row.keys())[0] if row else None
+
                     state["verified"] = True
                     
             elif tool_type == "linked":

@@ -431,16 +431,21 @@ class DynamicDbClient:
                 try:
                     rows = await conn.fetch(new_query, *pg_params)
                 except Exception as first_err:
-                    logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with string params...")
-                    str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+                    logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with integer/string coerced params...")
                     try:
-                        rows = await conn.fetch(new_query, *str_params)
+                        int_params = [int(p.strip()) if (isinstance(p, str) and p.strip().isdigit()) else p for p in pg_params]
+                        rows = await conn.fetch(new_query, *int_params)
                     except Exception:
-                        raise first_err
+                        str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+                        try:
+                            rows = await conn.fetch(new_query, *str_params)
+                        except Exception:
+                            raise first_err
                 return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"PostgreSQL error running query: {e}")
             raise e
+
 
     async def get_pg_pool(self) -> "asyncpg.Pool":
         import asyncpg

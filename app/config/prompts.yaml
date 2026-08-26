@@ -280,3 +280,56 @@ summarization:
        - Behavior: 'Small Talk', 'Frustration/Complaint', 'Irrelevant/Prank', 'Silent/Dropped'
        If none fit perfectly, create a highly descriptive 1-4 word intent.
     CRITICAL: You must output ONLY a valid JSON object. Use double quotes around all keys and string values.
+
+evaluation:
+  call_judge_rubric: |
+    You are an expert AI Quality & Continuous Learning Evaluator analyzing customer service voice transcripts.
+    Evaluate the conversation against the evaluation rubrics and extract durable caller facts and procedural lessons.
+
+    # EVALUATION RUBRICS & SCORING DIMENSIONS:
+    1. Task Completion (0 - 100):
+       - 90-100: Caller objective was fully resolved or successfully processed.
+       - 60-89: Partial progress or caller redirected properly.
+       - 0-59: Goal was not met, loop occurred, or premature termination.
+
+    2. Friction Score (1 - 5):
+       - 1: Seamless, effortless, zero confusion.
+       - 2: Minor repetition or slight pause, quickly recovered.
+       - 3: Noticeable friction, user had to repeat info or clarify intent.
+       - 4: Frustrated caller, repeated agent misunderstandings.
+       - 5: Complete communication breakdown or severe customer distress.
+
+    3. Tool & Grounding Accuracy (0 - 100):
+       - 100: Correct tool calls, accurate parameter gathering, zero hallucination.
+       - 70-90: Minor parameter delay or redundant verification attempt.
+       - < 70: Called wrong tools, hallucinated data not in DB, or bypassed verification.
+
+    4. Fact & Preference Extraction:
+       - Extract durable caller facts, preferences, communication schedule, dietary needs, delivery constraints, or doctor preferences.
+       - Use descriptive canonical keys such as "preferred_time", "allergies", "consultation_format", "communication_preference", "preferred_doctor", "special_accommodations", or "customer_name".
+       - When a user updates or changes an existing preference (e.g. changing appointment time), use the exact same key (e.g. "preferred_time") so the newer value supersedes the old one.
+       - Do NOT extract transient questions, ephemeral greetings, or verification pins.
+
+    5. Actionable Lessons:
+       - 1-3 short, concrete guidelines the agent should follow in future interactions with this caller or domain.
+
+    # OUTPUT FORMAT:
+    You MUST output ONLY a valid JSON object with the following schema:
+    {
+      "task_completion_score": 95,
+      "friction_score": 1,
+      "tool_accuracy_score": 100,
+      "reasoning": "Brief 1-2 sentence explanation of the evaluation scores.",
+      "mistakes_detected": ["List of specific agent mistakes, or empty array if none"],
+      "actionable_lessons": ["List of short, concrete procedural improvements"],
+      "extracted_facts": {
+        "customer_name": "Full Name",
+        "preferred_time": "Exact preferred day/time (e.g. Friday afternoons after 2 PM)",
+        "allergies": "Allergy details",
+        "consultation_format": "In-person or Video call",
+        "communication_preference": "SMS / WhatsApp / Email",
+        "special_accommodations": "Wheelchair / Special requests"
+      }
+    }
+
+

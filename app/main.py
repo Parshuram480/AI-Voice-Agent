@@ -60,13 +60,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def load_dynamic_config(client_id: int, session_id: str) -> dict:
+async def load_dynamic_config(client_id: int, session_id: str, caller_identifier: Optional[str] = None) -> dict:
     """
     Load dynamic configuration for a client including tools, executor, prompt, and gemini key.
 
     Args:
         client_id: The client identifier.
         session_id: Session identifier for logging.
+        caller_identifier: Optional phone number or verified ID for memory preloading.
 
     Returns:
         Dictionary with dynamic_tools, dynamic_executor, system_prompt, domain, gemini_api_key.
@@ -110,7 +111,30 @@ async def load_dynamic_config(client_id: int, session_id: str) -> dict:
             dyn_cfg["identity"]["name_column"],
             dyn_cfg["identity"]["verification_column"],
         )
-        prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+
+        # Continuous Learning: Preload Caller Semantic Memory & Learned Rules (< 5ms)
+        caller_memory = None
+        if caller_identifier:
+            try:
+                domain_id = client_mapping.get("domain_id")
+                caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
+            except Exception as e:
+                logger.error(f"[{session_id}] Error preloading caller memory: {e}")
+
+        learned_rules = None
+        try:
+            domain_id = client_mapping.get("domain_id")
+            learned_rules = await sys_db.get_active_learned_rules(client_id, domain_id)
+        except Exception as e:
+            logger.error(f"[{session_id}] Error loading learned rules: {e}")
+
+        prompt = DynamicPromptAssembler.assemble(
+            dyn_cfg,
+            schema_metadata,
+            tools,
+            caller_memory=caller_memory,
+            learned_rules=learned_rules
+        )
 
         # Load client-specific Gemini API key (optional, falls back to env var)
         gemini_key = await sys_db.get_client_gemini_key(client_id)
@@ -410,13 +434,27 @@ async def voice_webhook(request: Request):
     if request.url.port and request.url.port not in (80, 443):
         ws_url = f"{scheme}://{request.url.hostname}:{request.url.port}/audio-stream"
 
-    if client_id:
-        ws_url += f"?client_id={client_id}"
+    # Extract caller phone number from form or query parameters
+    caller_phone = request.query_params.get("From") or request.query_params.get("caller_phone")
+    if not caller_phone:
+        try:
+            form = await request.form()
+            caller_phone = form.get("From") or form.get("Caller")
+        except Exception:
+            pass
 
-    twiml = twilio_handler.generate_stream_twiml(ws_url, client_id=client_id, customer_name=customer_name, language=language, pipeline_type=pipeline_type)
-    logger.info(f"Voice webhook called — streaming to {ws_url}")
+    twiml = twilio_handler.generate_stream_twiml(
+        ws_url,
+        client_id=client_id,
+        customer_name=customer_name,
+        language=language,
+        pipeline_type=pipeline_type,
+        caller_phone=caller_phone
+    )
+    logger.info(f"Voice webhook called — streaming to {ws_url} (caller: {caller_phone})")
 
     return Response(content=twiml, media_type="application/xml")
+
 
 
 @app.websocket("/audio-stream")
@@ -588,12 +626,17 @@ async def audio_stream(websocket: WebSocket):
                 if "client_id" in start_custom_params:
                     client_id = start_custom_params["client_id"]
                     
-                # Extract language globally for all pipelines
+                # Extract language and metadata globally for all pipelines
                 language = start_custom_params.get("language", "en")
                 customer_name = start_custom_params.get("customer_name")
                 pipeline_type = start_custom_params.get("pipeline_type")
+                caller_identifier = (
+                    start_custom_params.get("caller_phone")
+                    or start_custom_params.get("From")
+                    or customer_name
+                )
                     
-                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}, customer_name={customer_name}, pipeline_type={pipeline_type}")
+                logger.info(f"Stream started — streamSid={stream_sid}, callSid={call_sid}, language={language}, customer_name={customer_name}, pipeline_type={pipeline_type}, caller_identifier={caller_identifier}")
 
                 async def _startup_pipeline():
                     nonlocal pipeline_task, outbound_task
@@ -621,12 +664,28 @@ async def audio_stream(websocket: WebSocket):
                                         dyn_cfg["company_name"] = dyn_cfg.get("company_name") or client_mapping.get("company_name", "our company")
                                         dyn_cfg["system_prompt"] = client_mapping.get("system_prompt_llm1")
                                     
+                                    domain_id = client_mapping.get("domain_id")
+
                                     from app.services.schema_service import SchemaService
                                     from app.dynamic_db_client import DynamicDbClient
                                     
                                     schema_service = SchemaService(db_config)
                                     schema_metadata = await schema_service.get_schema_metadata()
                                     dyn_db_client = DynamicDbClient(db_config)
+
+                                    # Continuous Learning: Preload caller memory & active domain rules (< 3ms)
+                                    caller_memory = None
+                                    if caller_identifier:
+                                        try:
+                                            caller_memory = await sys_db.get_caller_profile(int(client_id), domain_id, str(caller_identifier))
+                                        except Exception as mem_err:
+                                            logger.error(f"[{call_sid}] Error preloading caller memory: {mem_err}")
+
+                                    learned_rules = None
+                                    try:
+                                        learned_rules = await sys_db.get_active_learned_rules(int(client_id), domain_id)
+                                    except Exception as rule_err:
+                                        logger.error(f"[{call_sid}] Error loading learned rules: {rule_err}")
                                     
                                     if dyn_cfg.get("pipeline_type") == "outreach":
                                         from app.services.outreach_tool_factory import OutreachToolFactory
@@ -653,7 +712,13 @@ async def audio_stream(websocket: WebSocket):
                                             dyn_cfg["identity"]["name_column"],
                                             dyn_cfg["identity"]["verification_column"]
                                         )
-                                        prompt = DynamicPromptAssembler.assemble(dyn_cfg, schema_metadata, tools)
+                                        prompt = DynamicPromptAssembler.assemble(
+                                            dyn_cfg,
+                                            schema_metadata,
+                                            tools,
+                                            caller_memory=caller_memory,
+                                            learned_rules=learned_rules
+                                        )
                                     
                                     if customer_name:
                                         prompt = f"The customer you are speaking to is named {customer_name}. Greet them by name naturally.\n\n{prompt}"
@@ -668,12 +733,15 @@ async def audio_stream(websocket: WebSocket):
                                         "dynamic_executor": executor,
                                         "system_prompt": prompt,
                                         "domain": dyn_cfg["domain"],
+                                        "domain_id": domain_id,
+                                        "caller_identifier": caller_identifier,
                                         "company_name": dyn_cfg.get("company_name"),
                                         "language": language,
                                         "pipeline_type": dyn_cfg.get("pipeline_type", "customer_support"),
                                         "gemini_api_key": gemini_key
                                     }
-                                    logger.info(f"[{call_sid}] Configured dynamic tools for client {client_id}")
+                                    logger.info(f"[{call_sid}] Configured dynamic tools with continuous learning memory for client {client_id}")
+
                         except Exception as e:
                             logger.error(f"[{call_sid}] Error loading dynamic config for client {client_id}: {e}")
 
