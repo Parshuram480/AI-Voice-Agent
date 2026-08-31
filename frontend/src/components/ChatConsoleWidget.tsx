@@ -5,6 +5,7 @@ import SendIcon from '@mui/icons-material/Send';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CloseIcon from '@mui/icons-material/Close';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import { API_BASE } from '../services/apiClient';
 
 interface Client {
   id: number;
@@ -77,7 +78,7 @@ export default function ChatConsoleWidget({
       setLoading(true);
       try {
         // First check for existing history turns on the server
-        const histResponse = await fetch(`http://localhost:8000/api/chat/history/${sessionId}`);
+        const histResponse = await fetch(`${API_BASE}/api/chat/history/${sessionId}`);
         if (histResponse.ok) {
           const histData = await histResponse.json();
           if (histData.history && histData.history.length > 0) {
@@ -97,7 +98,7 @@ export default function ChatConsoleWidget({
         }
 
         // If no history exists, trigger initial start greeting pitch
-        const response = await fetch('http://localhost:8000/api/chat', {
+        const response = await fetch(`${API_BASE}/api/chat`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -164,7 +165,7 @@ export default function ChatConsoleWidget({
     setLoading(true);
 
     try {
-      const response = await fetch('http://localhost:8000/api/chat', {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -198,7 +199,7 @@ export default function ChatConsoleWidget({
         {
           id: `error-${Date.now()}`,
           role: 'system',
-          text: `Connection Error: ${err.message}. Please check if the server is running at localhost:8000.`,
+          text: `Connection Error: ${err.message}. Please check if the server is running at ${API_BASE}.`,
           time: new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
         }
       ]);

@@ -7,7 +7,7 @@ import StopIcon from '@mui/icons-material/Stop';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import { useNavigate } from 'react-router-dom';
-const WS_BASE = 'ws://localhost:8000';
+import { WS_BASE } from '../services/apiClient';
 
 interface Client {
   id: number;
