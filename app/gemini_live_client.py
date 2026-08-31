@@ -67,6 +67,20 @@ GLOBAL_TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {},
         }
+    },
+    {
+        "name": "query_knowledge_base",
+        "description": "Queries the company knowledge base to retrieve specific answers about store hours, policies, pricing, refunds, product specs, or uploaded documents.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {
+                    "type": "STRING",
+                    "description": "The search term or specific question to look up in the knowledge base."
+                }
+            },
+            "required": ["query"]
+        }
     }
 ]
 
@@ -84,6 +98,7 @@ You have three special tools for managing the phone call lifecycle:
    - Speak your final transfer confirmation message (e.g. "Sure, let me check if an executive is available.") before calling this tool.
    - If the tool response indicates that an executive is available, say goodbye and tell the user they are being transferred.
    - If the tool response indicates that no executives are available, politely inform the user that no one is available right now, that their request is received, and that we will get back to them. Then say goodbye and call the end_call tool.
+4. **query_knowledge_base**: Use this tool whenever the caller asks about business policies, store hours, refund rules, product catalogs, or details from uploaded guidelines/documents.
 
 CRITICAL: When the user says goodbye or thanks you and has no more questions, you MUST call the end_call tool. Do not just say goodbye and wait.
 """
@@ -347,6 +362,31 @@ class GeminiLiveClient:
                 id=tool_call_id,
                 response={"success": True, "message": "Call will be terminated after your goodbye message."}
             )
+
+        if name == "query_knowledge_base":
+            query_str = args.get("query", "")
+            logger.info(f"[CALL FLOW] query_knowledge_base triggered with query='{query_str}' (client_id={self.client_id})")
+            try:
+                cid = None
+                if self.client_id:
+                    cid = int(self.client_id) if str(self.client_id).isdigit() else 1
+                else:
+                    cid = 1
+                from app.services.knowledge_base_service import KnowledgeBaseService
+                kb_service = KnowledgeBaseService(api_key=self.api_key)
+                context = await kb_service.search(cid, query_str, top_k=3)
+                return types.FunctionResponse(
+                    name=name,
+                    id=tool_call_id,
+                    response={"result": context}
+                )
+            except Exception as e:
+                logger.error(f"[CALL FLOW] Error in query_knowledge_base: {e}")
+                return types.FunctionResponse(
+                    name=name,
+                    id=tool_call_id,
+                    response={"error": str(e)}
+                )
         
         if name == "out_of_scope":
             count = state.get("out_of_scope_count", 0) + 1

@@ -29,6 +29,12 @@ export const authService = {
 
   async logout() {
     localStorage.removeItem('auth_token');
+    localStorage.removeItem('chat_session_id');
+    Object.keys(localStorage).forEach(key => {
+      if (key.startsWith('chat_session_id')) {
+        localStorage.removeItem(key);
+      }
+    });
     return request(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
     });

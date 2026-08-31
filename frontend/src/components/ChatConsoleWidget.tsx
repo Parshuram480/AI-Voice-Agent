@@ -45,16 +45,29 @@ export default function ChatConsoleWidget({
   const [sessionId, setSessionId] = useState('');
   
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  // 1. Generate or restore Session ID on load
+  // Auto-focus text input whenever agent finishes replying (loading becomes false)
   useEffect(() => {
-    let cachedId = localStorage.getItem('chat_session_id');
+    if (!loading) {
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 50);
+    }
+  }, [loading]);
+
+  // 1. Generate or restore Session ID per client ID
+  useEffect(() => {
+    if (!client?.id) return;
+    const sessionKey = `chat_session_id_${client.id}`;
+    let cachedId = localStorage.getItem(sessionKey);
     if (!cachedId) {
-      cachedId = `chat-${Math.random().toString(16).slice(2, 10)}`;
-      localStorage.setItem('chat_session_id', cachedId);
+      cachedId = `chat-c${client.id}-${Math.random().toString(16).slice(2, 10)}`;
+      localStorage.setItem(sessionKey, cachedId);
     }
     setSessionId(cachedId);
-  }, []);
+    setMessages([]); // Clear previous tenant's message list immediately on client switch
+  }, [client?.id]);
 
   // 2. Sync existing history or load initial greeting / pitch dynamically
   useEffect(() => {
@@ -195,9 +208,11 @@ export default function ChatConsoleWidget({
   };
 
   const handleResetSession = () => {
-    localStorage.removeItem('chat_session_id');
-    const newId = `chat-${Math.random().toString(16).slice(2, 10)}`;
-    localStorage.setItem('chat_session_id', newId);
+    if (!client?.id) return;
+    const sessionKey = `chat_session_id_${client.id}`;
+    localStorage.removeItem(sessionKey);
+    const newId = `chat-c${client.id}-${Math.random().toString(16).slice(2, 10)}`;
+    localStorage.setItem(sessionKey, newId);
     setSessionId(newId);
     
     setInputText('');
@@ -315,6 +330,7 @@ export default function ChatConsoleWidget({
       {/* Form input bar */}
       <form onSubmit={handleSendMessage} className="flex gap-2 items-center pt-3 border-t border-slate-850 mt-auto">
         <input 
+          ref={inputRef}
           type="text"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}

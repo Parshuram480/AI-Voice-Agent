@@ -34,9 +34,10 @@ class OutreachPromptAssembler:
             outreach_prompt = f"You are calling on behalf of {company_name}. Your primary objective is to {closing_goal}.\n\n{outreach_prompt}"
         
         context_lines = [
-            "\n--- PRODUCT CATALOG CONTEXT ---",
-            "You have tools to search and recommend products from the database.",
-            "Do NOT hallucinate products. Only pitch what is returned by your tool calls."
+            "\n--- PRODUCT CATALOG & KNOWLEDGE BASE CONTEXT ---",
+            "You have access to tools to search the product database catalog AND the company knowledge base ('query_knowledge_base').",
+            "UNIVERSAL RULE: Whenever the user asks any question about company information, rules, policies, services, procedures, pricing, FAQs, or details not directly present in your active conversation context, you MUST call 'query_knowledge_base' first to retrieve relevant facts before answering.",
+            "Do NOT hallucinate products or company details. Only provide information returned by your tool calls."
         ]
         
         product_table = config.get("product_table")
