@@ -53,8 +53,41 @@ class GeminiChatService:
             )
         )
 
+        kb_tool_decl = {
+            "name": "query_knowledge_base",
+            "description": "Queries the company knowledge base to retrieve specific answers about store hours, policies, pricing, refunds, product specs, or uploaded documents.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "query": {
+                        "type": "STRING",
+                        "description": "The search term or specific question to look up in the knowledge base."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+        
+        tool_declarations = list(tool_declarations or [])
+        if not any(t.get("name") == "query_knowledge_base" for t in tool_declarations):
+            tool_declarations.append(kb_tool_decl)
+
+        kb_instruction = (
+            "\n\n[KNOWLEDGE BASE TOOL INSTRUCTIONS]\n"
+            "You have access to the 'query_knowledge_base' tool.\n"
+            "UNIVERSAL RULE: Whenever the user asks any question about company information, rules, policies, services, procedures, pricing, FAQs, or details not directly present in your active conversation context, you MUST call 'query_knowledge_base' first to retrieve relevant facts before answering.\n"
+            "Do NOT invent or guess company details. Always base your response on facts returned from 'query_knowledge_base'."
+        )
+        formatting_instruction = (
+            "\n\n[NUMERIC & DATE FORMATTING RULES]\n"
+            "1. NUMBERS & PRICES: ALWAYS write all numbers, quantities, prices, fees, and currency amounts using numeric digits (e.g. write '500' or '500 rupees' or '₹500', NEVER spell numbers out in words like 'five hundred').\n"
+            "2. DATES: ALWAYS format dates using numeric digits and standard date representation (e.g. write 'July 20, 2026' or '2026-07-20', NEVER spell dates out in words like 'July twentieth, two thousand twenty-six').\n"
+            "3. COUNTS: ALWAYS use numeric digits for counts and quantities (e.g. write '2 appointments', NEVER 'two appointments').\n"
+        )
+        full_system_prompt = system_prompt + kb_instruction + formatting_instruction
+
         config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
+            system_instruction=full_system_prompt,
             tools=[{"function_declarations": tool_declarations}] if tool_declarations else None,
             temperature=0.4,
         )
@@ -143,8 +176,30 @@ class GeminiChatService:
                 fc_args = fc.args
                 fc_id = fc.id or str(uuid.uuid4())[:8]
 
-                if fc_name.startswith("verify_") or fc_name in ("verify_user", "get_order_status"):
-                    current_intent = fc_name
+                if fc_name == "query_knowledge_base":
+                    query_str = fc_args.get("query", "")
+                    client_id_val = session_state.get("client_id") or 1
+                    try:
+                        cid = int(client_id_val) if str(client_id_val).isdigit() else 1
+                        from app.services.knowledge_base_service import KnowledgeBaseService
+                        kb_service = KnowledgeBaseService()
+                        context = await kb_service.search(cid, query_str, top_k=3)
+                        tool_responses.append(
+                            types.FunctionResponse(
+                                name=fc_name,
+                                id=fc_id,
+                                response={"result": context}
+                            )
+                        )
+                    except Exception as e:
+                        tool_responses.append(
+                            types.FunctionResponse(
+                                name=fc_name,
+                                id=fc_id,
+                                response={"error": str(e)}
+                            )
+                        )
+                    continue
 
                 if executor:
                     tool_res = await executor.execute(fc_id, fc_name, fc_args, chat_state)

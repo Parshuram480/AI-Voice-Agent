@@ -1151,6 +1151,7 @@ def create_api_router(
                 tool_declarations = [tool for tool in tool_declarations if not (tool.get("name", "").startswith("verify_") or tool.get("name") == "verify_user")]
 
             chat_state_dict = {
+                "client_id": req.client_id,
                 "conversation_history": session.conversation_history,
                 "current_intent": session.current_intent or "unknown",
                 "verified": session.verified,
@@ -1280,10 +1281,63 @@ def create_api_router(
             )
 
         media_type = "audio/webm" if filename.endswith(".webm") else "audio/wav"
-        return FileResponse(
-            path=str(filepath),
-            media_type=media_type,
-            filename=filename,
+    # --- Knowledge Base REST APIs ---
+    @router.get("/api/clients/{client_id}/knowledge-base")
+    async def get_client_knowledge_base(client_id: int):
+        from app.services.knowledge_base_service import KnowledgeBaseService
+        kb_service = KnowledgeBaseService()
+        entries = await kb_service.list_entries(client_id)
+        return {"success": True, "entries": entries}
+
+    @router.post("/api/clients/{client_id}/knowledge-base")
+    async def add_knowledge_base_entry(client_id: int, request: Request):
+        data = await request.json()
+        title = data.get("title", "").strip()
+        content = data.get("content", "").strip()
+        if not title or not content:
+            raise HTTPException(status_code=400, detail="Title and content are required.")
+
+        from app.services.knowledge_base_service import KnowledgeBaseService
+        kb_service = KnowledgeBaseService()
+        saved = await kb_service.add_entry(client_id, title, content)
+        return {"success": True, "count": len(saved), "entries": saved}
+
+    @router.post("/api/clients/{client_id}/knowledge-base/upload")
+    async def upload_knowledge_base_file(client_id: int, file: UploadFile = File(...)):
+        file_bytes = await file.read()
+        file_name = file.filename or "uploaded_document"
+        ext = file_name.split(".")[-1].lower()
+
+        extracted_text = ""
+        if ext == "pdf":
+            from app.services.knowledge_base_service import KnowledgeBaseService
+            extracted_text = KnowledgeBaseService.extract_text_from_pdf(file_bytes)
+        else:
+            try:
+                extracted_text = file_bytes.decode("utf-8")
+            except Exception:
+                extracted_text = file_bytes.decode("latin-1", errors="ignore")
+
+        if not extracted_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from uploaded file.")
+
+        from app.services.knowledge_base_service import KnowledgeBaseService
+        kb_service = KnowledgeBaseService()
+        saved = await kb_service.add_entry(
+            client_id=client_id, 
+            title=file_name, 
+            content=extracted_text, 
+            file_name=file_name
         )
+        return {"success": True, "file_name": file_name, "count": len(saved), "entries": saved}
+
+    @router.delete("/api/clients/{client_id}/knowledge-base/{kb_id}")
+    async def delete_knowledge_base_entry(client_id: int, kb_id: int):
+        from app.services.knowledge_base_service import KnowledgeBaseService
+        kb_service = KnowledgeBaseService()
+        success = await kb_service.delete_entry(client_id, kb_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Entry not found or already deleted.")
+        return {"success": True, "message": "Deleted successfully."}
 
     return router

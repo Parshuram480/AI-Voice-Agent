@@ -1,0 +1,20 @@
+CLIENT COMPANY PROFILE, SERVICE RULES & OPERATING POLICIES
+
+1. Business Profile & Support Operating Hours
+- Company Name: Apex Global Solutions Ltd.
+- Core Business: Enterprise IT Management, Cloud Infrastructure, and Technical Support Services.
+- Operating Hours: Monday through Friday from 9:00 AM to 7:00 PM EST, and Saturday from 10:00 AM to 4:00 PM EST. Closed on Sundays and National Holidays.
+- Contact Email: support@apexglobalsolutions.com | Toll-Free Support: 1-800-555-0199.
+
+2. Customer Verification & Security Guidelines
+- Identity Verification: Callers requesting account updates, billing changes, or service status must verify their Account ID or registered email address.
+- Security Policy: AI voice agents and customer service representatives must NEVER ask for or accept passwords, OTPs, PINs, or credit card CVV codes over the phone.
+
+3. Billing, Invoicing & Refund Policy
+- Billing Cycle: Invoices are generated on the 1st of each month and due within 15 calendar days.
+- Refund Guarantee: 100% full refund available within 30 days of service activation if service level agreements (SLAs) are not met.
+- Accepted Payments: Major Credit Cards (Visa, MasterCard, Amex), Corporate ACH, and Bank Wire Transfer.
+
+4. Customer Support Escalation Procedures
+- General Inquiries: Managed directly by the AI Voice Agent for quick resolution.
+- Human Escalation Triggers: If a customer requests service cancellation, reports a critical high-severity outage, or explicitly asks for a human manager, transfer the call immediately to a Senior Support Supervisor.

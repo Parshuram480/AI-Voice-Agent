@@ -11,8 +11,7 @@ import MenuItem from '@mui/material/MenuItem';
 import { useNavigate } from 'react-router-dom';
 import { outreachService } from '../services/outreachService';
 import { twilioService } from '../services/twilioService'; // for polling call status
-
-const WS_BASE = 'ws://localhost:8000';
+import { WS_BASE } from '../services/apiClient';
 
 interface Country {
   code: string;

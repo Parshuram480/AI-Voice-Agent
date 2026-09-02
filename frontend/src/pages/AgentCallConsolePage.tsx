@@ -10,8 +10,7 @@ import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import Autocomplete from '@mui/material/Autocomplete';
 import { useNavigate } from 'react-router-dom';
 import { twilioService } from '../services/twilioService';
-
-const WS_BASE = 'ws://localhost:8000';
+import { WS_BASE } from '../services/apiClient';
 
 interface Country {
   code: string;

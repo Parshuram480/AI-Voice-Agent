@@ -15,6 +15,8 @@ import Tooltip from '@mui/material/Tooltip';
 import NoCodeDbConfigWizard from '../components/NoCodeDbConfigWizard';
 import OutreachConfigWizard from '../components/OutreachConfigWizard';
 import EditProfileModal from '../components/EditProfileModal';
+import KnowledgeBaseManagerModal from '../components/KnowledgeBaseManagerModal';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import { authService } from '../services/authService';
 import { domainService } from '../services/domainService';
 
@@ -53,6 +55,7 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
 
   // States managed locally
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showKBModal, setShowKBModal] = useState(false);
   const [domains, setDomains] = useState<Domain[]>([]);
 
   const loadConfig = async () => {
@@ -214,35 +217,64 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
         {/* Database Configuration Section */}
         {isConfigured && !isEditing ? (
           <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
-            <div className="flex justify-between items-center border-b border-slate-800 pb-4">
+            <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 border-b border-slate-800 pb-4">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-emerald-950/50 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <div className="w-10 h-10 rounded-xl bg-emerald-950/50 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
                   <StorageIcon />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-                    Active Database Connection
-                    <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-medium">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-lg font-bold text-slate-100">
+                      Active Database Connection
+                    </h3>
+                    <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-full inline-flex items-center gap-1 font-medium whitespace-nowrap">
                       <CheckCircleIcon sx={{ fontSize: 14 }} /> Connected
                     </span>
-                  </h3>
-                  <p className="text-xs text-slate-400">Configured database & AI verification rules</p>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">Configured database & AI verification rules</p>
                 </div>
               </div>
 
-              <Button
-                variant="contained"
-                color="primary"
-                startIcon={<EditIcon />}
-                onClick={() => setIsEditing(true)}
-                sx={{
-                  borderRadius: '12px',
-                  background: 'linear-gradient(to right, #8b5cf6, #ec4899)',
-                  px: 3,
-                }}
-              >
-                Edit Configuration
-              </Button>
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <Button
+                  variant="outlined"
+                  onClick={() => setShowKBModal(true)}
+                  startIcon={<AutoAwesomeIcon className="text-amber-400" />}
+                  sx={{
+                    borderRadius: '12px',
+                    borderColor: 'rgba(245, 158, 11, 0.4)',
+                    color: '#f59e0b',
+                    px: 2.5,
+                    py: 1,
+                    whiteSpace: 'nowrap',
+                    fontWeight: 600,
+                    fontSize: '0.875rem',
+                    textTransform: 'none',
+                    '&:hover': {
+                      borderColor: '#f59e0b',
+                      backgroundColor: 'rgba(245, 158, 11, 0.1)'
+                    }
+                  }}
+                >
+                  Knowledge Base & Documents
+                </Button>
+
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={<EditIcon />}
+                  onClick={() => setIsEditing(true)}
+                  sx={{
+                    borderRadius: '12px',
+                    background: 'linear-gradient(to right, #8b5cf6, #ec4899)',
+                    px: 3,
+                    py: 1,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Edit Configuration
+                </Button>
+              </div>
             </div>
 
             {/* Read-only Summary Cards */}
@@ -375,6 +407,13 @@ export default function DashboardPage({ client, domainName, onLogout, onProfileU
           onProfileUpdate(updatedClient, newDomain);
           loadConfig(); // Reload the specific configuration for the new active path
         }}
+      />
+
+      {/* Knowledge Base & Document Management Modal */}
+      <KnowledgeBaseManagerModal
+        open={showKBModal}
+        onClose={() => setShowKBModal(false)}
+        clientId={client.id}
       />
     </div>
   );

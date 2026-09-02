@@ -238,6 +238,28 @@ class SystemDatabase:
             );
             """)
 
+            # 8. Client Knowledge Base
+            try:
+                # Enable vector extension
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                # Create table
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS client_knowledge_base (
+                    id SERIAL PRIMARY KEY,
+                    client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+                    title VARCHAR(255),
+                    content TEXT,
+                    content_embedding VECTOR(768),
+                    file_name VARCHAR(255),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """)
+                await conn.execute("ALTER TABLE client_knowledge_base ADD COLUMN IF NOT EXISTS file_name VARCHAR(255);")
+                # Index by client_id for rapid filtering
+                await conn.execute("CREATE INDEX IF NOT EXISTS client_kb_client_id_idx ON client_knowledge_base (client_id);")
+            except Exception as e:
+                logger.error(f"Error initializing vector extension / client_knowledge_base table: {e}")
+
             # Seed default executives if empty
             count = await conn.fetchval("SELECT COUNT(*) FROM executives")
             if count == 0:

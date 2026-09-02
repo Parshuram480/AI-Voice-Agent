@@ -1,4 +1,14 @@
-export const API_BASE = 'http://localhost:8000';
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL as string) || 'http://localhost:8000';
+
+export const WS_BASE = (import.meta.env.VITE_WS_BASE_URL as string) || (() => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  try {
+    const host = new URL(API_BASE).host;
+    return `${protocol}//${host}`;
+  } catch {
+    return `${protocol}//localhost:8000`;
+  }
+})();
 
 export async function request<T = any>(url: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('auth_token');
