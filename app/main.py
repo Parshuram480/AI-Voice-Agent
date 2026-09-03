@@ -33,6 +33,7 @@ from app.api import create_api_router
 from app.groq_client import GroqClient
 from app.database import DatabaseClient
 from app.twilio_handler import TwilioHandler
+from app.retell_handler import RetellCustomLLMHandler
 from app.pipeline import VoicePipeline
 from app.streaming_pipeline import StreamingVoicePipeline, _DONE
 from app.intents import IntentRouter, SlotFiller
@@ -60,7 +61,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def load_dynamic_config(client_id: int, session_id: str, caller_identifier: Optional[str] = None) -> dict:
+async def load_dynamic_config(
+    client_id: int,
+    session_id: str,
+    caller_identifier: Optional[str] = None,
+    query_text: Optional[str] = None
+) -> dict:
     """
     Load dynamic configuration for a client including tools, executor, prompt, and gemini key.
 
@@ -83,6 +89,7 @@ async def load_dynamic_config(client_id: int, session_id: str, caller_identifier
         from app.services.dynamic_tool_executor import DynamicToolExecutor
         from app.services.dynamic_prompt_assembler import DynamicPromptAssembler
         from app.dynamic_db_client import DynamicDbClient
+        from app.memory.memory_manager import MemoryManager
 
         sys_db = SystemDatabase()
         client_mapping = await sys_db.get_client_domain_mapping(client_id)
@@ -112,12 +119,26 @@ async def load_dynamic_config(client_id: int, session_id: str, caller_identifier
             dyn_cfg["identity"]["verification_column"],
         )
 
-        # Continuous Learning: Preload Caller Semantic Memory & Learned Rules (< 5ms)
+        # Continuous Learning: Preload Caller Semantic Memory & Learned Rules (< 5ms - Vector Memory RAG)
         caller_memory = None
         if caller_identifier:
             try:
                 domain_id = client_mapping.get("domain_id")
-                caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
+                mm = MemoryManager(sys_db)
+                if query_text and query_text.strip() and query_text != "__START__":
+                    vector_memories = await mm.retrieve_relevant_memories(
+                        client_id=client_id,
+                        domain_id=domain_id,
+                        caller_identifier=str(caller_identifier),
+                        query_text=query_text.strip(),
+                        top_k=3,
+                        min_similarity=0.50
+                    )
+                    if vector_memories:
+                        caller_memory = vector_memories
+
+                if not caller_memory:
+                    caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
             except Exception as e:
                 logger.error(f"[{session_id}] Error preloading caller memory: {e}")
 
@@ -227,6 +248,7 @@ session_manager: SessionManager = None  # type: ignore
 agent_service: AgentService = None  # type: ignore
 rephraser: LLMRephraser = None  # type: ignore
 filler_service = None
+retell_handler: RetellCustomLLMHandler = None  # type: ignore
 
 # =============================================================================
 # Startup / Shutdown
@@ -281,6 +303,10 @@ async def startup():
     # Initialize Twilio handler
     twilio_handler = TwilioHandler()
     logger.info("✓ Twilio handler initialized")
+
+    # Initialize Retell AI handler
+    retell_handler = RetellCustomLLMHandler(llm_client=groq_client_1)
+    logger.info("✓ Retell AI Custom LLM handler initialized")
 
     # Initialize conversation orchestration
     session_store = InMemorySessionStore()
@@ -1272,6 +1298,66 @@ async def mic_stream(websocket: WebSocket):
         logger.info("Browser mic-stream WebSocket closed")
         if session_id:
             await session_manager.delete(session_id)
+
+
+# =============================================================================
+# Retell AI Custom LLM WebSocket & REST Endpoints
+# =============================================================================
+@app.websocket("/retell-llm-websocket/{call_id}")
+async def retell_llm_websocket_with_id(websocket: WebSocket, call_id: str):
+    """
+    WebSocket endpoint for Retell AI Custom LLM protocol (with call_id in path).
+    """
+    global retell_handler
+    if not retell_handler:
+        retell_handler = RetellCustomLLMHandler(llm_client=groq_client_1)
+    await retell_handler.handle_websocket(websocket, call_id)
+
+
+@app.websocket("/retell-llm-websocket")
+async def retell_llm_websocket_generic(websocket: WebSocket):
+    """
+    WebSocket endpoint for Retell AI Custom LLM protocol (generic path).
+    """
+    global retell_handler
+    if not retell_handler:
+        retell_handler = RetellCustomLLMHandler(llm_client=groq_client_1)
+    call_id = websocket.query_params.get("call_id", f"call_{uuid.uuid4().hex[:12]}")
+    await retell_handler.handle_websocket(websocket, call_id)
+
+
+@app.post("/api/retell/outbound-call")
+async def retell_outbound_call_endpoint(request: Request):
+    """
+    Trigger an outbound phone call via Retell AI SDK.
+    """
+    global retell_handler
+    if not retell_handler:
+        retell_handler = RetellCustomLLMHandler(llm_client=groq_client_1)
+    try:
+        body = await request.json()
+        to_number = body.get("to_number") or os.getenv("MY_CELL_PHONE")
+        from_number = body.get("from_number")
+        agent_id = body.get("agent_id")
+        dynamic_variables = body.get("dynamic_variables", {})
+
+        if not to_number:
+            return {"status": "error", "message": "to_number is required"}
+
+        call_result = retell_handler.create_phone_call(
+            to_number=to_number,
+            from_number=from_number,
+            agent_id=agent_id,
+            dynamic_variables=dynamic_variables
+        )
+        return {
+            "status": "success",
+            "call_id": getattr(call_result, "call_id", str(call_result)),
+            "to_number": to_number
+        }
+    except Exception as e:
+        logger.error(f"Failed to create Retell outbound call: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # =============================================================================

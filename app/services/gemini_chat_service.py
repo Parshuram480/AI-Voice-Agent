@@ -64,6 +64,8 @@ class GeminiChatService:
         current_intent = session_state.get("current_intent", "unknown")
         
         chat_state = {
+            "client_id": session_state.get("client_id"),
+            "domain_id": session_state.get("domain_id"),
             "verified": session_state.get("verified", False),
             "identity_id": session_state.get("identity_id"),
             "session_id": session_state.get("session_id"),

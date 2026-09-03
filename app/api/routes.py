@@ -1024,13 +1024,18 @@ def create_api_router(
         message: str
         caller_identifier: Optional[str] = None
 
-    async def load_dynamic_chat_config(client_id: int, caller_identifier: Optional[str] = None) -> dict:
+    async def load_dynamic_chat_config(
+        client_id: int,
+        caller_identifier: Optional[str] = None,
+        query_text: Optional[str] = None
+    ) -> dict:
         if not client_id:
             return {}
         try:
             from app.system_database import SystemDatabase
             from app.services.schema_service import SchemaService
             from app.dynamic_db_client import DynamicDbClient
+            from app.memory.memory_manager import MemoryManager
             import json
 
             sys_db = SystemDatabase()
@@ -1050,12 +1055,28 @@ def create_api_router(
             schema_metadata = await schema_service.get_schema_metadata()
             dyn_db_client = DynamicDbClient(db_config)
 
-            # Continuous Learning: Preload Caller Memory & Learned Rules
+            # Continuous Learning: Preload Caller Memory & Learned Rules (Vector Memory RAG)
             caller_memory = None
             if caller_identifier:
                 try:
                     domain_id = client_mapping.get("domain_id")
-                    caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
+                    mm = MemoryManager(sys_db)
+                    if query_text and query_text.strip() and query_text != "__START__":
+                        # Perform semantic vector retrieval
+                        vector_memories = await mm.retrieve_relevant_memories(
+                            client_id=client_id,
+                            domain_id=domain_id,
+                            caller_identifier=str(caller_identifier),
+                            query_text=query_text.strip(),
+                            top_k=3,
+                            min_similarity=0.50
+                        )
+                        if vector_memories:
+                            caller_memory = vector_memories
+
+                    # Fallback to full profile dictionary if no vector chunks matched
+                    if not caller_memory:
+                        caller_memory = await sys_db.get_caller_profile(client_id, domain_id, str(caller_identifier))
                 except Exception as e:
                     logger.error(f"Error preloading caller memory in chat: {e}")
 
@@ -1158,8 +1179,8 @@ def create_api_router(
                 if m_id:
                     caller_id = m_id.group(1).strip()
 
-        # 3. Fetch dynamic config and system prompts
-        config_data = await load_dynamic_chat_config(req.client_id, caller_id or req.session_id)
+        # 3. Fetch dynamic config and system prompts with query-based semantic memory retrieval
+        config_data = await load_dynamic_chat_config(req.client_id, caller_id or req.session_id, query_text=req.message)
         if not config_data:
             raise HTTPException(status_code=400, detail=f"Configuration not found for client ID {req.client_id}")
 
@@ -1191,6 +1212,8 @@ def create_api_router(
                 tool_declarations = [tool for tool in tool_declarations if not (tool.get("name", "").startswith("verify_") or tool.get("name") == "verify_user")]
 
             chat_state_dict = {
+                "client_id": req.client_id,
+                "domain_id": config_data.get("domain_id"),
                 "conversation_history": session.conversation_history,
                 "current_intent": session.current_intent or "unknown",
                 "verified": session.verified,

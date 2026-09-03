@@ -11,16 +11,22 @@ from datetime import datetime, timezone
 
 from app.system_database import SystemDatabase
 from app.memory.pii_sanitizer import PIISanitizer
+from app.memory.embedding_service import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
-    """Manages semantic caller memory and lifecycle across calls."""
+    """Manages semantic caller memory, vector embeddings, and lifecycle across calls."""
 
-    def __init__(self, system_db: Optional[SystemDatabase] = None):
+    def __init__(
+        self,
+        system_db: Optional[SystemDatabase] = None,
+        embedding_service: Optional[EmbeddingService] = None,
+    ):
         self.system_db = system_db or SystemDatabase()
         self.sanitizer = PIISanitizer()
+        self.embedding_service = embedding_service or EmbeddingService()
 
     async def get_caller_memory(
         self,
@@ -81,10 +87,12 @@ class MemoryManager:
                     return k_low
                 if "name" in k_low:
                     return "customer_name"
-                if "allergy" in k_low or "allergies" in k_low:
+                if any(term in k_low for term in ("allergy", "allergies", "allergic")):
                     return "allergies"
-
-
+                if any(term in k_low for term in ("doctor", "physician", "specialist", "provider")):
+                    return "preferred_doctor"
+                if any(term in k_low for term in ("diabet", "condition", "diagnosis", "medical_condition")):
+                    return "medical_conditions"
                 if any(term in k_low for term in ("comm", "whatsapp", "sms", "email", "notification", "remind")):
                     return "communication_preference"
                 if any(term in k_low for term in ("format", "mode", "video", "in_person", "consultation")):
@@ -110,6 +118,16 @@ class MemoryManager:
                 if canonical_key in ("preferred_time", "consultation_format"):
                     merged_data.pop("preference_key", None)
                     merged_data.pop("preferred_schedule", None)
+                    merged_data.pop("appointment_preference", None)
+                elif canonical_key == "preferred_doctor":
+                    merged_data.pop("doctor", None)
+                    merged_data.pop("medical_notes", None)
+                elif canonical_key == "allergies":
+                    merged_data.pop("known_allergies", None)
+                    merged_data.pop("medical_notes", None)
+                elif canonical_key == "medical_conditions":
+                    merged_data.pop("diabetes_status", None)
+                    merged_data.pop("diabetic", None)
                 
                 # If value is a structured dict with confidence or timestamp
                 if isinstance(value, dict) and "value" in value:
@@ -126,43 +144,147 @@ class MemoryManager:
                         "updated_at": now_iso
                     }
 
-            # 4. Save to PostgreSQL
+            # 4. Save to PostgreSQL structured profile
             updated_row = await self.system_db.upsert_caller_profile(
                 client_id=client_id,
                 domain_id=domain_id,
                 caller_identifier=clean_identifier,
                 profile_data=merged_data
             )
+
+            # 4b. Replicate memory across linked identifiers (e.g. customer_name, phone_number)
+            linked_candidates = []
+            for id_key in ("customer_name", "preferred_name", "phone_number", "patient_id", "id"):
+                if id_key in merged_data:
+                    c_val = merged_data[id_key].get("value") if isinstance(merged_data[id_key], dict) else merged_data[id_key]
+                    if c_val and str(c_val).strip() and str(c_val).strip() != clean_identifier:
+                        linked_candidates.append(str(c_val).strip())
+
+            for l_cand in set(linked_candidates):
+                try:
+                    await self.system_db.upsert_caller_profile(
+                        client_id=client_id,
+                        domain_id=domain_id,
+                        caller_identifier=l_cand,
+                        profile_data=merged_data
+                    )
+                except Exception as sync_err:
+                    logger.warning(f"Failed to sync memory to linked candidate {l_cand}: {sync_err}")
+
+            # 5. Vectorize & Save Memory Chunks to caller_memory_vectors (Memory RAG)
+            try:
+                gemini_key = await self.system_db.get_client_gemini_key(client_id)
+                items_to_embed = []
+                for k, v in merged_data.items():
+                    if k.startswith("_"):
+                        continue
+                    val_str = v.get("value") if isinstance(v, dict) else v
+                    if val_str is not None and str(val_str).strip():
+                        readable_k = k.replace("_", " ").title()
+                        content_str = f"{readable_k}: {val_str}"
+                        items_to_embed.append((k, content_str))
+
+                if items_to_embed:
+                    texts = [item[1] for item in items_to_embed]
+                    vectors = await self.embedding_service.embed_batch(texts, api_key=gemini_key)
+                    target_identifiers = [clean_identifier] + list(set(linked_candidates))
+                    active_keys = [item[0] for item in items_to_embed]
+                    for target_id in target_identifiers:
+                        # 1. Prune any stale vector chunks no longer in active profile
+                        await self.system_db.delete_stale_memory_vectors(
+                            client_id=client_id,
+                            domain_id=domain_id,
+                            caller_identifier=target_id,
+                            active_keys=active_keys
+                        )
+                        # 2. Upsert active vector chunks
+                        for (k, content_str), vec in zip(items_to_embed, vectors):
+                            await self.system_db.upsert_memory_vector(
+                                client_id=client_id,
+                                domain_id=domain_id,
+                                caller_identifier=target_id,
+                                memory_key=k,
+                                content=content_str,
+                                embedding=vec,
+                                confidence_score=1.0
+                            )
+            except Exception as vec_err:
+                logger.warning(f"Error vectorizing memory facts for {clean_identifier}: {vec_err}")
+
             return updated_row
         except Exception as e:
             logger.error(f"Error upserting caller memory for {caller_identifier}: {e}")
             return None
 
+    async def retrieve_relevant_memories(
+        self,
+        client_id: int,
+        domain_id: Optional[int],
+        caller_identifier: str,
+        query_text: str,
+        top_k: int = 3,
+        min_similarity: float = 0.55
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves Top-K relevant memory vectors for a caller based on semantic similarity to query_text.
+        """
+        if not caller_identifier or not str(caller_identifier).strip() or not query_text or not query_text.strip():
+            return []
+
+        try:
+            gemini_key = await self.system_db.get_client_gemini_key(client_id)
+            query_vector = await self.embedding_service.embed_text(query_text.strip(), api_key=gemini_key)
+            if not query_vector:
+                return []
+
+            matched = await self.system_db.search_caller_memory_vectors(
+                client_id=client_id,
+                domain_id=domain_id,
+                caller_identifier=str(caller_identifier).strip(),
+                query_vector=query_vector,
+                top_k=top_k,
+                min_similarity=min_similarity
+            )
+            return matched
+        except Exception as e:
+            logger.error(f"Error retrieving vector memories for {caller_identifier}: {e}")
+            return []
+
     @staticmethod
-    def format_memory_for_prompt(profile_data: Optional[Dict[str, Any]]) -> str:
+    def format_memory_for_prompt(
+        profile_data: Optional[Dict[str, Any]] = None,
+        retrieved_memories: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
         """
-        Converts caller profile facts into a concise markdown context block
-        for zero-latency injection into system prompts (< 80 tokens).
+        Converts caller profile facts or retrieved semantic vector memories
+        into a concise markdown context block for zero-latency injection into system prompts (< 80 tokens).
         """
-        if not profile_data or not isinstance(profile_data, dict):
-            return ""
-
         facts_lines: List[str] = []
-        for key, entry in profile_data.items():
-            # Skip internal metadata keys
-            if key.startswith("_"):
-                continue
 
-            # Handle both dictionary entries with 'value' and flat values
-            if isinstance(entry, dict) and "value" in entry:
-                val = entry["value"]
-            else:
-                val = entry
+        # If retrieved vector chunks are provided (Memory RAG mode)
+        if retrieved_memories and isinstance(retrieved_memories, list):
+            for mem in retrieved_memories:
+                content = mem.get("content")
+                if content and str(content).strip():
+                    facts_lines.append(f"- {content.strip()}")
 
-            if val is not None and str(val).strip():
-                # Format key for human readability (e.g., 'preferred_delivery_time' -> 'Preferred Delivery Time')
-                clean_key = key.replace("_", " ").title()
-                facts_lines.append(f"- {clean_key}: {val}")
+        # Fallback to full profile dictionary if no retrieved vector chunks
+        elif profile_data and isinstance(profile_data, dict):
+            for key, entry in profile_data.items():
+                # Skip internal metadata keys
+                if key.startswith("_"):
+                    continue
+
+                # Handle both dictionary entries with 'value' and flat values
+                if isinstance(entry, dict) and "value" in entry:
+                    val = entry["value"]
+                else:
+                    val = entry
+
+                if val is not None and str(val).strip():
+                    # Format key for human readability (e.g., 'preferred_delivery_time' -> 'Preferred Delivery Time')
+                    clean_key = key.replace("_", " ").title()
+                    facts_lines.append(f"- {clean_key}: {val}")
 
         if not facts_lines:
             return ""

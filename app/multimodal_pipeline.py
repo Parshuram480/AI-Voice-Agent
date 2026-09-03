@@ -147,6 +147,10 @@ class GeminiLivePipeline:
         
         # State for tools
         state = {
+            "client_id": kwargs.get("client_id"),
+            "domain_id": kwargs.get("domain_id"),
+            "caller_identifier": kwargs.get("caller_identifier"),
+            "caller_phone": kwargs.get("caller_phone") or kwargs.get("caller_identifier"),
             "verified": False,
             "user_name": None,
             "dob": None,
@@ -185,12 +189,12 @@ class GeminiLivePipeline:
             api_key=gemini_api_key
         )
         
-        # Initialize filler service with API key if available and not already initialized
+        # Initialize filler service with API key if available and not already initialized (non-blocking)
         if self.filler_service and not self.filler_service.is_ready and gemini_api_key:
             try:
-                await self.filler_service.initialize(api_key=gemini_api_key)
+                asyncio.create_task(self.filler_service.initialize(api_key=gemini_api_key))
             except Exception as e:
-                logger.warning(f"Failed to initialize filler service: {e}")
+                logger.warning(f"Failed to trigger filler service initialization: {e}")
         
         # Connect to Gemini
         try:

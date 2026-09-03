@@ -19,7 +19,17 @@ class DynamicToolExecutor:
         self.identity_verify_col = identity_verify_col
 
     async def execute(self, tool_call_id: str, name: str, args: dict, state: dict) -> types.FunctionResponse:
-        """Execute the tool and return FunctionResponse."""
+        # 1. Alias resolution for common function names
+        if name not in self.execution_map:
+            if name == "verify_user" and "verify_user_identity" in self.execution_map:
+                name = "verify_user_identity"
+            elif name == "verify_user_identity" and "verify_user" in self.execution_map:
+                name = "verify_user"
+            elif name.startswith("get_") and f"lookup_{name[4:]}" in self.execution_map:
+                name = f"lookup_{name[4:]}"
+            elif name.startswith("lookup_") and f"get_{name[7:]}" in self.execution_map:
+                name = f"get_{name[7:]}"
+
         if name not in self.execution_map:
             logger.warning(f"Unknown tool call: {name}")
             return types.FunctionResponse(
@@ -48,24 +58,37 @@ class DynamicToolExecutor:
                 logger.info(f"Running verification for args: {args}")
                 
                 import re
+                
+                def _normalize_dob(dob_str: str) -> str:
+                    clean = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', str(dob_str).lower().strip())
+                    clean = clean.replace(',', ' ').strip()
+                    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%m-%d-%Y", "%m/%d/%Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+                        try:
+                            return datetime.datetime.strptime(clean, fmt).strftime("%Y-%m-%d")
+                        except ValueError:
+                            pass
+                    return str(dob_str).strip()
+
                 params = []
                 for k in tool_entry.get("param_order", args.keys()):
                     val = args.get(k)
+                    if val is None:
+                        # Synonym fallback matching
+                        if k in (self.identity_name_col, "full_name", "name", "customer_name", "username"):
+                            val = args.get("name") or args.get("full_name") or args.get("customer_name") or args.get("username")
+                        elif k in (self.identity_verify_col, "date_of_birth", "dob", "birth_date"):
+                            val = args.get("dob") or args.get("date_of_birth") or args.get("birth_date") or args.get("date")
+
                     if isinstance(val, str):
-                        if k == self.identity_name_col:
-                            # Replace punctuation with wildcards to handle "Alice. Smith" matching "Alice Smith"
-                            # or "O'Connor" matching properly without stripping the apostrophe.
+                        if k == self.identity_name_col or k in ("name", "full_name", "username"):
                             clean_val = re.sub(r'[^\w\s]', '%', val)
                             clean_val = re.sub(r'%+', '%', clean_val).strip()
                             val = f"%{clean_val}%"
-                        elif "date" in k.lower() or "birth" in k.lower() or "dob" in k.lower():
-                            val = re.sub(r'(st|nd|rd|th)', '', val.lower()).strip()
-                        elif (k == self.identity_verify_col or k.lower() == "id") and val.strip().isdigit():
-                            val = int(val.strip())
+                        elif "date" in k.lower() or "birth" in k.lower() or "dob" in k.lower() or k == self.identity_verify_col:
+                            val = _normalize_dob(val)
                     params.append(val)
                 rows = await self._db_client.execute_query(sql, tuple(params))
 
-                
                 if not rows:
                     response_data = {
                         "verified": False,
@@ -92,17 +115,38 @@ class DynamicToolExecutor:
                         sys_db = SystemDatabase()
                         name_val = row.get(self.identity_name_col) or row.get("full_name") or row.get("name")
                         id_val = row.get("id")
-                        c_profile = None
-                        for cand in [name_val, str(id_val) if id_val is not None else None]:
-                            if cand:
-                                c_profile = await sys_db.get_caller_profile(state.get("client_id", 1), None, str(cand))
-                                if c_profile and c_profile.get("profile_data"):
-                                    break
-                        if c_profile and c_profile.get("profile_data"):
+                        phone_val = row.get("phone") or row.get("phone_number") or row.get("phone_num") or state.get("caller_phone") or state.get("caller_identifier")
+                        
+                        raw_cid = state.get("client_id")
+                        client_id_val = int(raw_cid) if raw_cid and str(raw_cid).isdigit() else 1
+                        
+                        merged_profile_data = {}
+                        candidate_keys = []
+                        for cand in [name_val, str(id_val) if id_val is not None else None, phone_val]:
+                            if cand and str(cand).strip():
+                                clean_cand = str(cand).strip()
+                                if clean_cand not in candidate_keys:
+                                    candidate_keys.append(clean_cand)
+                                p = await sys_db.get_caller_profile(client_id_val, None, clean_cand)
+                                if p and p.get("profile_data"):
+                                    for k, v in p["profile_data"].items():
+                                        v_val = v.get("value") if isinstance(v, dict) else v
+                                        if v_val is not None and str(v_val).strip() != "" and str(v_val).lower() not in ("none", "null", "no known allergies", "no allergies"):
+                                            merged_profile_data[k] = v
+                                        elif k not in merged_profile_data:
+                                            merged_profile_data[k] = v
+
+                        if merged_profile_data:
                             response_data["caller_profile_preferences"] = {
                                 k: v.get("value") if isinstance(v, dict) else v
-                                for k, v in c_profile["profile_data"].items()
+                                for k, v in merged_profile_data.items()
                             }
+                            # Sync merged data across candidate identifiers for consistency
+                            for clean_cand in candidate_keys:
+                                try:
+                                    await sys_db.upsert_caller_profile(client_id_val, state.get("domain_id"), clean_cand, merged_profile_data)
+                                except Exception:
+                                    pass
                     except Exception as mem_fetch_err:
                         logger.warning(f"Could not attach caller memory to verification response: {mem_fetch_err}")
                     

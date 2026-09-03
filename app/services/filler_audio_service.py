@@ -126,8 +126,7 @@ class FillerAudioService:
         Loads cached clips from disk or generates them if missing.
         Should be called at server startup.
         """
-        if api_key:
-            self.api_key = api_key
+        self.api_key = api_key or self.api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
             
         self.voice_cache_dir.mkdir(parents=True, exist_ok=True)
         
@@ -146,12 +145,6 @@ class FillerAudioService:
                 
         # Generate or load
         tasks = []
-        if not self.api_key:
-            logger.warning("GOOGLE_API_KEY not set. FillerAudioService disabled.")
-            return
-
-        client = genai.Client(api_key=self.api_key)
-
         for lang, categories in FILLER_PHRASES.items():
             # Skip genders that do not match the current voice
             if lang.startswith("hi_") and lang != f"hi_{self.voice_gender}":
@@ -174,27 +167,32 @@ class FillerAudioService:
                             # Generate and save
                             tasks.append((lang, category, lat_type, phrase, filepath))
         
-        if tasks:
-            logger.info(f"Generating {len(tasks)} missing filler clips via Gemini Live WebSocket API...")
-            
-            # Process sequentially to respect strict free-tier rate limits (e.g. 10 requests)
-            for i, (lang, category, lat_type, phrase, filepath) in enumerate(tasks, 1):
-                try:
-                    await self._generate_and_cache(client, lang, category, lat_type, phrase, filepath)
-                    logger.info(f"Generated clip {i}/{len(tasks)}: '{phrase}'")
-                    await asyncio.sleep(2) # Brief pause between sequential requests
-                except Exception as e:
-                    if "429" in str(e):
-                        logger.error(f"Rate limit exceeded (429) while generating '{phrase}'. Stopping filler generation for this startup to allow the server to boot. Restart later to generate the rest.")
-                        break # Stop generating the rest to avoid hanging the startup
-                    else:
-                        logger.error(f"Failed to generate filler clip for '{phrase}': {e}")
-            
-            logger.info(f"Finished generating clips.")
-        else:
-            logger.info("All filler clips loaded from disk cache.")
-            
         self.is_ready = True
+        logger.info("✓ Loaded existing filler clips from disk cache.")
+
+        if tasks and self.api_key:
+            logger.info(f"Starting background generation of {len(tasks)} missing filler clips...")
+            client = genai.Client(api_key=self.api_key)
+            asyncio.create_task(self._process_missing_clips(client, tasks))
+        elif not self.api_key:
+            logger.warning("No Gemini API key found for generating missing filler clips; existing cached clips will be used.")
+
+    async def _process_missing_clips(self, client, tasks):
+        for i, (lang, category, lat_type, phrase, filepath) in enumerate(tasks, 1):
+            try:
+                await self._generate_and_cache(client, lang, category, lat_type, phrase, filepath)
+                if filepath.exists():
+                    pcm_data = self._load_wav(filepath)
+                    self._cache[lang][category][lat_type].append(pcm_data)
+                logger.info(f"Generated clip {i}/{len(tasks)}: '{phrase}'")
+                await asyncio.sleep(2)
+            except Exception as e:
+                if "429" in str(e):
+                    logger.error(f"Rate limit exceeded (429) while generating '{phrase}'. Stopping background filler generation.")
+                    break
+                else:
+                    logger.error(f"Failed to generate filler clip for '{phrase}': {e}")
+        logger.info("Finished background filler generation.")
 
     async def _generate_and_cache(self, client, lang: str, category: str, lat_type: str, phrase: str, filepath: Path):
         """Generates a single clip using Gemini Live API, with retries for errors."""

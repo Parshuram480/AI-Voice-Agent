@@ -282,6 +282,48 @@ class SystemDatabase:
             CREATE INDEX IF NOT EXISTS idx_learned_rules_domain_status ON domain_learned_rules(domain_id, status);
             """)
 
+            # 10. Continuous Learning: Vectorized Caller Semantic Memories (pgvector Memory RAG)
+            try:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS caller_memory_vectors (
+                    id                  SERIAL PRIMARY KEY,
+                    client_id           INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                    domain_id           INTEGER REFERENCES domains(id) ON DELETE CASCADE,
+                    caller_identifier   VARCHAR(255) NOT NULL,
+                    memory_key          VARCHAR(100) NOT NULL,
+                    content             TEXT NOT NULL,
+                    embedding           vector(768) NOT NULL,
+                    confidence_score    FLOAT DEFAULT 1.0,
+                    created_at          TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(client_id, domain_id, caller_identifier, memory_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_caller_memory_vectors_lookup 
+                    ON caller_memory_vectors(client_id, domain_id, caller_identifier);
+                CREATE INDEX IF NOT EXISTS idx_caller_memory_hnsw 
+                    ON caller_memory_vectors USING hnsw (embedding vector_cosine_ops);
+                """)
+            except Exception as vec_init_err:
+                logger.warning(f"pgvector native table init warning (falling back to jsonb if extension absent): {vec_init_err}")
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS caller_memory_vectors (
+                    id                  SERIAL PRIMARY KEY,
+                    client_id           INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                    domain_id           INTEGER REFERENCES domains(id) ON DELETE CASCADE,
+                    caller_identifier   VARCHAR(255) NOT NULL,
+                    memory_key          VARCHAR(100) NOT NULL,
+                    content             TEXT NOT NULL,
+                    embedding           JSONB NOT NULL,
+                    confidence_score    FLOAT DEFAULT 1.0,
+                    created_at          TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(client_id, domain_id, caller_identifier, memory_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_caller_memory_vectors_lookup 
+                    ON caller_memory_vectors(client_id, domain_id, caller_identifier);
+                """)
+
         # Seed standard domains
         await self._seed_domains()
 
@@ -803,6 +845,194 @@ class SystemDatabase:
             RETURNING *;
             """, client_id, domain_id, rule_category, trigger_condition, instruction, confidence_score, status)
             return dict(row)
+
+    # --- Continuous Learning: Vectorized Caller Semantic Memories (pgvector Memory RAG) ---
+    async def upsert_memory_vector(
+        self,
+        client_id: int,
+        domain_id: Optional[int],
+        caller_identifier: str,
+        memory_key: str,
+        content: str,
+        embedding: List[float],
+        confidence_score: float = 1.0
+    ) -> Dict[str, Any]:
+        """Insert or update a caller memory vector embedding using native pgvector or JSONB."""
+        pool = await self._get_conn()
+        vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        async with pool.acquire() as conn:
+            try:
+                # Try native pgvector column insertion
+                row = await conn.fetchrow("""
+                INSERT INTO caller_memory_vectors (
+                    client_id, domain_id, caller_identifier, memory_key, content, embedding, confidence_score, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6::vector, $7, NOW())
+                ON CONFLICT (client_id, domain_id, caller_identifier, memory_key)
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    embedding = EXCLUDED.embedding,
+                    confidence_score = EXCLUDED.confidence_score,
+                    updated_at = NOW()
+                RETURNING id, client_id, domain_id, caller_identifier, memory_key, content, confidence_score, created_at, updated_at;
+                """, client_id, domain_id, caller_identifier, memory_key, content, vec_str, confidence_score)
+                res = dict(row)
+                res["embedding"] = embedding
+                return res
+            except Exception as vec_err:
+                logger.warning(f"Native vector insert fallback error: {type(vec_err)} - {vec_err}")
+                emb_json = json.dumps(embedding)
+                row = await conn.fetchrow("""
+                INSERT INTO caller_memory_vectors (
+                    client_id, domain_id, caller_identifier, memory_key, content, embedding, confidence_score, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
+                ON CONFLICT (client_id, domain_id, caller_identifier, memory_key)
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    embedding = EXCLUDED.embedding,
+                    confidence_score = EXCLUDED.confidence_score,
+                    updated_at = NOW()
+                RETURNING *;
+                """, client_id, domain_id, caller_identifier, memory_key, content, emb_json, confidence_score)
+                res = dict(row)
+                if isinstance(res.get("embedding"), str):
+                    res["embedding"] = json.loads(res["embedding"])
+                return res
+
+    async def delete_stale_memory_vectors(
+        self,
+        client_id: int,
+        domain_id: Optional[int],
+        caller_identifier: str,
+        active_keys: List[str]
+    ) -> bool:
+        """Deletes vector memory chunks that are no longer present in the active profile."""
+        if not active_keys:
+            return False
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            try:
+                if domain_id:
+                    await conn.execute("""
+                    DELETE FROM caller_memory_vectors
+                    WHERE client_id = $1 AND domain_id = $2 AND caller_identifier = $3
+                      AND memory_key != ALL($4::text[])
+                    """, client_id, domain_id, caller_identifier, active_keys)
+                else:
+                    await conn.execute("""
+                    DELETE FROM caller_memory_vectors
+                    WHERE client_id = $1 AND caller_identifier = $2
+                      AND memory_key != ALL($3::text[])
+                    """, client_id, caller_identifier, active_keys)
+                return True
+            except Exception as del_err:
+                logger.warning(f"Error cleaning up stale vector memories: {del_err}")
+                return False
+
+    async def get_memory_vectors_for_caller(
+        self,
+        client_id: int,
+        domain_id: Optional[int],
+        caller_identifier: str
+    ) -> List[Dict[str, Any]]:
+        """Retrieve all vector memory chunks for a given caller."""
+        pool = await self._get_conn()
+        async with pool.acquire() as conn:
+            if domain_id:
+                rows = await conn.fetch("""
+                SELECT id, client_id, domain_id, caller_identifier, memory_key, content, confidence_score, created_at, updated_at
+                FROM caller_memory_vectors
+                WHERE client_id = $1 AND domain_id = $2 AND caller_identifier = $3
+                ORDER BY updated_at DESC
+                """, client_id, domain_id, caller_identifier)
+            else:
+                rows = await conn.fetch("""
+                SELECT id, client_id, domain_id, caller_identifier, memory_key, content, confidence_score, created_at, updated_at
+                FROM caller_memory_vectors
+                WHERE client_id = $1 AND caller_identifier = $2
+                ORDER BY updated_at DESC
+                """, client_id, caller_identifier)
+            
+            return [dict(r) for r in rows]
+
+    async def search_caller_memory_vectors(
+        self,
+        client_id: int,
+        domain_id: Optional[int],
+        caller_identifier: str,
+        query_vector: List[float],
+        top_k: int = 3,
+        min_similarity: float = 0.5
+    ) -> List[Dict[str, Any]]:
+        """Perform semantic Top-K cosine similarity search using native pgvector cosine operator (<=>) with HNSW."""
+        if not query_vector:
+            return []
+        
+        vec_str = "[" + ",".join(str(x) for x in query_vector) + "]"
+        pool = await self._get_conn()
+        
+        try:
+            async with pool.acquire() as conn:
+                if domain_id:
+                    rows = await conn.fetch("""
+                    SELECT id, client_id, domain_id, caller_identifier, memory_key, content, confidence_score,
+                           (1 - (embedding <=> $4::vector)) AS similarity,
+                           created_at, updated_at
+                    FROM caller_memory_vectors
+                    WHERE client_id = $1 AND domain_id = $2 AND caller_identifier = $3
+                      AND (1 - (embedding <=> $4::vector)) >= $5
+                    ORDER BY embedding <=> $4::vector ASC
+                    LIMIT $6;
+                    """, client_id, domain_id, caller_identifier, vec_str, min_similarity, top_k)
+                else:
+                    rows = await conn.fetch("""
+                    SELECT id, client_id, domain_id, caller_identifier, memory_key, content, confidence_score,
+                           (1 - (embedding <=> $3::vector)) AS similarity,
+                           created_at, updated_at
+                    FROM caller_memory_vectors
+                    WHERE client_id = $1 AND caller_identifier = $2
+                      AND (1 - (embedding <=> $3::vector)) >= $4
+                    ORDER BY embedding <=> $3::vector ASC
+                    LIMIT $5;
+                    """, client_id, caller_identifier, vec_str, min_similarity, top_k)
+
+                results = []
+                for r in rows:
+                    item = dict(r)
+                    item["similarity"] = round(float(item["similarity"]), 4)
+                    results.append(item)
+                return results
+
+        except Exception as native_err:
+            logger.debug(f"pgvector native search fallback to in-memory cosine: {native_err}")
+            # In-memory fallback if pgvector operator fails
+            vectors = await self.get_memory_vectors_for_caller(client_id, domain_id, caller_identifier)
+            if not vectors:
+                return []
+
+            scored_memories = []
+            norm_q = sum(x * x for x in query_vector) ** 0.5
+            if norm_q == 0:
+                return []
+
+            for vec in vectors:
+                emb = vec.get("embedding", [])
+                if not emb or len(emb) != len(query_vector):
+                    continue
+                
+                dot = sum(a * b for a, b in zip(query_vector, emb))
+                norm_v = sum(x * x for x in emb) ** 0.5
+                if norm_v == 0:
+                    continue
+                
+                sim = dot / (norm_q * norm_v)
+                if sim >= min_similarity:
+                    vec_copy = dict(vec)
+                    vec_copy["similarity"] = round(sim, 4)
+                    scored_memories.append(vec_copy)
+
+            scored_memories.sort(key=lambda x: x["similarity"], reverse=True)
+            return scored_memories[:top_k]
+
 
 
 

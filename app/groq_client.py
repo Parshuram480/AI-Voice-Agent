@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # --- Environment Variables ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 
 
@@ -33,7 +34,7 @@ class GroqClient:
     
     Provides three core capabilities:
         1. speech_to_text  — Whisper-based transcription (Groq)
-        2. chat_completion — LLM chat (Groq or OpenAI based on LLM_PROVIDER)
+        2. chat_completion — LLM chat (Groq, OpenAI, or Google Gemini based on LLM_PROVIDER)
         3. text_to_speech  — Orpheus TTS (Groq)
     """
 
@@ -42,8 +43,10 @@ class GroqClient:
     
     if LLM_PROVIDER == "openai":
         DEFAULT_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+    elif LLM_PROVIDER in ("gemini", "google"):
+        DEFAULT_LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     else:
-        DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+        DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
         
     TTS_MODEL = os.getenv("TTS_MODEL", "canopylabs/orpheus-v1-english")
     TTS_VOICE = os.getenv("TTS_VOICE", "hannah")
@@ -53,20 +56,32 @@ class GroqClient:
         Initialize the AI client.
         """
         self._groq_api_key = api_key or GROQ_API_KEY
-        if not self._groq_api_key:
-            logger.warning("GROQ_API_KEY is not set — Groq API calls (STT/TTS) will fail.")
+        if not self._groq_api_key and LLM_PROVIDER == "groq":
+            logger.warning("GROQ_API_KEY is not set — Groq API calls will fail.")
 
-        self.provider = provider or LLM_PROVIDER
-        self.llm_model = default_model or self.DEFAULT_LLM_MODEL
+        self.provider = (provider or os.getenv("LLM_PROVIDER", "groq")).lower()
+        if self.provider in ("gemini", "google"):
+            self.llm_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        elif self.provider == "openai":
+            self.llm_model = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+        else:
+            self.llm_model = default_model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
         
         # Official SDK client for Groq (STT/TTS)
-        self._client = AsyncGroq(api_key=self._groq_api_key)
+        self._client = AsyncGroq(api_key=self._groq_api_key or "dummy_key")
         
-        # LLM Client (OpenAI or Groq)
+        # LLM Client (OpenAI, Gemini, or Groq)
         if self.provider == "openai":
             if not OPENAI_API_KEY:
                 logger.warning("OPENAI_API_KEY is not set — OpenAI API calls will fail.")
             self._llm_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        elif self.provider in ("gemini", "google"):
+            if not GEMINI_API_KEY:
+                logger.warning("GEMINI_API_KEY is not set — Gemini API calls will fail.")
+            self._llm_client = AsyncOpenAI(
+                api_key=GEMINI_API_KEY,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+            )
         else:
             self._llm_client = self._client
 
@@ -171,6 +186,8 @@ class GroqClient:
             The assistant's reply as a string, or the full response object if return_full_response is True.
         """
         model = model or self.llm_model
+        if self.provider in ("gemini", "google") and ("llama" in model.lower() or "gpt" in model.lower()):
+            model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         stage_info = f" [{stage}]" if stage else ""
         logger.info(f"LLM{stage_info}: Calling {model} with {len(messages)} messages")
 
@@ -243,6 +260,8 @@ class GroqClient:
             Token strings, one at a time.
         """
         model = model or self.llm_model
+        if self.provider in ("gemini", "google") and ("llama" in model.lower() or "gpt" in model.lower() or "gemini-2" in model.lower()):
+            model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         logger.info(f"LLM stream-tokens: {model}, {len(messages)} messages")
 
         stream = await self._llm_client.chat.completions.create(

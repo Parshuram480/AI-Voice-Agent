@@ -428,20 +428,28 @@ class DynamicDbClient:
         # Execute
         try:
             async with pool.acquire() as conn:
+                # 1. Try with raw params first
+                try:
+                    rows = await conn.fetch(new_query, *params)
+                    return [dict(row) for row in rows]
+                except Exception:
+                    pass
+
+                # 2. Try with date-converted pg_params
                 try:
                     rows = await conn.fetch(new_query, *pg_params)
-                except Exception as first_err:
-                    logger.warning(f"PostgreSQL fetch with converted params failed ({first_err}), retrying with integer/string coerced params...")
-                    try:
-                        int_params = [int(p.strip()) if (isinstance(p, str) and p.strip().isdigit()) else p for p in pg_params]
-                        rows = await conn.fetch(new_query, *int_params)
-                    except Exception:
-                        str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
-                        try:
-                            rows = await conn.fetch(new_query, *str_params)
-                        except Exception:
-                            raise first_err
-                return [dict(row) for row in rows]
+                    return [dict(row) for row in rows]
+                except Exception:
+                    pass
+
+                # 3. Try with string-coerced params
+                try:
+                    str_params = [p.isoformat() if hasattr(p, "isoformat") else str(p) for p in params]
+                    rows = await conn.fetch(new_query, *str_params)
+                    return [dict(row) for row in rows]
+                except Exception as final_err:
+                    logger.error(f"PostgreSQL error running query: {final_err}")
+                    raise final_err
         except Exception as e:
             logger.error(f"PostgreSQL error running query: {e}")
             raise e
